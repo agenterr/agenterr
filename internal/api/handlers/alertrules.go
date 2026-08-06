@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,6 +22,12 @@ const (
 	maxAlertHeaders      = 32
 	maxAlertHeadersBytes = 4096
 )
+
+// defaultCooldownSeconds is the alert semantics doc's documented default:
+// applied when a create omits cooldown_seconds entirely. An explicit 0 is a
+// legal, deliberate value (no cooldown — fire every time) and must not be
+// coerced into this default; see alertRuleBody.CooldownSeconds.
+const defaultCooldownSeconds = 900
 
 // validAlertKinds mirrors core.AlertRuleKind's three known values.
 var validAlertKinds = map[core.AlertRuleKind]bool{
@@ -126,7 +133,6 @@ type alertRuleBody struct {
 	MinSeverity     string            `json:"min_severity"`
 	N               int               `json:"n"`
 	WindowMinutes   int               `json:"window_minutes"`
-	CooldownSeconds int               `json:"cooldown_seconds"`
 	URL             string            `json:"url"`
 	Headers         map[string]string `json:"headers"`
 	// Enabled is a pointer so omitting it is distinguishable from an
@@ -134,13 +140,21 @@ type alertRuleBody struct {
 	// preserves the rule's current enabled state instead of clobbering it
 	// back to disabled — same contract as noise rules.
 	Enabled *bool `json:"enabled"`
+	// CooldownSeconds is a pointer for the same reason as Enabled: on
+	// create, nil defaults to defaultCooldownSeconds (900); on update, nil
+	// preserves the rule's current value. An explicit 0 is honored as-is
+	// (deliberately no cooldown) rather than being coerced to the default.
+	CooldownSeconds *int `json:"cooldown_seconds"`
 }
 
 // validateAlertRuleBody applies the alert semantics doc's validation,
 // which runs on both create and update (unlike noise rules' create-only
 // params check): kind known; url parses as http/https; threshold requires
-// n>=1 and window_minutes>=1; cooldown_seconds>=0; min_severity a strict
-// severity name when present; headers within the size caps.
+// n>=1 and window_minutes>=1; min_severity a strict severity name when
+// present; headers within the size caps. cooldown_seconds is validated
+// separately (validateCooldownSeconds) once its create-default/update-
+// preserve value has been resolved, mirroring how enabled is resolved
+// before use rather than validated straight off the wire body.
 func validateAlertRuleBody(body alertRuleBody, kind core.AlertRuleKind) error {
 	if !validAlertKinds[kind] {
 		return errors.New("kind: must be new_issue, regression, or threshold")
@@ -160,9 +174,6 @@ func validateAlertRuleBody(body alertRuleBody, kind core.AlertRuleKind) error {
 			return errors.New("window_minutes: must be >= 1 for threshold")
 		}
 	}
-	if body.CooldownSeconds < 0 {
-		return errors.New("cooldown_seconds: must be >= 0")
-	}
 	// ParseSeverityStrict accepts "" as "not supplied" (-> SeverityTrace,
 	// meaning "any"), so this rejects only genuine typos.
 	if _, ok := core.ParseSeverityStrict(body.MinSeverity); !ok {
@@ -174,20 +185,30 @@ func validateAlertRuleBody(body alertRuleBody, kind core.AlertRuleKind) error {
 	return nil
 }
 
+// validateCooldownSeconds checks the already-resolved (default-filled or
+// preserved) cooldown value — never the raw wire pointer, since nil isn't
+// a value to validate.
+func validateCooldownSeconds(n int) error {
+	if n < 0 {
+		return errors.New("cooldown_seconds: must be >= 0")
+	}
+	return nil
+}
+
 // validateAlertHeaders rejects header maps that could wedge an unbounded
 // payload into storage or the outbound webhook POST: more than
 // maxAlertHeaders entries, or more than maxAlertHeadersBytes summed across
 // every key+value.
 func validateAlertHeaders(h map[string]string) error {
 	if len(h) > maxAlertHeaders {
-		return errors.New("headers: too many entries (max 32)")
+		return fmt.Errorf("headers: too many entries (max %d)", maxAlertHeaders)
 	}
 	var total int
 	for k, v := range h {
 		total += len(k) + len(v)
 	}
 	if total > maxAlertHeadersBytes {
-		return errors.New("headers: too large (max 4KB total)")
+		return fmt.Errorf("headers: too large (max %d bytes total)", maxAlertHeadersBytes)
 	}
 	return nil
 }
@@ -222,17 +243,20 @@ func (a *AlertRules) Create(w http.ResponseWriter, r *http.Request) {
 	// Already validated above; ok is guaranteed true here.
 	minSeverity, _ := core.ParseSeverityStrict(body.MinSeverity)
 
-	// enabled starts at the create default (true) or, for an update, the
-	// rule's current state — either is overridden below if the caller
-	// supplied an explicit value.
+	// enabled/cooldownSeconds each start at their create default (true /
+	// defaultCooldownSeconds) or, for an update, the rule's current state
+	// — either is overridden below if the caller supplied an explicit
+	// value. Both follow the same *T-pointer contract: nil is
+	// distinguishable from an explicit zero value.
 	enabled := true
+	cooldownSeconds := defaultCooldownSeconds
 	if body.ID != 0 {
 		// Updating an existing rule: fetch it both to verify ownership
 		// (non-admin — otherwise a project-bound key could hijack another
-		// project's rule by ID) and to seed enabled's preserve-on-omit
-		// default. Admins aren't scoped to one project, so their lookup
-		// spans all projects (projectID 0); a miss here still falls
-		// through to Upsert's own not-found handling.
+		// project's rule by ID) and to seed enabled/cooldownSeconds'
+		// preserve-on-omit defaults. Admins aren't scoped to one project,
+		// so their lookup spans all projects (projectID 0); a miss here
+		// still falls through to Upsert's own not-found handling.
 		lookupProjectID := callerProjectID
 		if isAdmin {
 			lookupProjectID = 0
@@ -244,10 +268,18 @@ func (a *AlertRules) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		if ok {
 			enabled = existing.Enabled
+			cooldownSeconds = existing.CooldownSeconds
 		}
 	}
 	if body.Enabled != nil {
 		enabled = *body.Enabled
+	}
+	if body.CooldownSeconds != nil {
+		cooldownSeconds = *body.CooldownSeconds
+	}
+	if err := validateCooldownSeconds(cooldownSeconds); err != nil {
+		respondErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	row, err := a.Engine.Upsert(r.Context(), core.AlertRule{
@@ -260,7 +292,7 @@ func (a *AlertRules) Create(w http.ResponseWriter, r *http.Request) {
 		MinSeverity:     minSeverity,
 		N:               body.N,
 		WindowMinutes:   body.WindowMinutes,
-		CooldownSeconds: body.CooldownSeconds,
+		CooldownSeconds: cooldownSeconds,
 		URL:             body.URL,
 		Headers:         body.Headers,
 		Enabled:         enabled,

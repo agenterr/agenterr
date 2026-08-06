@@ -1854,3 +1854,149 @@ func TestAlertRules_Test_UnknownID_Returns502(t *testing.T) {
 		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }
+
+func TestAlertRules_Create_OmittedCooldown_DefaultsTo900(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"x","kind":"new_issue","url":"https://example.com/hook"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		CooldownSeconds int `json:"cooldown_seconds"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.CooldownSeconds != 900 {
+		t.Errorf("created.CooldownSeconds = %d, want 900 (omitted must default per alert semantics)", created.CooldownSeconds)
+	}
+}
+
+func TestAlertRules_Create_ExplicitZeroCooldown_Honored(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"x","kind":"new_issue","url":"https://example.com/hook","cooldown_seconds":0}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		CooldownSeconds int `json:"cooldown_seconds"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.CooldownSeconds != 0 {
+		t.Errorf("created.CooldownSeconds = %d, want 0 (explicit zero must be honored, not coerced to the default)", created.CooldownSeconds)
+	}
+}
+
+func TestAlertRules_Update_OmittedCooldown_PreservesNonDefaultValue(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: "https://example.com/hook",
+		CooldownSeconds: 42, Enabled: true,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"id":1,"name":"changed","kind":"new_issue","url":"https://example.com/hook"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		CooldownSeconds int `json:"cooldown_seconds"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CooldownSeconds != 42 {
+		t.Errorf("got.CooldownSeconds = %d, want 42 (omitted on update must preserve current value, not reset to the create default)", got.CooldownSeconds)
+	}
+}
+
+func TestAlertRules_Update_ExplicitCooldown_Changes(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: "https://example.com/hook",
+		CooldownSeconds: 42, Enabled: true,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"id":1,"name":"x","kind":"new_issue","url":"https://example.com/hook","cooldown_seconds":300}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		CooldownSeconds int `json:"cooldown_seconds"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CooldownSeconds != 300 {
+		t.Errorf("got.CooldownSeconds = %d, want 300 (explicit value on update must be honored)", got.CooldownSeconds)
+	}
+}
+
+func TestAlertRules_Create_ExplicitFalseEnabled_StoredDisabled(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"x","kind":"new_issue","url":"https://example.com/hook","enabled":false}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Enabled {
+		t.Errorf("created.Enabled = true, want false (explicit false on create must be honored)")
+	}
+}
+
+func TestAlertRules_Update_ExplicitTrueEnabled_ReEnables(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: false,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"id":1,"name":"x","kind":"new_issue","url":"https://example.com/hook","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Enabled {
+		t.Errorf("got.Enabled = false, want true (explicit true on update of a disabled rule must re-enable it)")
+	}
+}
