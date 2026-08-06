@@ -208,6 +208,70 @@ func TestCapEviction(t *testing.T) {
 	}
 }
 
+// --- Regression: Dropped() must survive a restart, and keep accumulating ---
+//
+// checkpoint.json persists the dropped count alongside the ack position;
+// Open must restore it rather than zero-initializing it, or cap-eviction
+// losses go silently unaccounted for across a restart.
+func TestDroppedSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	payload := make([]byte, 1000)
+	for i := range payload {
+		payload[i] = 'w'
+	}
+	recordJSON := func(i int) []byte {
+		b, _ := json.Marshal(map[string]any{"n": i, "pad": string(payload)})
+		return b
+	}
+
+	const cap = 5 * 1024 * 1024
+	s, err := Open(dir, cap)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	for i := 0; s.Dropped() == 0; i++ {
+		if err := s.Append(recordJSON(i)); err != nil {
+			t.Fatalf("Append(%d): %v", i, err)
+		}
+		if i > 20000 {
+			t.Fatal("eviction never triggered")
+		}
+	}
+	firstDropped := s.Dropped()
+	if firstDropped == 0 {
+		t.Fatal("expected Dropped() > 0 before restart")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s2, err := Open(dir, cap)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer s2.Close()
+
+	if got := s2.Dropped(); got != firstDropped {
+		t.Fatalf("Dropped() after restart = %d, want %d (the pre-restart value)", got, firstDropped)
+	}
+
+	// Force a second eviction post-restart: the count must accumulate on
+	// top of the restored value, not reset.
+	for i := 30000; s2.Dropped() == firstDropped; i++ {
+		if err := s2.Append(recordJSON(i)); err != nil {
+			t.Fatalf("Append(%d): %v", i, err)
+		}
+		if i > 60000 {
+			t.Fatal("second eviction never triggered")
+		}
+	}
+	if got := s2.Dropped(); got <= firstDropped {
+		t.Fatalf("Dropped() after second eviction = %d, want > %d", got, firstDropped)
+	}
+}
+
 // --- Behavior 4: torn tail is truncated at the last complete record on Open ---
 
 func TestTornTailTruncatedOnOpen(t *testing.T) {
@@ -274,6 +338,62 @@ func TestTornTailTruncatedOnOpen(t *testing.T) {
 	}
 	if len(got2) != 6 || string(got2[5]) != string(rec(99)) {
 		t.Fatalf("Next after post-repair append = %v, want 6 records ending in %s", got2, rec(99))
+	}
+}
+
+// --- Regression: torn-tail truncation accounting is explicit, not silent ---
+//
+// A torn tail is by definition an INCOMPLETE trailing line (no newline) —
+// it was never a fully-persisted record, so truncating it away must not
+// increment Dropped(). This pins that decision down (see Spool.Dropped's
+// doc comment) rather than leaving the loss unaccounted for one way or the
+// other.
+func TestTornTailDoesNotDoubleCountDropped(t *testing.T) {
+	dir := t.TempDir()
+
+	s, err := Open(dir, bigCap)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Append(rec(0)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if s.Dropped() != 0 {
+		t.Fatalf("Dropped() = %d before any tear, want 0", s.Dropped())
+	}
+
+	segFiles, err := filepath.Glob(filepath.Join(dir, "spool-*.jsonl"))
+	if err != nil || len(segFiles) != 1 {
+		t.Fatalf("expected 1 segment file, got %v (err=%v)", segFiles, err)
+	}
+	// Simulate a crash mid-write directly on the file (bypassing Append,
+	// and deliberately WITHOUT closing s first, per the reviewer's request
+	// to reopen without a clean Close).
+	f, err := os.OpenFile(segFiles[0], os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(`{"n":1,"garbage`)); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	s2, err := Open(dir, bigCap)
+	if err != nil {
+		t.Fatalf("re-Open with torn tail: %v", err)
+	}
+	defer s2.Close()
+
+	if got := s2.Dropped(); got != 0 {
+		t.Fatalf("Dropped() after torn-tail repair = %d, want 0 (an incomplete fragment was never a persisted record)", got)
+	}
+
+	got, _, err := s2.Next(10)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if len(got) != 1 || string(got[0]) != string(rec(0)) {
+		t.Fatalf("Next = %v, want exactly [%s]", got, rec(0))
 	}
 }
 

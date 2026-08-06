@@ -91,8 +91,14 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("buffer: repair torn tail: %w", err)
 	}
+	// A torn tail is always a trailing incomplete line (no newline): never
+	// a full record, so it never adds to the dropped count (see Dropped's
+	// doc comment) — but it's still folded through the same accounting
+	// path and logged, so a torn tail is never silent.
+	var tornRecordsLost int64
 	if newSize != last.size {
-		log.Printf("buffer: WARN torn tail truncated in %s: %d -> %d bytes", last.path, last.size, newSize)
+		log.Printf("buffer: WARN torn tail truncated in %s: %d -> %d bytes (%d complete records lost)",
+			last.path, last.size, newSize, tornRecordsLost)
 	}
 	last.size = newSize
 
@@ -116,6 +122,7 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 		ackedSeq:    cp.Seq,
 		ackedOffset: cp.Offset,
 		since:       since,
+		dropped:     cp.Dropped + tornRecordsLost,
 	}
 	if s.ackedSeq == 0 {
 		// Fresh spool, nothing acked yet: the checkpoint starts at the
@@ -124,6 +131,15 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 		s.ackedOffset = 0
 	}
 	s.normalizeCheckpointLocked()
+	if tornRecordsLost > 0 {
+		// Make the bumped count durable immediately rather than waiting for
+		// the next Ack/SetSince/eviction — a torn tail found on Open is
+		// exactly the kind of loss that must never be silently forgotten
+		// again if the process dies before anything else persists.
+		if err := s.persistCheckpointLocked(); err != nil {
+			return nil, fmt.Errorf("buffer: persist checkpoint after torn-tail repair: %w", err)
+		}
+	}
 	return s, nil
 }
 
@@ -345,7 +361,14 @@ func (s *Spool) Since(container string) (time.Time, bool) {
 	return t, ok
 }
 
-// Dropped returns the cumulative count of records lost to cap eviction.
+// Dropped returns the cumulative count of records lost: cap eviction (the
+// dominant case) plus torn-tail repair on Open. It survives restarts —
+// persisted with the checkpoint — so a loss is never silently forgotten.
+// In practice torn-tail repair never actually adds to this count: it only
+// ever discards a trailing incomplete line (no newline), which was never a
+// complete, persisted record to begin with; that path is still wired
+// through this same counter (and still logged) so the accounting story
+// stays in one place if that ever changes.
 func (s *Spool) Dropped() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,14 +384,14 @@ func (s *Spool) Close() error {
 	return s.curFile.Close()
 }
 
-// persistCheckpointLocked writes the current ack position and since map to
-// checkpoint.json. Caller holds s.mu.
+// persistCheckpointLocked writes the current ack position, since map, and
+// dropped count to checkpoint.json. Caller holds s.mu.
 func (s *Spool) persistCheckpointLocked() error {
 	sinceStr := make(map[string]string, len(s.since))
 	for k, t := range s.since {
 		sinceStr[k] = t.Format(time.RFC3339Nano)
 	}
-	cp := checkpointFile{Seq: s.ackedSeq, Offset: s.ackedOffset, Since: sinceStr}
+	cp := checkpointFile{Seq: s.ackedSeq, Offset: s.ackedOffset, Since: sinceStr, Dropped: s.dropped}
 	if err := saveCheckpoint(s.dir, cp); err != nil {
 		return fmt.Errorf("buffer: persist checkpoint: %w", err)
 	}

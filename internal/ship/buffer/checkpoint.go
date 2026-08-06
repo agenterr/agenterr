@@ -11,9 +11,10 @@ import (
 // (segment sequence + byte offset of the last acked record) plus the
 // per-container "since" timestamps used to resume docker log tailing.
 type checkpointFile struct {
-	Seq    int64             `json:"seq"`
-	Offset int64             `json:"offset"`
-	Since  map[string]string `json:"since"`
+	Seq     int64             `json:"seq"`
+	Offset  int64             `json:"offset"`
+	Since   map[string]string `json:"since"`
+	Dropped int64             `json:"dropped"` // cumulative records lost to cap eviction (+ torn-tail losses, always 0 today — see Spool.Dropped)
 }
 
 // checkpointPath returns the fixed checkpoint file location for dir.
