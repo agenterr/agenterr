@@ -123,7 +123,10 @@ func tailFile(ctx context.Context, path, service string, out chan<- ship.Sourced
 	}
 
 	// drain reads the currently-open file to EOF, emitting complete lines
-	// and holding back any trailing partial line in pending.
+	// and holding back any trailing partial line in pending. An
+	// un-terminated tail line in pending grows unbounded by design — this
+	// layer assumes writers eventually newline; the downstream joiner's
+	// byte cap is what governs record size, not this buffer.
 	drain := func() {
 		buf := make([]byte, readChunk)
 		for {
@@ -150,7 +153,23 @@ func tailFile(ctx context.Context, path, service string, out chan<- ship.Sourced
 		if err != nil {
 			return // path missing right now; keep the current handle, retry next poll
 		}
-		if !os.SameFile(openedInfo, fi) || fi.Size() < readBytes {
+		if !os.SameFile(openedInfo, fi) {
+			// Rename+recreate: the old fd still refers to the renamed-away
+			// file and is fully readable, so any lines written to it
+			// between the last drain() and the rename are still sitting
+			// there unread. Drain them through the normal path one last
+			// time before swapping to the new file, or they're lost the
+			// moment openFresh() closes this fd.
+			drain()
+			openFresh()
+			return
+		}
+		if fi.Size() < readBytes {
+			// Truncate-in-place (copytruncate): the old and new content
+			// share the same fd/inode, so there is no separate "old fd" to
+			// drain first — whatever was truncated away is simply gone at
+			// the OS level. This loss is inherent to copytruncate, not a
+			// gap in our detection.
 			openFresh()
 		}
 	}

@@ -155,6 +155,55 @@ func TestRotationViaRenameRecreate(t *testing.T) {
 	}
 }
 
+// TestRotationViaRenameRecreateDrainsPreRotationBurst covers a line written
+// to the old path and NOT drained before the rename+recreate fires: the
+// tailer must still read it off the old fd (which stays fully valid and
+// readable after the rename) before swapping to the new file, rather than
+// losing it when the old fd is closed.
+func TestRotationViaRenameRecreateDrainsPreRotationBurst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := startTail(t, filepath.Join(dir, "*.log"), "svc")
+
+	s := recv(t, out)
+	if s.Line.Text != "seed" {
+		t.Fatalf("got %+v", s)
+	}
+
+	// Write a line and immediately rename+recreate, before the tailer gets
+	// a chance to poll/drain it off the old fd.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("pre-rotation-burst\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if err := os.Rename(path, filepath.Join(dir, "app.log.1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("new-file-first-line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both lines must arrive, in order: the un-drained burst on the old fd,
+	// then the new file's content.
+	s = recv(t, out)
+	if s.Line.Text != "pre-rotation-burst" {
+		t.Fatalf("got %+v, want the pre-rotation burst to be drained before the swap", s)
+	}
+	s = recv(t, out)
+	if s.Line.Text != "new-file-first-line" {
+		t.Fatalf("got %+v", s)
+	}
+}
+
 func TestNewGlobMatchPickedUp(t *testing.T) {
 	dir := t.TempDir()
 	// No matching files exist yet when Tail starts.
