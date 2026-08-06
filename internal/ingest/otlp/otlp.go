@@ -38,12 +38,18 @@ const (
 // Handler serves the OTLP/HTTP logs ingest endpoint. It implements
 // ingest.Ingester.
 type Handler struct {
-	sink ingest.Sink
+	sink    ingest.Sink
+	maxBody int64
 }
 
-// New constructs a Handler that forwards decoded logs to sink.
-func New(sink ingest.Sink) *Handler {
-	return &Handler{sink: sink}
+// New constructs a Handler that forwards decoded logs to sink. maxBody caps
+// the accepted (decompressed) request body size in bytes; maxBody <= 0
+// falls back to ingest.MaxBody.
+func New(sink ingest.Sink, maxBody int64) *Handler {
+	if maxBody <= 0 {
+		maxBody = ingest.MaxBody
+	}
+	return &Handler{sink: sink, maxBody: maxBody}
 }
 
 // Mount registers the OTLP-spec-mandated route behind key auth.
@@ -67,11 +73,35 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	data, ok := readBoundedBody(w, r, h.maxBody)
+	if !ok {
+		return
+	}
+
+	req, err := unmarshalRequest(mediaType, data)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid OTLP request body")
+		return
+	}
+
+	logs := decodeLogs(projectID, req)
+	if len(logs) > 0 && !h.enqueue(w, logs) {
+		return
+	}
+
+	writeAccepted(w, mediaType)
+}
+
+// readBoundedBody reads r's (possibly gzip-compressed) body, bounded to
+// maxBody either way, writing an appropriate error response and
+// returning ok=false on any failure (bad encoding, bad gzip stream, or
+// body over the limit).
+func readBoundedBody(w http.ResponseWriter, r *http.Request, maxBody int64) ([]byte, bool) {
 	// MaxBytesReader bounds the wire (possibly gzip-compressed) stream; for
 	// gzip requests the decompressed stream is separately bounded below to
 	// guard against zip bombs (a small compressed body expanding far past
-	// ingest.MaxBody).
-	r.Body = http.MaxBytesReader(w, r.Body, ingest.MaxBody)
+	// maxBody).
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 
 	var reader io.Reader
 	switch enc := r.Header.Get("Content-Encoding"); {
@@ -81,13 +111,13 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 		gz, err := gzip.NewReader(r.Body)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid gzip body")
-			return
+			return nil, false
 		}
-		defer gz.Close()
-		reader = io.LimitReader(gz, ingest.MaxBody+1)
+		defer func() { _ = gz.Close() }()
+		reader = io.LimitReader(gz, maxBody+1)
 	default:
 		writeError(w, http.StatusUnsupportedMediaType, "unsupported content encoding")
-		return
+		return nil, false
 	}
 
 	data, err := io.ReadAll(reader)
@@ -95,44 +125,49 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
+			return nil, false
 		}
 		writeError(w, http.StatusBadRequest, "error reading request body")
-		return
+		return nil, false
 	}
-	if len(data) > ingest.MaxBody {
+	if int64(len(data)) > maxBody {
 		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		return
+		return nil, false
 	}
+	return data, true
+}
 
+// unmarshalRequest decodes data per mediaType (protobuf or JSON) into an
+// OTLP ExportLogsServiceRequest.
+func unmarshalRequest(mediaType string, data []byte) (*collectorlogspb.ExportLogsServiceRequest, error) {
 	var req collectorlogspb.ExportLogsServiceRequest
+	var err error
 	if mediaType == contentTypeProtobuf {
 		err = proto.Unmarshal(data, &req)
 	} else {
 		err = protojson.Unmarshal(data, &req)
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid OTLP request body")
-		return
+		return nil, err
 	}
+	return &req, nil
+}
 
-	logs := decodeLogs(projectID, &req)
-
-	if len(logs) > 0 {
-		if err := h.sink.Enqueue(logs); err != nil {
-			if errors.Is(err, pipeline.ErrFull) {
-				w.Header().Set("Retry-After", "1")
-				writeError(w, http.StatusTooManyRequests, "too many requests")
-				return
-			}
-			// Not expected in practice (Sink is documented to only ever
-			// return ErrFull), but handled rather than panicking.
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
+// enqueue hands logs to the sink, writing the appropriate error response
+// and returning false if that fails.
+func (h *Handler) enqueue(w http.ResponseWriter, logs []core.Log) bool {
+	if err := h.sink.Enqueue(logs); err != nil {
+		if errors.Is(err, pipeline.ErrFull) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "too many requests")
+			return false
 		}
+		// Not expected in practice (Sink is documented to only ever
+		// return ErrFull), but handled rather than panicking.
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return false
 	}
-
-	writeAccepted(w, mediaType)
+	return true
 }
 
 // decodeLogs walks resource -> scope -> records, mapping each record with

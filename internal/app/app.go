@@ -61,8 +61,8 @@ var Module = fx.Options(
 		asSink,
 		newAuth,
 		asSessionAuth,
-		fx.Annotate(otlp.New, fx.As(new(ingest.Ingester)), fx.ResultTags(`group:"ingesters"`)),
-		fx.Annotate(jsonapi.New, fx.As(new(ingest.Ingester)), fx.ResultTags(`group:"ingesters"`)),
+		fx.Annotate(newOTLPIngester, fx.As(new(ingest.Ingester)), fx.ResultTags(`group:"ingesters"`)),
+		fx.Annotate(newJSONAPIIngester, fx.As(new(ingest.Ingester)), fx.ResultTags(`group:"ingesters"`)),
 		api.New,
 		mcp.New,
 		web.New,
@@ -111,6 +111,18 @@ func newPipeline(cfg config.Config, w store.Writer, g pipeline.Grouper, n pipeli
 // asSink adapts *pipeline.Pipeline to the narrow ingest.Sink interface the
 // otlp/jsonapi edges depend on.
 func asSink(p *pipeline.Pipeline) ingest.Sink { return p }
+
+// newOTLPIngester and newJSONAPIIngester wire cfg.MaxBodyBytes into each
+// ingest edge's constructor rather than letting them fall back to
+// ingest.MaxBody unconditionally, so the configured limit (flag/env/
+// default, see internal/config) actually governs what the edges accept.
+func newOTLPIngester(cfg config.Config, sink ingest.Sink) *otlp.Handler {
+	return otlp.New(sink, cfg.MaxBodyBytes)
+}
+
+func newJSONAPIIngester(cfg config.Config, sink ingest.Sink) *jsonapi.Handler {
+	return jsonapi.New(sink, cfg.MaxBodyBytes)
+}
 
 // generatedPasswordBytes of crypto/rand output, base64url-encoded without
 // padding, yields exactly 24 characters (ceil(18/3)*4).

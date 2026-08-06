@@ -21,12 +21,18 @@ import (
 // Handler serves the plain-JSON ingest endpoint. It implements
 // ingest.Ingester.
 type Handler struct {
-	sink ingest.Sink
+	sink    ingest.Sink
+	maxBody int64
 }
 
-// New constructs a Handler that forwards decoded logs to sink.
-func New(sink ingest.Sink) *Handler {
-	return &Handler{sink: sink}
+// New constructs a Handler that forwards decoded logs to sink. maxBody caps
+// the accepted request body size in bytes; maxBody <= 0 falls back to
+// ingest.MaxBody.
+func New(sink ingest.Sink, maxBody int64) *Handler {
+	if maxBody <= 0 {
+		maxBody = ingest.MaxBody
+	}
+	return &Handler{sink: sink, maxBody: maxBody}
 }
 
 // Mount registers the ingest route behind key auth.
@@ -44,7 +50,7 @@ func (h *Handler) serveIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, ingest.MaxBody)
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBody)
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
