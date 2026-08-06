@@ -79,8 +79,8 @@ func testAlertRulesUpsertUpdateRoundTripsFields(t *testing.T, open func(t *testi
 		Service:         "api",
 		Environment:     "staging",
 		MinSeverity:     core.SeverityError,
-		N:               0,
-		WindowMinutes:   0,
+		N:               7,
+		WindowMinutes:   3,
 		CooldownSeconds: 900,
 		URL:             "https://example.com/b",
 		Headers:         map[string]string{"X-Token": "def", "Y": "z"},
@@ -94,6 +94,7 @@ func testAlertRulesUpsertUpdateRoundTripsFields(t *testing.T, open func(t *testi
 	}
 	if updated.Name != "regression rule" || updated.Kind != core.AlertRegression || updated.Service != "api" ||
 		updated.Environment != "staging" || updated.MinSeverity != core.SeverityError ||
+		updated.N != 7 || updated.WindowMinutes != 3 ||
 		updated.CooldownSeconds != 900 || updated.URL != "https://example.com/b" || updated.Enabled {
 		t.Errorf("updated row = %+v, unexpected values", updated)
 	}
@@ -110,6 +111,9 @@ func testAlertRulesUpsertUpdateRoundTripsFields(t *testing.T, open func(t *testi
 	}
 	if rows[0].Name != "regression rule" || rows[0].Kind != core.AlertRegression || rows[0].Enabled {
 		t.Errorf("persisted row = %+v, want updated values", rows[0])
+	}
+	if rows[0].N != 7 || rows[0].WindowMinutes != 3 {
+		t.Errorf("persisted row N/WindowMinutes = %d/%d, want 7/3", rows[0].N, rows[0].WindowMinutes)
 	}
 	if len(rows[0].Headers) != 2 || rows[0].Headers["X-Token"] != "def" {
 		t.Errorf("persisted Headers = %v, want exact round-trip", rows[0].Headers)
