@@ -96,6 +96,7 @@ func TestE2E(t *testing.T) {
 	t.Run("issues list and grouping", h.testIssuesList)
 	t.Run("issue detail", h.testIssueDetail)
 	t.Run("log search and context", h.testLogSearchAndContext)
+	t.Run("structured JSON body lifted and grouped", h.testStructuredBodyParsing)
 	t.Run("resolve then regression reopen", h.testResolveAndRegression)
 	t.Run("mcp tools", h.testMCP)
 	t.Run("admin route scoping guard", h.testScopingGuard)
@@ -400,6 +401,65 @@ func (h *harness) testLogSearchAndContext(t *testing.T) {
 	}
 	if !foundTarget {
 		t.Errorf("context window for log %d doesn't include the log itself: %+v", targetID, ctxLogs)
+	}
+}
+
+// ---- structured-body parsing: a raw JSON line, ingested with no severity
+// field, must come back queryable by lifted severity with the inner msg
+// lifted to Body, and must have produced a grouped issue (level=error
+// triggers event detection) ----
+
+func (h *harness) testStructuredBodyParsing(t *testing.T) {
+	// The outer envelope is the normal JSON-ingest shape (as in testIngest);
+	// "message" carries no "severity" sibling, so the record starts life at
+	// the parser's default SeverityInfo. Its value is itself a JSON object
+	// string with "level"/"msg"/"request_id" — the structured body the
+	// pipeline is expected to lift from.
+	structuredBody := `[{"message":"{\"level\":\"error\",\"msg\":\"invoice sync failed\",\"request_id\":\"e2e-req-1\"}","service":"e2e-structured"}]`
+	h.postRaw(t, "/api/v1/ingest", h.ingestKey, "application/json", []byte(structuredBody), http.StatusAccepted)
+
+	// Ingestion is accepted synchronously but the pipeline (parse -> annotate
+	// -> store -> group) flushes asynchronously, so poll rather than
+	// assuming it's already landed by the time we query (see
+	// testIssuesList's identical idiom below).
+	deadline := time.Now().Add(5 * time.Second)
+	var logs []logDTO
+	for time.Now().Before(deadline) {
+		logs = nil
+		h.doJSON(t, http.MethodGet, "/api/v1/logs?q=invoice+sync+failed&min_severity=error", h.adminKey, nil, http.StatusOK, &logs)
+		if len(logs) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(logs) == 0 {
+		t.Fatal("structured body not searchable by lifted severity")
+	}
+	if logs[0].Body != "invoice sync failed" {
+		t.Errorf("body = %q, want lifted msg", logs[0].Body)
+	}
+
+	// Issue grouping runs asynchronously in the pipeline too, so poll until
+	// it lands.
+	deadline = time.Now().Add(5 * time.Second)
+	var issues []issueDTO
+	found := false
+	for time.Now().Before(deadline) {
+		issues = nil
+		h.doJSON(t, http.MethodGet, "/api/v1/issues?status=open", h.adminKey, nil, http.StatusOK, &issues)
+		for _, is := range issues {
+			if strings.Contains(is.Title, "invoice sync failed") {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !found {
+		t.Errorf("lifted error did not produce a grouped issue; open issues: %+v", issues)
 	}
 }
 
