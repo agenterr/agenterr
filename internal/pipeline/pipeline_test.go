@@ -555,6 +555,41 @@ func TestDrop_NeverWrittenButDrainAccounts(t *testing.T) {
 	}
 }
 
+// TestDrop_OnShutdownDrainPath forces the drop decision through Run's
+// shutdown drain branch specifically (cancel before any log is consumed
+// by the live loop, mirroring TestDrainFlushesEverything's pattern) —
+// process() is shared by both branches, but this pins that the drain
+// branch's call site actually honors a drop rather than unconditionally
+// appending to pending.
+func TestDrop_OnShutdownDrainPath(t *testing.T) {
+	fw := &fakeWriter{}
+	d := fakeDropper{decide: func(core.Log) (bool, int64) { return true, 1 }}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, d, Options{BufferSize: 1000, FlushEvery: time.Hour, MaxBatch: 500})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Run(ctx)
+
+	logs := make([]core.Log, 50)
+	for i := range logs {
+		logs[i] = testLog(i, core.SeverityInfo)
+	}
+	if err := p.Enqueue(logs); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	cancel() // shut down immediately; FlushEvery is an hour so only the drain path can process these
+
+	drainCtx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if err := p.Drain(drainCtx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	if got := fw.totalEntries(); got != 0 {
+		t.Fatalf("dropped logs reached the writer via the drain path: %d entries written", got)
+	}
+}
+
 // TestDrop_ParseThenDecideOrdering proves rules key on the lifted body:
 // a fakeDropper that drops anything below SeverityInfo must see the
 // body's level=debug lifted into Severity before Decide runs, since the
