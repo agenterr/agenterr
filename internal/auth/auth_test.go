@@ -251,6 +251,28 @@ func TestRequireSession(t *testing.T) {
 			t.Errorf("status = %d, want 303 for expired session", rw.Code)
 		}
 	})
+
+	t.Run("expired session is purged from the map on read", func(t *testing.T) {
+		a3 := newTestAuth(t)
+		loginRW := httptest.NewRecorder()
+		if err := a3.Login(loginRW, testPassword); err != nil {
+			t.Fatalf("Login: %v", err)
+		}
+		expiredCookie := loginRW.Result().Cookies()[0]
+		a3.setSessionExpiry(expiredCookie.Value, time.Now().Add(-time.Minute))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(expiredCookie)
+		rw := httptest.NewRecorder()
+		a3.RequireSession(okHandler()).ServeHTTP(rw, req)
+		if rw.Code != http.StatusSeeOther {
+			t.Errorf("status = %d, want 303 for expired session", rw.Code)
+		}
+
+		if a3.hasSession(expiredCookie.Value) {
+			t.Errorf("expected expired session to be purged from the map, but it is still present")
+		}
+	})
 }
 
 // setSessionExpiry is a test-only helper that reaches into Auth's
@@ -260,6 +282,16 @@ func (a *Auth) setSessionExpiry(token string, expiry time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sessions[token] = expiry
+}
+
+// hasSession is a test-only helper that reports whether token is still
+// present in Auth's internal session map, used to verify expired entries
+// get purged rather than lingering forever.
+func (a *Auth) hasSession(token string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.sessions[token]
+	return ok
 }
 
 func TestLogout_ExpiresCookie(t *testing.T) {

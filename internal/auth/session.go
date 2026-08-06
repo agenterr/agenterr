@@ -32,9 +32,17 @@ func (a *Auth) Login(w http.ResponseWriter, password string) error {
 
 	expiry := time.Now().Add(sessionTTL)
 	a.mu.Lock()
+	sweepExpiredSessions(a.sessions) // single admin -> map is tiny; O(handful)
 	a.sessions[token] = expiry
 	a.mu.Unlock()
 
+	// Not marked Secure: the MVP self-host quickstart runs plain HTTP on
+	// localhost or a VPS-internal address, and a Secure cookie would
+	// silently break login there. Deployments that terminate TLS in
+	// front of the UI should keep it behind that TLS boundary regardless
+	// (reverse proxy, VPN, etc). Tracked follow-up: revisit once hosted
+	// deployments (which do terminate TLS) exist, and make Secure
+	// conditional on that.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
@@ -44,6 +52,20 @@ func (a *Auth) Login(w http.ResponseWriter, password string) error {
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
+}
+
+// sweepExpiredSessions deletes all expired entries from sessions. Callers
+// must hold a.mu. Session count is bounded by concurrent logins from a
+// single admin, so a full-map scan on every Login is negligible — this
+// keeps the map from growing unboundedly since expired entries are
+// otherwise never removed except lazily on lookup (see RequireSession).
+func sweepExpiredSessions(sessions map[string]time.Time) {
+	now := time.Now()
+	for token, expiry := range sessions {
+		if now.After(expiry) {
+			delete(sessions, token)
+		}
+	}
 }
 
 // Logout invalidates r's session token (if any) and expires the cookie on
@@ -78,9 +100,16 @@ func (a *Auth) RequireSession(h http.Handler) http.Handler {
 
 		a.mu.Lock()
 		expiry, ok := a.sessions[c.Value]
+		expired := ok && time.Now().After(expiry)
+		if expired {
+			// Delete-on-read: an expired entry found during lookup is
+			// purged immediately rather than waiting for the next
+			// Login sweep.
+			delete(a.sessions, c.Value)
+		}
 		a.mu.Unlock()
 
-		if !ok || time.Now().After(expiry) {
+		if !ok || expired {
 			redirectToLogin(w, r)
 			return
 		}
