@@ -3,6 +3,7 @@ package ship
 import (
 	"context"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/ship/buffer"
@@ -35,7 +36,7 @@ type sourceEvent struct {
 // "not goroutine-safe" contract entirely rather than adding per-joiner
 // locking. It returns once evCh is closed, after flushing every joiner with
 // pending content.
-func runJoinerLoop(spool *buffer.Spool, evCh <-chan sourceEvent, joinWindow time.Duration) {
+func runJoinerLoop(spool *buffer.Spool, evCh <-chan sourceEvent, joinWindow time.Duration, appendDropped *atomic.Int64) {
 	joiners := make(map[string]*process.Joiner)
 	services := make(map[string]string)
 
@@ -48,7 +49,7 @@ func runJoinerLoop(spool *buffer.Spool, evCh <-chan sourceEvent, joinWindow time
 			return
 		}
 		for _, r := range j.Flush() {
-			appendRecord(spool, services[key], r)
+			appendRecord(spool, services[key], r, appendDropped)
 		}
 	}
 
@@ -75,7 +76,7 @@ func runJoinerLoop(spool *buffer.Spool, evCh <-chan sourceEvent, joinWindow time
 			}
 			clean := process.Line{Text: process.StripANSI(ev.line.Text), Time: ev.line.Time}
 			for _, r := range j.Feed(clean) {
-				appendRecord(spool, ev.service, r)
+				appendRecord(spool, ev.service, r, appendDropped)
 			}
 			if ev.isDocker {
 				if err := spool.SetSince(ev.key, ev.line.Time); err != nil {

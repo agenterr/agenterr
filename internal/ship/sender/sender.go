@@ -14,7 +14,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -104,11 +103,14 @@ func defaultSleep(ctx context.Context, d time.Duration) {
 type Sender struct {
 	cfg Config
 
+	// shipped/oversized/lastErr are all written from sendBatch's single
+	// caller goroutine (Run) and read concurrently from Stats (the
+	// orchestrator's self-log ticker) — atomic int64s and atomic.Value give
+	// each field its own consistent read/write without a mutex; there's no
+	// invariant spanning more than one field that would require one.
 	shipped   int64
 	oversized int64
 	lastErr   atomic.Value // string
-
-	mu sync.Mutex // guards nothing concurrent today, but Stats reads under it for a consistent snapshot
 }
 
 // New returns a Sender configured by cfg (zero-value fields take their
@@ -121,8 +123,6 @@ func New(cfg Config) *Sender {
 // successfully shipped, records dropped as un-splittable oversized single
 // records, and the last error message seen (empty if none yet).
 func (s *Sender) Stats() (shipped, oversizedDropped int64, lastErr string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	le, _ := s.lastErr.Load().(string)
 	return atomic.LoadInt64(&s.shipped), atomic.LoadInt64(&s.oversized), le
 }
@@ -261,7 +261,12 @@ func (s *Sender) sendBatch(ctx context.Context, spool *buffer.Spool, n int) {
 			if ctx.Err() != nil {
 				return
 			}
-			s.sendBatch(ctx, spool, n-half)
+			// len(batch)-half, not n-half: n was the requested size, but a
+			// caught-up spool can hand back fewer records than requested
+			// (len(batch) <= n) — the second half must account for exactly
+			// what was actually read, or it either re-sends part of the
+			// first half or drops the tail of this batch.
+			s.sendBatch(ctx, spool, len(batch)-half)
 			return
 
 		case resp.StatusCode == http.StatusTooManyRequests:

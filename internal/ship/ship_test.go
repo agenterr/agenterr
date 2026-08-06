@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -402,10 +403,91 @@ func TestSelfLogEmitsCountersAtLeastOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	done := make(chan struct{})
-	go func() { runSelfLog(ctx, sp, snd); close(done) }()
+	appendDropped := new(atomic.Int64)
+	go func() { runSelfLog(ctx, sp, snd, appendDropped); close(done) }()
 	<-done
 
 	if !bytes.Contains(buf.Bytes(), []byte("ship: INFO shipped=")) {
 		t.Errorf("self-log output = %q, want a shipped=/buffer_dropped=/... INFO line", buf.String())
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("append_dropped=")) {
+		t.Errorf("self-log output = %q, want an append_dropped= counter", buf.String())
+	}
+}
+
+func TestSelfLogLineIncludesEveryCounter(t *testing.T) {
+	line := selfLogLine(10, 2, 3, 4, "boom")
+	want := `ship: INFO shipped=10 buffer_dropped=2 oversized_dropped=3 append_dropped=4 last_error="boom"`
+	if line != want {
+		t.Errorf("selfLogLine = %q, want %q", line, want)
+	}
+}
+
+// --- append-path drops are counted, not just logged --------------------
+
+func TestAppendRecordCountsSpoolAppendFailure(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	sp := openTestSpool(t)
+	// Close the spool out from under appendRecord so spool.Append fails —
+	// the simplest way to force that path without a narrow spool interface
+	// or wrapper: buffer.Spool.Append writes through the closed file handle
+	// and surfaces the OS's "file already closed" error.
+	if err := sp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	appendDropped := new(atomic.Int64)
+	appendRecord(sp, "web", process.Record{Text: "hello", Time: time.Now()}, appendDropped)
+
+	if got := appendDropped.Load(); got != 1 {
+		t.Errorf("appendDropped = %d, want 1", got)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("ship: WARN spool append failed")) {
+		t.Errorf("log output = %q, want a WARN about the failed append", buf.String())
+	}
+}
+
+// TestOrchestratorCountsAppendDropsInSelfLog drives the failure through the
+// full joiner loop (not just appendRecord directly) so the wiring from
+// "a record failed to append" to "the self-log line reflects it" is proven
+// end to end, matching how a real spool-write failure (e.g. disk full)
+// would surface during a run.
+func TestOrchestratorCountsAppendDropsInSelfLog(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	sp := openTestSpool(t)
+	evCh := make(chan sourceEvent, 4)
+	appendDropped := new(atomic.Int64)
+
+	loopDone := make(chan struct{})
+	go func() {
+		runJoinerLoop(sp, evCh, time.Hour, appendDropped)
+		close(loopDone)
+	}()
+
+	// Close the spool from under the running joiner loop before feeding it
+	// a line — every subsequent append attempt now fails.
+	if err := sp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	evCh <- sourceEvent{key: "c1", service: "web", line: process.Line{Text: "hello", Time: time.Now()}}
+	evCh <- sourceEvent{key: "c1", eof: true} // forces a flush, and thus the failing append, deterministically
+	close(evCh)
+	<-loopDone
+
+	if got := appendDropped.Load(); got != 1 {
+		t.Fatalf("appendDropped = %d, want 1", got)
+	}
+
+	line := selfLogLine(0, sp.Dropped(), 0, appendDropped.Load(), "")
+	if !bytes.Contains([]byte(line), []byte("append_dropped=1")) {
+		t.Errorf("self-log line = %q, want append_dropped=1", line)
 	}
 }

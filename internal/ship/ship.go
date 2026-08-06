@@ -13,6 +13,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/ship/buffer"
@@ -83,9 +84,15 @@ func run(ctx context.Context, cfg Config, spool *buffer.Spool, snd senderRunner,
 	evCh := make(chan sourceEvent, 1024)
 	joinWindow := time.Duration(cfg.JoinWindowMS) * time.Millisecond
 
+	// appendDropped counts records lost on the append path (marshal or
+	// spool.Append failure) — see appendRecord. Shared by the joiner loop
+	// (the only writer) and runSelfLog (the reader), so it must survive
+	// both goroutines outliving this function's stack frame.
+	appendDropped := new(atomic.Int64)
+
 	joinerDone := make(chan struct{})
 	go func() {
-		runJoinerLoop(spool, evCh, joinWindow)
+		runJoinerLoop(spool, evCh, joinWindow, appendDropped)
 		close(joinerDone)
 	}()
 
@@ -118,7 +125,7 @@ func run(ctx context.Context, cfg Config, spool *buffer.Spool, snd senderRunner,
 
 	selfLogDone := make(chan struct{})
 	go func() {
-		runSelfLog(ctx, spool, snd)
+		runSelfLog(ctx, spool, snd, appendDropped)
 		close(selfLogDone)
 	}()
 
@@ -145,12 +152,15 @@ func parseFileSpec(spec string) (glob, service string, err error) {
 }
 
 // appendRecord marshals rec as the wire record shape once and appends it to
-// spool. A marshal failure here would mean process.Record.Text somehow
-// isn't valid UTF-8-safe string content, which encoding/json always
-// produces successfully for a Go string — this is defensive, not expected
-// in practice, and is logged+counted rather than panicking (never lose
-// silently, but also never crash the pipeline over one bad record).
-func appendRecord(spool *buffer.Spool, service string, rec process.Record) {
+// spool. Both failure paths — a marshal error (in practice unreachable: a
+// wireRecord is only strings, which encoding/json always encodes
+// successfully even when not valid UTF-8; this branch exists so a future
+// field addition can't silently regress that) and a spool.Append error
+// (e.g. a disk-full or already-closed spool) — are drops per the ship
+// semantics doc's "never lose silently" rule: logged AND counted via
+// appendDropped, so they show up in the self-log line rather than only in
+// scrollback.
+func appendRecord(spool *buffer.Spool, service string, rec process.Record, appendDropped *atomic.Int64) {
 	wr := wireRecord{
 		Timestamp: rec.Time.Format(time.RFC3339Nano),
 		Service:   service,
@@ -158,22 +168,31 @@ func appendRecord(spool *buffer.Spool, service string, rec process.Record) {
 	}
 	b, err := json.Marshal(wr)
 	if err != nil {
+		appendDropped.Add(1)
 		log.Printf("ship: WARN dropping unmarshalable record for service %s: %v", service, err)
 		return
 	}
 	if err := spool.Append(b); err != nil {
+		appendDropped.Add(1)
 		log.Printf("ship: WARN spool append failed for service %s: %v", service, err)
 	}
 }
 
+// selfLogLine formats the periodic self-log line's counters. Split out from
+// runSelfLog so the exact format (and the fact that every drop counter is
+// represented) is unit-testable without wiring up a whole orchestrator run.
+func selfLogLine(shipped, bufferDropped, oversizedDropped, appendDropped int64, lastErr string) string {
+	return fmt.Sprintf("ship: INFO shipped=%d buffer_dropped=%d oversized_dropped=%d append_dropped=%d last_error=%q",
+		shipped, bufferDropped, oversizedDropped, appendDropped, lastErr)
+}
+
 // runSelfLog emits one INFO line per minute (or once at start, so a short
-// test/run isn't silent) summarizing sender counters — never losing a drop
-// silently, per the global constraints.
-func runSelfLog(ctx context.Context, spool *buffer.Spool, snd senderRunner) {
+// test/run isn't silent) summarizing sender and append counters — never
+// losing a drop silently, per the global constraints.
+func runSelfLog(ctx context.Context, spool *buffer.Spool, snd senderRunner, appendDropped *atomic.Int64) {
 	logOnce := func() {
 		shipped, oversized, lastErr := snd.Stats()
-		log.Printf("ship: INFO shipped=%d buffer_dropped=%d oversized_dropped=%d last_error=%q",
-			shipped, spool.Dropped(), oversized, lastErr)
+		log.Print(selfLogLine(shipped, spool.Dropped(), oversized, appendDropped.Load(), lastErr))
 	}
 	logOnce()
 	ticker := time.NewTicker(time.Minute)
