@@ -1,17 +1,22 @@
+version: "2"
 run:
   timeout: 5m
 linters:
-  enable: [depguard, errcheck, govet, staticcheck, revive, gocyclo, ineffassign, unused]
-linters-settings:
-  gocyclo:
-    min-complexity: 15
-  depguard:
-    rules:
-      core-is-pure:
-        files: ["**/internal/core/**"]
-        allow: ["$gostd", "github.com/agenterr/agenterr/internal/core"]
-      fx-only-in-app:
-        files: ["!**/internal/app/**", "!**/cmd/agenterr/**"]
-        deny:
-          - pkg: "go.uber.org/fx"
-            desc: "fx is contained to internal/app"
+  default: standard
+  enable:
+    - depguard
+    - revive
+    - gocyclo
+  settings:
+    gocyclo:
+      min-complexity: 15
+    depguard:
+      rules:
+        core-is-pure:
+          files: ["**/internal/core/**"]
+          allow: ["$gostd", "github.com/agenterr/agenterr/internal/core"]
+        fx-only-in-app:
+          files: ["!**/internal/app/**", "!**/cmd/agenterr/**"]
+          deny:
+            - pkg: "go.uber.org/fx"
+              desc: "fx is contained to internal/app"
