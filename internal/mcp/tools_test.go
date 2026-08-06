@@ -1651,6 +1651,23 @@ func TestTestAlertRule_CrossProject_NotFoundError(t *testing.T) {
 	}
 }
 
+func TestTestAlertRule_AdminKey_UnknownID_ReturnsDeliveryError(t *testing.T) {
+	s, _ := newTestMCPServer()
+
+	// adminCtx is unscoped: an unknown rule ID falls through the ownership
+	// check straight to Engine.TestFire, which reports the "not found" as
+	// a delivery error (surfaced verbatim), consistent with TestFire's
+	// contract of always returning a delivery error rather than a typed
+	// not-found. Mirrors internal/api's TestAlertRules_Test_UnknownID_Returns502.
+	res, _, err := s.testAlertRule(adminCtx(), nil, testAlertRuleInput{ID: 999})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) == "" {
+		t.Errorf("got IsError=%v text=%q, want a non-empty delivery error", res.IsError, textOf(t, res))
+	}
+}
+
 func textOf(t *testing.T, res *mcpsdk.CallToolResult) string {
 	t.Helper()
 	if len(res.Content) != 1 {
