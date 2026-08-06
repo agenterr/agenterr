@@ -228,6 +228,68 @@ func renderLogContext(logs []core.Log, targetID int64) string {
 	return strings.Join(lines, "\n")
 }
 
+// svcOrAny renders a rule's service filter, using "any" for the empty
+// string (which core.NoiseRule.Matches treats as "any service").
+func svcOrAny(service string) string {
+	if service == "" {
+		return "any"
+	}
+	return service
+}
+
+// noiseRuleLine renders one rule as a single compact line, showing only
+// the params that kind actually uses (severity_floor: service+severity;
+// drop_match: service+pattern; sample: service+severity+n) plus its
+// enabled state and persisted drop count.
+func noiseRuleLine(row store.NoiseRuleRow) string {
+	var params string
+	switch row.Kind {
+	case core.NoiseSeverityFloor:
+		params = fmt.Sprintf(" service=%s severity=%s", svcOrAny(row.Service), strings.ToLower(row.Severity.String()))
+	case core.NoiseDropMatch:
+		params = fmt.Sprintf(" service=%s pattern=%q", svcOrAny(row.Service), row.Pattern)
+	case core.NoiseSample:
+		params = fmt.Sprintf(" service=%s severity=%s n=%d", svcOrAny(row.Service), strings.ToLower(row.Severity.String()), row.N)
+	default:
+		params = fmt.Sprintf(" service=%s", svcOrAny(row.Service))
+	}
+	return fmt.Sprintf("#%d %s%s enabled=%v dropped=%d", row.ID, row.Kind, params, row.Enabled, row.DroppedCount)
+}
+
+func renderNoiseRules(rows []store.NoiseRuleRow, projectSlug string) string {
+	scope := ""
+	if projectSlug != "" {
+		scope = " in " + projectSlug
+	}
+	lines := make([]string, 0, len(rows)+1)
+	lines = append(lines, fmt.Sprintf("%d noise rules%s:", len(rows), scope))
+	for _, r := range rows {
+		lines = append(lines, noiseRuleLine(r))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderNoiseRule(row store.NoiseRuleRow) string {
+	return "rule " + noiseRuleLine(row)
+}
+
+func renderNoiseReport(topServices []store.ServiceCount, rules []store.NoiseRuleRow, totalDropped int64, hoursLabel string) string {
+	lines := make([]string, 0, len(topServices)+len(rules)+3)
+	lines = append(lines, fmt.Sprintf("noise report (%s): %d services, %d rules, %d total dropped",
+		hoursLabel, len(topServices), len(rules), totalDropped))
+
+	lines = append(lines, "top services by volume:")
+	for _, s := range topServices {
+		lines = append(lines, fmt.Sprintf("%s: %d logs", s.Service, s.Logs))
+	}
+
+	lines = append(lines, "rules:")
+	for _, r := range rules {
+		lines = append(lines, noiseRuleLine(r))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderStats(st store.Stats) string {
 	lines := []string{
 		fmt.Sprintf("logs: %d  events: %d  open issues: %d", st.Logs, st.Events, st.OpenIssues),

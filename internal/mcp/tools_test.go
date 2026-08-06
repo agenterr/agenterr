@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/auth/authtest"
 	"github.com/agenterr/agenterr/internal/core"
+	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
 )
 
@@ -34,6 +36,12 @@ type fakeStore struct {
 	logList []core.Log
 
 	stats map[int64]store.Stats // keyed by projectID
+
+	serviceCounts map[int64][]store.ServiceCount // keyed by projectID
+
+	noiseRules      map[int64]store.NoiseRuleRow // keyed by rule ID
+	nextNoiseRuleID int64
+	lastAddedDrops  map[int64]int64
 
 	lastIssueFilter store.IssueFilter
 	lastLogFilter   store.LogFilter
@@ -56,9 +64,11 @@ func newFakeStore() *fakeStore {
 			projectID int64
 			kind      string
 		}),
-		issues:      make(map[int64]core.Issue),
-		issueEvents: make(map[int64][]core.Event),
-		stats:       make(map[int64]store.Stats),
+		issues:        make(map[int64]core.Issue),
+		issueEvents:   make(map[int64][]core.Event),
+		stats:         make(map[int64]store.Stats),
+		serviceCounts: make(map[int64][]store.ServiceCount),
+		noiseRules:    make(map[int64]store.NoiseRuleRow),
 	}
 }
 
@@ -97,8 +107,8 @@ func (f *fakeStore) Stats(_ context.Context, filter store.StatsFilter) (store.St
 	return f.stats[filter.ProjectID], nil
 }
 
-func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]store.ServiceCount, error) {
-	return nil, nil
+func (f *fakeStore) ServiceCounts(_ context.Context, projectID int64, _ time.Time) ([]store.ServiceCount, error) {
+	return f.serviceCounts[projectID], nil
 }
 
 func (f *fakeStore) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
@@ -133,6 +143,63 @@ func (f *fakeStore) LookupKey(_ context.Context, plaintext string) (int64, strin
 		return 0, "", store.ErrNotFound
 	}
 	return e.projectID, e.kind, nil
+}
+
+// ---- store.NoiseRules ----
+
+func (f *fakeStore) NoiseRules(_ context.Context, projectID int64) ([]store.NoiseRuleRow, error) {
+	ids := make([]int64, 0, len(f.noiseRules))
+	for id, row := range f.noiseRules {
+		if projectID == 0 || row.ProjectID == projectID {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := make([]store.NoiseRuleRow, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, f.noiseRules[id])
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertNoiseRule(_ context.Context, r core.NoiseRule) (store.NoiseRuleRow, error) {
+	if r.ID == 0 {
+		f.nextNoiseRuleID++
+		r.ID = f.nextNoiseRuleID
+		row := store.NoiseRuleRow{NoiseRule: r}
+		f.noiseRules[r.ID] = row
+		return row, nil
+	}
+	existing, ok := f.noiseRules[r.ID]
+	if !ok {
+		return store.NoiseRuleRow{}, store.ErrNotFound
+	}
+	existing.NoiseRule = r
+	f.noiseRules[r.ID] = existing
+	return existing, nil
+}
+
+func (f *fakeStore) DeleteNoiseRule(_ context.Context, id int64) error {
+	if _, ok := f.noiseRules[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.noiseRules, id)
+	return nil
+}
+
+func (f *fakeStore) AddNoiseDrops(_ context.Context, counts map[int64]int64) error {
+	f.lastAddedDrops = counts
+	return nil
+}
+
+func (f *fakeStore) SetProjectParseBodies(_ context.Context, projectID int64, on bool) error {
+	p, ok := f.projects[projectID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	p.ParseBodies = on
+	f.projects[projectID] = p
+	return nil
 }
 
 // ---- context helpers (bypass HTTP auth for handler-level tests) ----
@@ -395,6 +462,58 @@ func TestRenderStats(t *testing.T) {
 	}
 }
 
+func TestRenderNoiseRules(t *testing.T) {
+	rows := []store.NoiseRuleRow{
+		{NoiseRule: core.NoiseRule{ID: 1, Kind: core.NoiseSeverityFloor, Service: "traefik", Severity: core.SeverityWarn, Enabled: true}, DroppedCount: 412},
+		{NoiseRule: core.NoiseRule{ID: 2, Kind: core.NoiseDropMatch, Service: "api", Pattern: "health check ok", Enabled: false}, DroppedCount: 0},
+		{NoiseRule: core.NoiseRule{ID: 3, Kind: core.NoiseSample, Service: "", Severity: core.SeverityInfo, N: 10, Enabled: true}, DroppedCount: 87},
+	}
+	got := renderNoiseRules(rows, "payment-api")
+	want := "3 noise rules in payment-api:\n" +
+		"#1 severity_floor service=traefik severity=warn enabled=true dropped=412\n" +
+		"#2 drop_match service=api pattern=\"health check ok\" enabled=false dropped=0\n" +
+		"#3 sample service=any severity=info n=10 enabled=true dropped=87"
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestRenderNoiseRules_Empty(t *testing.T) {
+	got := renderNoiseRules(nil, "")
+	if got != "0 noise rules:" {
+		t.Errorf("got %q, want %q", got, "0 noise rules:")
+	}
+}
+
+func TestRenderNoiseRule(t *testing.T) {
+	row := store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 9, Kind: core.NoiseSeverityFloor, Service: "traefik", Severity: core.SeverityWarn, Enabled: true}}
+	got := renderNoiseRule(row)
+	want := "rule #9 severity_floor service=traefik severity=warn enabled=true dropped=0"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestRenderNoiseReport(t *testing.T) {
+	services := []store.ServiceCount{
+		{Service: "traefik", Logs: 40000},
+		{Service: "checkout-api", Logs: 1200},
+	}
+	rules := []store.NoiseRuleRow{
+		{NoiseRule: core.NoiseRule{ID: 1, Kind: core.NoiseSeverityFloor, Service: "traefik", Severity: core.SeverityWarn, Enabled: true}, DroppedCount: 38000},
+	}
+	got := renderNoiseReport(services, rules, 38000, "24h")
+	want := "noise report (24h): 2 services, 1 rules, 38000 total dropped\n" +
+		"top services by volume:\n" +
+		"traefik: 40000 logs\n" +
+		"checkout-api: 1200 logs\n" +
+		"rules:\n" +
+		"#1 severity_floor service=traefik severity=warn enabled=true dropped=38000"
+	if got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func splitLines(s string) []string {
 	var lines []string
 	start := 0
@@ -412,7 +531,8 @@ func splitLines(s string) []string {
 
 func newTestMCPServer() (*Server, *fakeStore) {
 	fs := newFakeStore()
-	s := New(fs, fs)
+	engine := rules.New(fs, fs)
+	s := New(fs, fs, fs, engine)
 	s.clock = fixedClock
 	return s, fs
 }
@@ -643,6 +763,230 @@ func TestGetStats_ProjectKey_IgnoresProjectInput(t *testing.T) {
 	}
 }
 
+// ---- list_noise_rules ----
+
+func TestListNoiseRules_ProjectKey_SeesOnlyOwnProject(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.projects[1] = core.Project{ID: 1, Slug: "acme"}
+	fs.noiseRules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseSeverityFloor, Service: "traefik", Severity: core.SeverityWarn, Enabled: true}}
+	fs.noiseRules[2] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 2, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true}}
+
+	// Admin-only input, requesting another project's rules — must be
+	// ignored for a project-scoped key.
+	res, _, err := s.listNoiseRules(apiCtx(1), nil, listNoiseRulesInput{ProjectID: 2})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	text := textOf(t, res)
+	want := "1 noise rules in acme:\n" +
+		"#1 severity_floor service=traefik severity=warn enabled=true dropped=0"
+	if text != want {
+		t.Errorf("got:\n%s\nwant:\n%s", text, want)
+	}
+}
+
+func TestListNoiseRules_AdminKey_NoFilter_SeesAllProjects(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.noiseRules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseSample, Severity: core.SeverityInfo, N: 5, Enabled: true}}
+	fs.noiseRules[2] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 2, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true}}
+
+	res, _, err := s.listNoiseRules(adminCtx(), nil, listNoiseRulesInput{})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.HasPrefix(textOf(t, res), "2 noise rules:") {
+		t.Errorf("got %q, want a 2-rule listing with no project scope", textOf(t, res))
+	}
+}
+
+// ---- upsert_noise_rule ----
+
+func TestUpsertNoiseRule_ProjectKey_CreatesUnderOwnProject(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.projects[1] = core.Project{ID: 1, Slug: "acme"}
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		ProjectID: 999, // must be overridden by the caller's own project
+		Kind:      string(core.NoiseSeverityFloor),
+		Service:   "traefik",
+		Severity:  "warn",
+		Enabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	stored, ok := fs.noiseRules[1]
+	if !ok {
+		t.Fatalf("no rule stored")
+	}
+	if stored.ProjectID != 1 {
+		t.Errorf("stored ProjectID = %d, want 1 (caller's own project, not the input's 999)", stored.ProjectID)
+	}
+	if stored.Severity != core.SeverityWarn {
+		t.Errorf("stored Severity = %v, want SeverityWarn", stored.Severity)
+	}
+}
+
+func TestUpsertNoiseRule_UnknownKind_ErrorsWithoutStoring(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{Kind: "bogus"})
+	if err != nil {
+		t.Fatalf("err = %v, want nil (tool error goes in result)", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true")
+	}
+	if len(fs.noiseRules) != 0 {
+		t.Errorf("a rule was stored despite the invalid kind")
+	}
+}
+
+func TestUpsertNoiseRule_UnknownSeverity_ErrorsWithoutStoring(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		Kind: string(core.NoiseSeverityFloor), Severity: "wrn",
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) != "severity: unknown value" {
+		t.Errorf("got IsError=%v text=%q, want the strict-severity rejection", res.IsError, textOf(t, res))
+	}
+	if len(fs.noiseRules) != 0 {
+		t.Errorf("a rule was stored despite the invalid severity")
+	}
+}
+
+func TestUpsertNoiseRule_ProjectKey_UpdateCrossProjectRule_NotFoundError(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.noiseRules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true}}
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		ID: 1, Kind: string(core.NoiseDropMatch), Pattern: "changed",
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) != "not found" {
+		t.Errorf("got IsError=%v text=%q, want not found error", res.IsError, textOf(t, res))
+	}
+	if fs.noiseRules[1].Pattern != "boom" {
+		t.Errorf("rule was mutated despite cross-project ownership check failing")
+	}
+}
+
+// ---- delete_noise_rule ----
+
+func TestDeleteNoiseRule_ProjectKey_OwnRule_Succeeds(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.noiseRules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true}}
+
+	res, _, err := s.deleteNoiseRule(apiCtx(1), nil, deleteNoiseRuleInput{ID: 1})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	if textOf(t, res) != "noise rule #1 deleted" {
+		t.Errorf("text = %q", textOf(t, res))
+	}
+	if _, ok := fs.noiseRules[1]; ok {
+		t.Errorf("rule still present after delete")
+	}
+}
+
+func TestDeleteNoiseRule_ProjectKey_CrossProjectRule_NotFoundError(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.noiseRules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true}}
+
+	res, _, err := s.deleteNoiseRule(apiCtx(1), nil, deleteNoiseRuleInput{ID: 1})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) != "not found" {
+		t.Errorf("got IsError=%v text=%q, want not found error", res.IsError, textOf(t, res))
+	}
+	if _, ok := fs.noiseRules[1]; !ok {
+		t.Errorf("rule was deleted despite belonging to another project")
+	}
+}
+
+// ---- get_noise_report ----
+
+func TestGetNoiseReport_ProjectKey_IgnoresProjectInput(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.serviceCounts[1] = []store.ServiceCount{{Service: "traefik", Logs: 40000}}
+	fs.noiseRules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseSeverityFloor, Service: "traefik", Severity: core.SeverityWarn, Enabled: true}, DroppedCount: 38000}
+	fs.noiseRules[2] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 2, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "x", Enabled: true}, DroppedCount: 500}
+
+	res, _, err := s.getNoiseReport(apiCtx(1), nil, getNoiseReportInput{ProjectID: 999})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	if !strings.HasPrefix(text, "noise report (24h): 1 services, 1 rules, 38000 total dropped") {
+		t.Errorf("got:\n%s", text)
+	}
+	if strings.Contains(text, "#2") {
+		t.Errorf("report leaked another project's rule: %q", text)
+	}
+}
+
+func TestGetNoiseReport_AdminKey_MissingProjectID_Errors(t *testing.T) {
+	s, _ := newTestMCPServer()
+
+	res, _, err := s.getNoiseReport(adminCtx(), nil, getNoiseReportInput{})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) != "project_id: required for admin keys" {
+		t.Errorf("got IsError=%v text=%q, want the required-project_id rejection", res.IsError, textOf(t, res))
+	}
+}
+
+// ---- set_project_parse ----
+
+func TestSetProjectParse_ProjectKey_TogglesOwnProject(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.projects[1] = core.Project{ID: 1, Slug: "acme", ParseBodies: true}
+	fs.projects[999] = core.Project{ID: 999, Slug: "other", ParseBodies: true}
+
+	res, _, err := s.setProjectParse(apiCtx(1), nil, setProjectParseInput{ProjectID: 999, ParseBodies: false})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	if fs.projects[1].ParseBodies {
+		t.Errorf("project 1's parse_bodies was not flipped")
+	}
+	if !fs.projects[999].ParseBodies {
+		t.Errorf("project_id input (999, not the caller's project) should have been ignored, but project 999 was flipped")
+	}
+}
+
+func TestSetProjectParse_UnknownProject_NotFoundError(t *testing.T) {
+	s, _ := newTestMCPServer()
+
+	res, _, err := s.setProjectParse(adminCtx(), nil, setProjectParseInput{ProjectID: 999, ParseBodies: true})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) != "not found" {
+		t.Errorf("got IsError=%v text=%q, want not found error", res.IsError, textOf(t, res))
+	}
+}
+
 func textOf(t *testing.T, res *mcpsdk.CallToolResult) string {
 	t.Helper()
 	if len(res.Content) != 1 {
@@ -669,7 +1013,8 @@ func TestMCP_OverTheWire(t *testing.T) {
 	}}
 
 	a := auth.New(fs, []byte{})
-	srv := New(fs, fs)
+	engine := rules.New(fs, fs)
+	srv := New(fs, fs, fs, engine)
 	srv.clock = fixedClock
 	mux := http.NewServeMux()
 	srv.Mount(mux, a)
@@ -693,12 +1038,12 @@ func TestMCP_OverTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 8 {
+	if len(tools.Tools) != 13 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 8: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 13: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{

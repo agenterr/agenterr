@@ -57,6 +57,33 @@ func ParseSeverity(s string) Severity {
 	return SeverityInfo
 }
 
+// knownSeverityNames mirrors the name set ParseSeverity recognizes. It
+// exists so ParseSeverityStrict can reject typos (e.g. "wrn") instead of
+// silently defaulting to SeverityInfo the way ParseSeverity does.
+var knownSeverityNames = map[string]bool{
+	"trace": true, "debug": true, "info": true,
+	"warn": true, "warning": true,
+	"error": true, "err": true,
+	"fatal": true, "panic": true, "critical": true,
+}
+
+// ParseSeverityStrict parses s as a severity name, rejecting anything not
+// in the known name set rather than defaulting to SeverityInfo. An empty
+// string is accepted as "not supplied" (the zero value, SeverityTrace) —
+// severity is meaningless for some noise-rule kinds (e.g. drop_match).
+// Any other unrecognized name returns ok=false. Numeric OTLP severity
+// numbers are intentionally not accepted here: callers of this strict
+// variant take severity as a human-supplied name, not wire-format OTLP.
+func ParseSeverityStrict(s string) (sev Severity, ok bool) {
+	if s == "" {
+		return SeverityTrace, true
+	}
+	if !knownSeverityNames[strings.ToLower(strings.TrimSpace(s))] {
+		return 0, false
+	}
+	return ParseSeverity(s), true
+}
+
 // String returns the canonical uppercase name of the severity level.
 func (s Severity) String() string {
 	switch s {

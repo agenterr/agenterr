@@ -12,9 +12,11 @@ import (
 	"github.com/agenterr/agenterr/internal/store"
 )
 
-// registerTools binds each of the eight tools to the underlying MCP
+// registerTools binds each of the thirteen tools to the underlying MCP
 // server. Every tool = an input schema struct + a handler that calls the
-// store + a small pure render function (see render.go).
+// store + a small pure render function (see render.go). The eight
+// original tools are registered here; the five noise-control tools are
+// registered by registerNoiseTools (see noise.go).
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "list_projects",
@@ -55,6 +57,8 @@ func (s *Server) registerTools() {
 		Name:        "get_stats",
 		Description: "Log/event volume and open-issue counts, with a per-day breakdown.",
 	}, s.getStats)
+
+	s.registerNoiseTools()
 }
 
 // ---- list_projects ----

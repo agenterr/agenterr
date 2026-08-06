@@ -1,7 +1,8 @@
-// Package mcp is Agenterr's MCP edge — eight token-frugal tools served over
-// Streamable HTTP at /mcp. It reads via store.Reader and administers via
-// store.Admin (issue status transitions, project listing); it never
-// touches store.Writer.
+// Package mcp is Agenterr's MCP edge — thirteen token-frugal tools served
+// over Streamable HTTP at /mcp. It reads via store.Reader and administers
+// via store.Admin (issue status transitions, project listing) and
+// store.NoiseRules (rule listing); noise-rule and parse-bodies mutations
+// go through rules.Engine. It never touches store.Writer.
 //
 // Every tool renders compact plain text designed for agent consumption:
 // lists lead with a count line, rows are one line each, and long lists are
@@ -23,6 +24,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/agenterr/agenterr/internal/auth"
+	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
 )
 
@@ -43,6 +45,8 @@ const defaultContextN = 20
 type Server struct {
 	reader store.Reader
 	admin  store.Admin
+	nr     store.NoiseRules
+	engine *rules.Engine
 	mcp    *mcpsdk.Server
 
 	// clock is swapped in tests for a fixed time so relative-time renders
@@ -50,11 +54,18 @@ type Server struct {
 	clock func() time.Time
 }
 
-// New constructs a Server reading via r and administering via a.
-func New(r store.Reader, a store.Admin) *Server {
+// New constructs a Server reading via r and administering via a. Noise
+// rules are read straight from nr (a plain store read, same as any other
+// list) but always mutated through engine — never nr's write methods
+// directly — so the pipeline's cached view of rules stays fresh the
+// moment a tool changes them (mirrors the REST edge's rule; see
+// internal/api/handlers/noiserules.go).
+func New(r store.Reader, a store.Admin, nr store.NoiseRules, engine *rules.Engine) *Server {
 	s := &Server{
 		reader: r,
 		admin:  a,
+		nr:     nr,
+		engine: engine,
 		clock:  time.Now,
 	}
 	s.mcp = mcpsdk.NewServer(&mcpsdk.Implementation{

@@ -24,6 +24,29 @@ func TestParseSeverity(t *testing.T) {
 	}
 }
 
+func TestParseSeverityStrict(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    Severity
+		wantOK  bool
+		comment string
+	}{
+		{"", SeverityTrace, true, "empty string is not-supplied, accepted as the zero value"},
+		{"warn", SeverityWarn, true, "known name"},
+		{"WARN", SeverityWarn, true, "case-insensitive"},
+		{" warn ", SeverityWarn, true, "trims whitespace"},
+		{"wrn", 0, false, "typo of a known name is rejected, not defaulted to info"},
+		{"21", 0, false, "OTLP numeric severities are not accepted by the strict variant"},
+		{"nonsense", 0, false, "unknown name rejected"},
+	}
+	for _, c := range cases {
+		got, ok := ParseSeverityStrict(c.in)
+		if ok != c.wantOK || (ok && got != c.want) {
+			t.Errorf("ParseSeverityStrict(%q) = (%v, %v), want (%v, %v) — %s", c.in, got, ok, c.want, c.wantOK, c.comment)
+		}
+	}
+}
+
 func TestSeverityString(t *testing.T) {
 	cases := map[Severity]string{
 		SeverityTrace: "TRACE", SeverityDebug: "DEBUG", SeverityInfo: "INFO",

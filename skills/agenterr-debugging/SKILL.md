@@ -5,10 +5,13 @@ description: Use when the user asks to check production errors, wants to know wh
 
 # Agenterr debugging
 
-Agenterr is an error and log tracker reachable through eight MCP tools:
+Agenterr is an error and log tracker reachable through thirteen MCP tools:
 `list_projects`, `list_issues`, `get_issue`, `search_logs`, `get_log_context`,
-`resolve_issue`, `ignore_issue`, `get_stats`. This skill is the workflow for
-using them to go from "something's wrong in prod" to a verified fix.
+`resolve_issue`, `ignore_issue`, `get_stats`, `list_noise_rules`,
+`upsert_noise_rule`, `delete_noise_rule`, `get_noise_report`,
+`set_project_parse`. This skill is the workflow for using them to go from
+"something's wrong in prod" to a verified fix, and for tuning out the noise
+that gets in the way of that.
 
 ## Workflow
 
@@ -121,6 +124,85 @@ issue #118 resolved
 If `#118` reopens later with fresh events, the fix didn't actually address
 the nil case — go back to `get_issue(id=118)` and look at the newest sample
 again rather than assuming it's a new, unrelated issue.
+
+## Tuning noise
+
+Chatty, low-value logs make `search_logs` and `get_stats` harder to read and
+cost tokens on every call. Bring the volume down with a see-noise →
+add-rule → verify-drop loop:
+
+1. **See the noise with `get_noise_report`.** Run it when ingest volume
+   looks dominated by low-value logs — it shows the top services by log
+   volume alongside every existing rule's drop count, so you can tell
+   what's noisy and whether a rule already covers it.
+2. **Add a rule with `upsert_noise_rule`.** Pick the kind that fits: a
+   `severity_floor` to drop everything below a level for a chatty service,
+   a `drop_match` to drop lines containing a specific substring (e.g. a
+   health-check body), or a `sample` to keep only 1 in N of a repetitive
+   but not-worthless service.
+3. **Verify the drop with a second `get_noise_report`.** The rule's
+   `dropped_count` should be climbing and the noisy service's log volume
+   falling. If it isn't, check `list_noise_rules` for a typo in `service`
+   or `pattern` before assuming the rule is broken.
+
+### Worked example: severity floor on a chatty infra service
+
+`get_noise_report` shows `traefik` dominating ingest with mostly `INFO`
+routing chatter drowning out the handful of `WARN`/`ERROR` lines that
+actually matter:
+
+```
+get_noise_report(project_id=1)
+```
+
+```
+noise report (24h): 3 services, 0 rules, 0 total dropped
+top services by volume:
+traefik: 41800 logs
+checkout-api: 1900 logs
+worker: 640 logs
+rules:
+```
+
+Drop everything from `traefik` below `WARN`:
+
+```
+upsert_noise_rule(project_id=1, kind="severity_floor", service="traefik", severity="warn", enabled=true)
+```
+
+```
+rule #4 severity_floor service=traefik severity=warn enabled=true dropped=0
+```
+
+Verify it's actually cutting volume:
+
+```
+get_noise_report(project_id=1)
+```
+
+```
+noise report (24h): 3 services, 1 rules, 38900 total dropped
+top services by volume:
+traefik: 41800 logs
+checkout-api: 1900 logs
+worker: 640 logs
+rules:
+#4 severity_floor service=traefik severity=warn enabled=true dropped=38900
+```
+
+`top services by volume` reflects everything ingested before filtering, so
+`traefik`'s number won't drop by itself — `dropped_count` climbing on rule
+`#4` is the signal the rule is working.
+
+### Fail-open, and every drop is counted
+
+Rules are fail-open: anything ambiguous — an unknown kind, an empty
+`pattern`, a rule that hasn't loaded yet — is treated as "don't drop" rather
+than risk black-holing real records. A misconfigured rule costs you noise,
+never data. And no drop is invisible: every record a rule drops increments
+that rule's `dropped_count`, visible in both `list_noise_rules` and
+`get_noise_report`, so you can always account for what's been filtered out
+and undo a rule (`delete_noise_rule`) if it turns out to be too aggressive.
 
 ## Connecting Agenterr
 

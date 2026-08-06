@@ -55,7 +55,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 		Ingesters: []ingest.Ingester{jsonapi.New(pipe, 0), otlp.New(pipe, 0)},
 		Auth:      a,
 		API:       api.New(db, db, db, engine),
-		MCP:       mcp.New(db, db),
+		MCP:       mcp.New(db, db, db, engine),
 		Web:       web.New(db, db, a),
 	}
 	return deps, db

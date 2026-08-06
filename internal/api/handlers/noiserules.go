@@ -17,17 +17,6 @@ import (
 // caller does not supply ?hours.
 const defaultReportHours = 24
 
-// knownSeverityNames mirrors core.ParseSeverity's recognized names. It
-// exists so the API can reject typos (e.g. "wrn") with a 400 instead of
-// letting ParseSeverity's unknown-defaults-to-info behavior silently
-// accept them as SeverityInfo.
-var knownSeverityNames = map[string]bool{
-	"trace": true, "debug": true, "info": true,
-	"warn": true, "warning": true,
-	"error": true, "err": true,
-	"fatal": true, "panic": true, "critical": true,
-}
-
 // validNoiseKinds mirrors core.NoiseRuleKind's three known values.
 var validNoiseKinds = map[core.NoiseRuleKind]bool{
 	core.NoiseSeverityFloor: true,
@@ -74,20 +63,6 @@ func toNoiseRuleDTOs(rows []store.NoiseRuleRow) []noiseRuleDTO {
 		dtos[i] = toNoiseRuleDTO(r)
 	}
 	return dtos
-}
-
-// parseSeverityStrict parses s as a severity name. An empty string is
-// treated as "not supplied" (zero value, valid) since severity is
-// meaningless for drop_match rules; any non-empty, unrecognized name is
-// rejected rather than silently defaulting to info.
-func parseSeverityStrict(s string) (core.Severity, bool) {
-	if s == "" {
-		return core.SeverityTrace, true
-	}
-	if !knownSeverityNames[strings.ToLower(strings.TrimSpace(s))] {
-		return 0, false
-	}
-	return core.ParseSeverity(s), true
 }
 
 // List handles GET /api/v1/projects/{id}/noise-rules.
@@ -145,7 +120,7 @@ func (n *NoiseRules) Create(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, http.StatusBadRequest, "kind: must be severity_floor, drop_match, or sample")
 		return
 	}
-	severity, ok := parseSeverityStrict(body.Severity)
+	severity, ok := core.ParseSeverityStrict(body.Severity)
 	if !ok {
 		respondErr(w, http.StatusBadRequest, "severity: unknown value")
 		return
