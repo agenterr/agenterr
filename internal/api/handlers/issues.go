@@ -90,15 +90,23 @@ func (i *Issues) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var f store.IssueFilter
 
-	if v := q.Get("project"); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			respondErr(w, http.StatusBadRequest, "project: invalid")
-			return
+	callerProjectID, isAdmin := callerScope(r)
+	if isAdmin {
+		if v := q.Get("project"); v != "" {
+			id, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				respondErr(w, http.StatusBadRequest, "project: invalid")
+				return
+			}
+			f.ProjectID = id
 		}
-		f.ProjectID = id
+	} else {
+		// A project-bound key's own project is authoritative — any
+		// client-supplied ?project is ignored rather than trusted.
+		f.ProjectID = callerProjectID
 	}
-	f.Environment = q.Get("environment")
+
+	f.Environment = q.Get("env")
 	if v := q.Get("status"); v != "" {
 		f.Status = core.IssueStatus(v)
 	}
@@ -114,6 +122,10 @@ func (i *Issues) List(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			respondErr(w, http.StatusBadRequest, "limit: invalid")
+			return
+		}
+		if n < 0 {
+			respondErr(w, http.StatusBadRequest, "limit: must be >= 0")
 			return
 		}
 		f.Limit = n
@@ -145,6 +157,14 @@ func (i *Issues) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	callerProjectID, isAdmin := callerScope(r)
+	if !isAdmin && issue.ProjectID != callerProjectID {
+		// Row exists but belongs to another project: 404, not 403 — a
+		// project-bound key must not learn that this ID exists at all.
+		respondErr(w, http.StatusNotFound, "not found")
+		return
+	}
+
 	respond(w, http.StatusOK, map[string]any{
 		"issue":  toIssueDTO(issue),
 		"events": toEventDTOs(events),
@@ -162,7 +182,9 @@ func (i *Issues) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
 		respondErr(w, http.StatusBadRequest, "body: invalid JSON")
 		return
 	}
@@ -170,6 +192,23 @@ func (i *Issues) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if !isValidStatus(status) {
 		respondErr(w, http.StatusBadRequest, "status: must be open, resolved, or ignored")
 		return
+	}
+
+	callerProjectID, isAdmin := callerScope(r)
+	if !isAdmin {
+		issue, _, err := i.Reader.Issue(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				respondErr(w, http.StatusNotFound, "not found")
+				return
+			}
+			respondErr(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		if issue.ProjectID != callerProjectID {
+			respondErr(w, http.StatusNotFound, "not found")
+			return
+		}
 	}
 
 	if err := i.Admin.SetIssueStatus(r.Context(), id, status); err != nil {

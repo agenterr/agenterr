@@ -38,6 +38,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("Stats/CountsAndPerDay", func(t *testing.T) { testStatsCountsAndPerDay(t, open) })
 	t.Run("Prune/DeletesOnlyOlderAndOnlyProject", func(t *testing.T) { testPruneDeletesOnlyOlderAndOnlyProject(t, open) })
 	t.Run("Admin/ProjectCRUDAndKeys", func(t *testing.T) { testAdminProjectCRUDAndKeys(t, open) })
+	t.Run("Admin/InstanceAdminKey", func(t *testing.T) { testAdminInstanceAdminKey(t, open) })
 	t.Run("SetIssueStatus/Transitions", func(t *testing.T) { testSetIssueStatusTransitions(t, open) })
 }
 
@@ -828,6 +829,34 @@ func testAdminProjectCRUDAndKeys(t *testing.T, open func(t *testing.T) store.Sto
 	}
 	if gotProjectID2 != p.ID || gotKind2 != "api" {
 		t.Errorf("LookupKey #2 = (%d, %q), want (%d, %q)", gotProjectID2, gotKind2, p.ID, "api")
+	}
+}
+
+// testAdminInstanceAdminKey covers the instance-level "admin" key kind: it
+// is minted with projectID 0 (not tied to any project) and LookupKey must
+// round-trip that as (0, "admin", nil) rather than treating 0 as a real
+// project ID.
+func testAdminInstanceAdminKey(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+
+	plaintext, err := s.MintKey(ctx, 0, "admin")
+	if err != nil {
+		t.Fatalf("MintKey(admin): %v", err)
+	}
+	if plaintext == "" {
+		t.Fatalf("expected non-empty plaintext admin key")
+	}
+
+	gotProjectID, gotKind, err := s.LookupKey(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("LookupKey(admin): %v", err)
+	}
+	if gotProjectID != 0 {
+		t.Errorf("LookupKey(admin) projectID = %d, want 0", gotProjectID)
+	}
+	if gotKind != "admin" {
+		t.Errorf("LookupKey(admin) kind = %q, want %q", gotKind, "admin")
 	}
 }
 

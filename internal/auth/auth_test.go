@@ -53,6 +53,7 @@ func newFakeAdmin() *fakeAdmin {
 	}{
 		"agt_ingest_valid": {projectID: 42, kind: "ingest"},
 		"agt_api_valid":    {projectID: 42, kind: "api"},
+		"agt_admin_valid":  {projectID: 0, kind: "admin"},
 	}}
 }
 
@@ -77,6 +78,10 @@ func TestRequireKey(t *testing.T) {
 		{"valid ingest key on ingest route", "Bearer agt_ingest_valid", "ingest", http.StatusOK, 42},
 		{"valid api key on ingest route", "Bearer agt_api_valid", "ingest", http.StatusUnauthorized, 0},
 		{"valid api key on api route", "Bearer agt_api_valid", "api", http.StatusOK, 42},
+		{"admin key on api route", "Bearer agt_admin_valid", "api", http.StatusOK, 0},
+		{"admin key on ingest route", "Bearer agt_admin_valid", "ingest", http.StatusOK, 0},
+		{"admin key on admin route", "Bearer agt_admin_valid", "admin", http.StatusOK, 0},
+		{"api key on admin route", "Bearer agt_api_valid", "admin", http.StatusUnauthorized, 0},
 	}
 
 	for _, tt := range tests {
@@ -123,6 +128,36 @@ func TestProjectFromContext_Absent(t *testing.T) {
 	_, ok := ProjectFromContext(context.Background())
 	if ok {
 		t.Fatal("expected ok=false for context with no project")
+	}
+}
+
+func TestKindFromContext_Absent(t *testing.T) {
+	_, ok := KindFromContext(context.Background())
+	if ok {
+		t.Fatal("expected ok=false for context with no kind")
+	}
+}
+
+func TestKindFromContext_SetByRequireKey(t *testing.T) {
+	a := New(newFakeAdmin(), []byte{})
+
+	var gotKind string
+	var gotOK bool
+	handler := a.RequireKey("api", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKind, gotOK = KindFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer agt_admin_valid")
+	rw := httptest.NewRecorder()
+	handler.ServeHTTP(rw, req)
+
+	if !gotOK {
+		t.Fatal("KindFromContext ok = false, want true")
+	}
+	if gotKind != "admin" {
+		t.Errorf("kind = %q, want admin", gotKind)
 	}
 }
 

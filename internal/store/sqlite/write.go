@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -105,6 +106,11 @@ func (db *DB) WriteBatch(ctx context.Context, entries []store.Entry) error {
 // lookup prefix, and returns the plaintext exactly once (it is never
 // recoverable afterward).
 //
+// kind "admin" is instance-level, not project-bound: its project_id is
+// stored as NULL regardless of the projectID argument (by convention 0),
+// matching the nullable keys.project_id column added in
+// 0003_admin_keys.sql.
+//
 // bcrypt.MinCost is used deliberately: these are not user-chosen,
 // low-entropy passwords but 24 bytes (192 bits) of crypto/rand output —
 // brute-forcing the hash is infeasible regardless of cost factor, so a
@@ -127,8 +133,13 @@ func (db *DB) MintKey(ctx context.Context, projectID int64, kind string) (string
 		prefix = prefix[:12]
 	}
 
+	var projectIDArg any = projectID
+	if kind == "admin" {
+		projectIDArg = nil
+	}
+
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.sql.ExecContext(ctx, insertKey, projectID, kind, hash, prefix, createdAt); err != nil {
+	if _, err := db.sql.ExecContext(ctx, insertKey, projectIDArg, kind, hash, prefix, createdAt); err != nil {
 		return "", fmt.Errorf("sqlite: insert key: %w", err)
 	}
 	return plaintext, nil
@@ -138,7 +149,8 @@ const selectKeysByPrefix = `SELECT project_id, kind, hash FROM keys WHERE prefix
 
 // LookupKey resolves a plaintext API key to its project and kind by
 // narrowing candidates on the stored prefix, then bcrypt-comparing against
-// each candidate's hash.
+// each candidate's hash. A key with a NULL project_id (instance-level
+// "admin" keys) resolves to projectID 0.
 func (db *DB) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
 	prefix := plaintext
 	if len(prefix) > 12 {
@@ -152,7 +164,7 @@ func (db *DB) LookupKey(ctx context.Context, plaintext string) (int64, string, e
 	defer rows.Close()
 
 	type candidate struct {
-		projectID int64
+		projectID sql.NullInt64
 		kind      string
 		hash      []byte
 	}
@@ -170,7 +182,7 @@ func (db *DB) LookupKey(ctx context.Context, plaintext string) (int64, string, e
 
 	for _, c := range candidates {
 		if bcrypt.CompareHashAndPassword(c.hash, []byte(plaintext)) == nil {
-			return c.projectID, c.kind, nil
+			return c.projectID.Int64, c.kind, nil
 		}
 	}
 	return 0, "", store.ErrNotFound

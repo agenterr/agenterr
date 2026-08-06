@@ -62,11 +62,25 @@ func New(admin store.Admin, adminPasswordHash []byte) *Auth {
 
 type contextKey int
 
-const projectIDKey contextKey = iota
+const (
+	projectIDKey contextKey = iota
+	kindKey
+)
 
 // ProjectFromContext returns the project ID injected by RequireKey, if
-// any.
+// any. For an instance-level "admin" key this is always 0 — such keys are
+// not scoped to a project, so callers must also check KindFromContext
+// before treating 0 as meaningful.
 func ProjectFromContext(ctx context.Context) (int64, bool) {
 	v, ok := ctx.Value(projectIDKey).(int64)
+	return v, ok
+}
+
+// KindFromContext returns the key kind ("ingest", "api", or "admin")
+// injected by RequireKey, if any. This is the actual kind the caller
+// authenticated with — which may be broader than the kind a route
+// required, since an "admin" key satisfies any RequireKey check.
+func KindFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(kindKey).(string)
 	return v, ok
 }

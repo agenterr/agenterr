@@ -40,6 +40,10 @@ func (p *Projects) Create(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, http.StatusBadRequest, "name: required")
 		return
 	}
+	if body.RetentionDays < 1 {
+		respondErr(w, http.StatusBadRequest, "retention_days: must be positive")
+		return
+	}
 
 	proj, err := p.Admin.CreateProject(r.Context(), body.Name, body.RetentionDays)
 	if err != nil {

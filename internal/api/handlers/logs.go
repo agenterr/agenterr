@@ -62,20 +62,28 @@ func (l *Logs) Search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var f store.LogFilter
 
-	if v := q.Get("project"); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			respondErr(w, http.StatusBadRequest, "project: invalid")
-			return
+	callerProjectID, isAdmin := callerScope(r)
+	if isAdmin {
+		if v := q.Get("project"); v != "" {
+			id, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				respondErr(w, http.StatusBadRequest, "project: invalid")
+				return
+			}
+			f.ProjectID = id
 		}
-		f.ProjectID = id
+	} else {
+		// A project-bound key's own project is authoritative — any
+		// client-supplied ?project is ignored rather than trusted.
+		f.ProjectID = callerProjectID
 	}
+
 	f.Query = q.Get("q")
 	if v := q.Get("min_severity"); v != "" {
 		f.MinSeverity = core.ParseSeverity(v)
 	}
 	f.Service = q.Get("service")
-	f.Environment = q.Get("environment")
+	f.Environment = q.Get("env")
 	if v := q.Get("since"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
@@ -96,6 +104,10 @@ func (l *Logs) Search(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(v)
 		if err != nil {
 			respondErr(w, http.StatusBadRequest, "limit: invalid")
+			return
+		}
+		if n < 0 {
+			respondErr(w, http.StatusBadRequest, "limit: must be >= 0")
 			return
 		}
 		f.Limit = n
@@ -124,6 +136,10 @@ func (l *Logs) Context(w http.ResponseWriter, r *http.Request) {
 			respondErr(w, http.StatusBadRequest, "n: invalid")
 			return
 		}
+		if nn < 0 {
+			respondErr(w, http.StatusBadRequest, "n: must be >= 0")
+			return
+		}
 		n = nn
 	}
 
@@ -136,5 +152,16 @@ func (l *Logs) Context(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
+
+	callerProjectID, isAdmin := callerScope(r)
+	if !isAdmin && len(logs) > 0 && logs[0].ProjectID != callerProjectID {
+		// The context window is always scoped to a single project (all
+		// its rows come from the same project as the target log), so
+		// checking the first entry is sufficient. 404, not 403 — don't
+		// leak that the ID exists in another project.
+		respondErr(w, http.StatusNotFound, "not found")
+		return
+	}
+
 	respond(w, http.StatusOK, toLogDTOs(logs))
 }

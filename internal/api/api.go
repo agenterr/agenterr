@@ -30,15 +30,24 @@ func New(reader store.Reader, admin store.Admin) *API {
 	}
 }
 
-// Mount registers every /api/v1 route on mux, behind api-kind key auth.
+// Mount registers every /api/v1 route on mux, behind key auth.
+//
+// Management routes (project CRUD, key minting) require an instance-level
+// "admin" key. Data routes (issues, logs, stats) require an "api" key —
+// which an "admin" key also satisfies (see auth.RequireKey's hierarchy) —
+// and each data handler further scopes itself by the caller's project
+// unless the caller is admin (see handlers.callerScope).
 func (a *API) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
+	admin := func(h http.HandlerFunc) http.Handler {
+		return keys.RequireKey("admin", h)
+	}
 	wrap := func(h http.HandlerFunc) http.Handler {
 		return keys.RequireKey("api", h)
 	}
 
-	mux.Handle("POST /api/v1/projects", wrap(a.projects.Create))
-	mux.Handle("GET /api/v1/projects", wrap(a.projects.List))
-	mux.Handle("POST /api/v1/projects/{id}/keys", wrap(a.projects.MintKey))
+	mux.Handle("POST /api/v1/projects", admin(a.projects.Create))
+	mux.Handle("GET /api/v1/projects", admin(a.projects.List))
+	mux.Handle("POST /api/v1/projects/{id}/keys", admin(a.projects.MintKey))
 
 	mux.Handle("GET /api/v1/issues", wrap(a.issues.List))
 	mux.Handle("GET /api/v1/issues/{id}", wrap(a.issues.Get))

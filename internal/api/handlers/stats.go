@@ -39,13 +39,20 @@ func (s *Stats) Get(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var f store.StatsFilter
 
-	if v := q.Get("project"); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			respondErr(w, http.StatusBadRequest, "project: invalid")
-			return
+	callerProjectID, isAdmin := callerScope(r)
+	if isAdmin {
+		if v := q.Get("project"); v != "" {
+			id, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				respondErr(w, http.StatusBadRequest, "project: invalid")
+				return
+			}
+			f.ProjectID = id
 		}
-		f.ProjectID = id
+	} else {
+		// A project-bound key's own project is authoritative — any
+		// client-supplied ?project is ignored rather than trusted.
+		f.ProjectID = callerProjectID
 	}
 	if v := q.Get("since"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)

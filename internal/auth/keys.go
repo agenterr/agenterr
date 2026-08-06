@@ -16,7 +16,14 @@ func unauthorized(w http.ResponseWriter) {
 }
 
 // RequireKey wraps h; expects "Authorization: Bearer <key>" of the given
-// kind ("ingest" or "api"); on success injects the project ID into ctx.
+// kind ("ingest", "api", or "admin"); on success injects the project ID
+// and the actual key kind into ctx (read back with ProjectFromContext /
+// KindFromContext).
+//
+// "admin" is instance-level and sits above the other kinds in a small
+// hierarchy: an admin key satisfies a RequireKey check for any kind, so
+// one key can drive both management and per-project data routes. A
+// "ingest" or "api" key only satisfies its own exact kind.
 func (a *Auth) RequireKey(kind string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r.Header.Get("Authorization"))
@@ -30,12 +37,13 @@ func (a *Auth) RequireKey(kind string, h http.Handler) http.Handler {
 			unauthorized(w)
 			return
 		}
-		if gotKind != kind {
+		if gotKind != kind && gotKind != "admin" {
 			unauthorized(w)
 			return
 		}
 
 		ctx := context.WithValue(r.Context(), projectIDKey, projectID)
+		ctx = context.WithValue(ctx, kindKey, gotKind)
 		h.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
