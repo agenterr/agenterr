@@ -94,6 +94,13 @@ func buildPayload(job fireJob) alertPayload {
 // whatever is left in the queue (attempting delivery for each) before
 // returning — a canceled context stops accepting new work but never
 // abandons work already enqueued.
+//
+// Precondition: callers must stop invoking IssueEvent before canceling
+// ctx. The drain loop below is a single best-effort pass over the queue;
+// an enqueue that races with (or follows) cancellation may be neither
+// delivered nor counted as a drop. In production this holds because the
+// app stops the pipeline — the only IssueEvent caller — before canceling
+// the alerts worker.
 func (e *Engine) Run(ctx context.Context) {
 	for {
 		select {

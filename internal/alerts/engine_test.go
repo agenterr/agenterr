@@ -3,7 +3,10 @@ package alerts
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,23 +212,44 @@ func TestIssueEvent_FanOutTwoRulesBothFire(t *testing.T) {
 	if !gotIDs[r1.ID] || !gotIDs[r2.ID] {
 		t.Errorf("got fires for rules %v, want both %d and %d", gotIDs, r1.ID, r2.ID)
 	}
+	// Determinism: rules evaluate in ascending-ID order, so the first
+	// enqueued job must be the lower-ID rule.
+	if !(first.rule.ID < second.rule.ID) {
+		t.Errorf("enqueue order = [%d, %d], want ascending-ID order [%d, %d]", first.rule.ID, second.rule.ID, r1.ID, r2.ID)
+	}
 }
 
 // 8. Concurrency: -race hammer — IssueEvent from one goroutine,
-// Upsert/Load from another, worker running; no races, and every enqueued
-// fire is recorded exactly once (no lost/duplicate fires).
+// Upsert/Load from another, e.Run(ctx) actually running as the worker; no
+// races, and every enqueued fire is delivered (and recorded) exactly once
+// (no lost/duplicate fires). Exercises Run's real queue-consume path
+// (not a hand-rolled drain), including its shutdown-drain branch. Per
+// Run's documented precondition, ctx is canceled only after every
+// IssueEvent-calling goroutine has finished.
 func TestConcurrency_NoRacesNoLostOrDuplicateFires(t *testing.T) {
+	var delivered atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		delivered.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
 	fs := newFakeStore()
 	// Scoped to service "api" so the rules concurrently upserted below
 	// (scoped to "other") never match the hammered events — otherwise
 	// fan-out (a correct, separate behavior) would make the expected
 	// delivered count depend on upsert/event interleaving.
-	fs.seedRule(core.AlertRule{ProjectID: 1, Service: "api", Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: true})
+	fs.seedRule(core.AlertRule{ProjectID: 1, Service: "api", Kind: core.AlertNewIssue, URL: srv.URL, Enabled: true})
 	e := New(fs, nil)
 	e.queue = make(chan fireJob, 4096) // avoid dropped-by-design fires muddying the count
 	mustLoad(t, e)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		e.Run(ctx)
+	}()
 
 	var wg sync.WaitGroup
 
@@ -247,39 +271,14 @@ func TestConcurrency_NoRacesNoLostOrDuplicateFires(t *testing.T) {
 		}
 	}()
 
-	var delivered int
-	var mu sync.Mutex
-	drainDone := make(chan struct{})
-	go func() {
-		defer close(drainDone)
-		for {
-			select {
-			case <-e.queue:
-				mu.Lock()
-				delivered++
-				mu.Unlock()
-			case <-ctx.Done():
-				for {
-					select {
-					case <-e.queue:
-						mu.Lock()
-						delivered++
-						mu.Unlock()
-					default:
-						return
-					}
-				}
-			}
-		}
-	}()
-
+	// Wait for every IssueEvent caller to finish before canceling — Run's
+	// drain-on-cancel is a single best-effort pass and can lose a fire
+	// that races with cancellation (see Run's doc comment).
 	wg.Wait()
 	cancel()
-	<-drainDone
+	<-runDone
 
-	mu.Lock()
-	defer mu.Unlock()
-	if delivered != events {
-		t.Errorf("delivered = %d, want %d (no lost/duplicate fires)", delivered, events)
+	if got := delivered.Load(); got != events {
+		t.Errorf("delivered = %d, want %d (no lost/duplicate fires)", got, events)
 	}
 }
