@@ -6,8 +6,10 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -31,11 +33,14 @@ import (
 	"github.com/agenterr/agenterr/internal/web"
 )
 
-// adminPassword is the resolved admin password — either the operator's
-// AGENTERR_ADMIN_PASSWORD or, when that's unset, a freshly generated one.
-// It flows from newAuth to register purely so the first-run bootstrap
-// message can print it; nothing else in the graph depends on it.
-type adminPassword string
+// generatedCreds carries the admin password's plaintext from newAuth to
+// register, but only when that password was freshly generated this boot
+// (Password == ""  otherwise) — the one and only reason register needs
+// it is to print it once, on first run. It is never persisted; only its
+// bcrypt hash is (see settingAdminPasswordHash).
+type generatedCreds struct {
+	password string
+}
 
 // Module wires every plain constructor in the codebase into the fx graph
 // and registers the process lifecycle (see lifecycle.go). Providers are
@@ -111,26 +116,57 @@ func asSink(p *pipeline.Pipeline) ingest.Sink { return p }
 // padding, yields exactly 24 characters (ceil(18/3)*4).
 const generatedPasswordBytes = 18
 
-// newAuth resolves the admin password (operator-supplied or freshly
-// generated), hashes it, and constructs *auth.Auth. The plaintext is also
-// returned (as adminPassword) purely so register can print it once on
-// first run.
-func newAuth(cfg config.Config, admin store.Admin) (*auth.Auth, adminPassword, error) {
-	pw := cfg.AdminPassword
-	if pw == "" {
-		generated, err := generatePassword()
+// settingAdminPasswordHash is the settings table key under which the
+// admin password's bcrypt hash is persisted, so it survives restarts
+// without regenerating (and thereby invalidating) the operator's
+// password on every boot.
+const settingAdminPasswordHash = "admin_password_hash"
+
+// newAuth resolves the admin password's bcrypt hash and constructs
+// *auth.Auth. Three cases, in order:
+//
+//  1. cfg.AdminPassword is set: hash it and use it, every boot, without
+//     persisting — the environment variable always wins, which is what
+//     makes password rotation possible (set it, restart, unset it again
+//     and the persisted hash from case 2 takes back over next boot...
+//     except case 2 only ever writes once, see below). The plaintext is
+//     already known to the operator, so it is not returned for printing.
+//  2. cfg.AdminPassword is empty and a hash is already persisted (every
+//     boot after the first): load and use it. Nothing is generated or
+//     printed.
+//  3. Neither: this is the very first boot. Generate a password, hash
+//     it, persist the hash, and return the plaintext so register can
+//     print it once.
+func newAuth(cfg config.Config, db *sqlite.DB) (*auth.Auth, generatedCreds, error) {
+	ctx := context.Background()
+
+	if cfg.AdminPassword != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(cfg.AdminPassword), bcrypt.DefaultCost)
 		if err != nil {
-			return nil, "", fmt.Errorf("app: generate admin password: %w", err)
+			return nil, generatedCreds{}, fmt.Errorf("app: hash admin password: %w", err)
 		}
-		pw = generated
+		return auth.New(db, hash), generatedCreds{}, nil
 	}
 
+	if hash, err := db.Setting(ctx, settingAdminPasswordHash); err == nil {
+		return auth.New(db, []byte(hash)), generatedCreds{}, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, generatedCreds{}, fmt.Errorf("app: load admin password hash: %w", err)
+	}
+
+	pw, err := generatePassword()
+	if err != nil {
+		return nil, generatedCreds{}, fmt.Errorf("app: generate admin password: %w", err)
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 	if err != nil {
-		return nil, "", fmt.Errorf("app: hash admin password: %w", err)
+		return nil, generatedCreds{}, fmt.Errorf("app: hash admin password: %w", err)
+	}
+	if err := db.SetSetting(ctx, settingAdminPasswordHash, string(hash)); err != nil {
+		return nil, generatedCreds{}, fmt.Errorf("app: persist admin password hash: %w", err)
 	}
 
-	return auth.New(admin, hash), adminPassword(pw), nil
+	return auth.New(db, hash), generatedCreds{password: pw}, nil
 }
 
 func generatePassword() (string, error) {

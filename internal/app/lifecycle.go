@@ -16,6 +16,7 @@ import (
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/pipeline"
 	"github.com/agenterr/agenterr/internal/store"
+	"github.com/agenterr/agenterr/internal/store/sqlite"
 )
 
 // retentionInterval is how often the retention job walks every project
@@ -29,19 +30,25 @@ const retentionInterval = time.Hour
 // retention mechanism.
 const guardrailWindow = 24 * time.Hour
 
+// shutdownServerBudget bounds how long OnStop gives srv.Shutdown before
+// moving on, so a slow/stuck HTTP shutdown can never eat the entire Stop
+// budget and starve pipe.Drain of the time it needs to flush — see
+// boundedShutdownCtx and its use in OnStop below.
+const shutdownServerBudget = 7 * time.Second
+
 // register wires the fx.Lifecycle hooks that turn the constructed graph
 // into a running process: OnStart performs first-run bootstrap, then
 // starts the pipeline writer loop, the HTTP server, and the retention
 // job, each in its own goroutine. OnStop reverses the order — server,
 // then pipeline, then store — so nothing is torn down out from under a
 // request that's still in flight.
-func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, st store.Store, pipe *pipeline.Pipeline, srv *http.Server, pw adminPassword) {
+func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.DB, pipe *pipeline.Pipeline, srv *http.Server, creds generatedCreds) {
 	pipeCtx, cancelPipe := context.WithCancel(context.Background())
 	retentionCtx, cancelRetention := context.WithCancel(context.Background())
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			if err := bootstrap(ctx, cfg, st, pw); err != nil {
+			if err := bootstrap(ctx, cfg, db, creds); err != nil {
 				return fmt.Errorf("app: bootstrap: %w", err)
 			}
 
@@ -56,12 +63,23 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, st store.Sto
 				}
 			}()
 
-			go retentionLoop(retentionCtx, cfg, st)
+			go retentionLoop(retentionCtx, cfg, db)
 
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
-			if err := srv.Shutdown(ctx); err != nil {
+			// srv.Shutdown gets its own bounded child context (capped at
+			// min(shutdownServerBudget, whatever's left of ctx)) so that
+			// even if it hangs — a stuck connection, a slow client — it
+			// cannot consume the entire Stop budget and leave pipe.Drain
+			// with no time to flush pending writes below. Drain itself
+			// still uses the outer ctx, so it gets whatever budget
+			// remains after the server phase actually finishes (which is
+			// normally almost immediately, well under the cap).
+			srvCtx, cancelSrv := boundedShutdownCtx(ctx, shutdownServerBudget)
+			err := srv.Shutdown(srvCtx)
+			cancelSrv()
+			if err != nil {
 				slog.Error("app: server shutdown", "err", err)
 			}
 
@@ -72,7 +90,7 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, st store.Sto
 				slog.Error("app: pipeline drain", "err", err)
 			}
 
-			if err := st.Close(); err != nil {
+			if err := db.Close(); err != nil {
 				return fmt.Errorf("app: store close: %w", err)
 			}
 			return nil
@@ -80,40 +98,59 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, st store.Sto
 	})
 }
 
-// bootstrap mints an instance admin key and prints it (plus the admin
-// password, if it was freshly generated) to stdout exactly once, the
-// first time the process ever starts against cfg.DBPath. Idempotency is
-// tracked with a marker file next to the database rather than a store
-// query, since store.Admin has no "does an admin key already exist"
-// method and adding one would ripple across every store implementation
-// and test fake for a check only this bootstrap path needs.
-func bootstrap(ctx context.Context, cfg config.Config, st store.Store, pw adminPassword) error {
-	marker := cfg.DBPath + ".bootstrap"
+// boundedShutdownCtx derives a child of parent with a deadline no later
+// than budget from now, and no later than parent's own deadline (if it
+// has one) — i.e. min(budget, time remaining on parent). If parent has no
+// deadline at all, the child is simply capped at budget.
+func boundedShutdownCtx(parent context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+	if dl, ok := parent.Deadline(); ok {
+		if remaining := time.Until(dl); remaining < budget {
+			budget = remaining
+		}
+	}
+	return context.WithTimeout(parent, budget)
+}
 
-	if _, err := os.Stat(marker); err == nil {
-		return nil // already bootstrapped against this database
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat bootstrap marker: %w", err)
+// bootstrap mints an instance admin key and prints it (plus the admin
+// password, if it was freshly generated this boot — creds.password is
+// only ever non-empty in that case) to stdout exactly once, the first
+// time an admin key exists for this database. HasAdminKey is a durable,
+// database-backed check (not a marker file living alongside it), so a
+// file-only restore of the database — Litestream or a plain copy,
+// carrying the existing admin key row with it — correctly prints
+// nothing instead of minting and printing a redundant key.
+func bootstrap(ctx context.Context, cfg config.Config, db *sqlite.DB, creds generatedCreds) error {
+	has, err := db.HasAdminKey(ctx)
+	if err != nil {
+		return fmt.Errorf("check admin key: %w", err)
+	}
+	if has {
+		return nil
 	}
 
-	key, err := st.MintKey(ctx, 0, "admin")
+	// Mint before printing, not the other way round: if the process
+	// crashes between the two, the worst case here is a minted-but-
+	// unprinted admin key sitting in the database — HasAdminKey then
+	// reports true on the next boot, nothing is printed, and the
+	// operator is left without a usable key (recoverable by minting one
+	// by hand against the db). Printing before minting risks the worse
+	// failure mode: showing the operator a key that a subsequently
+	// failed mint never actually created — a credential that looks
+	// valid but silently isn't.
+	key, err := db.MintKey(ctx, 0, "admin")
 	if err != nil {
 		return fmt.Errorf("mint admin key: %w", err)
 	}
 
-	if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write bootstrap marker: %w", err)
-	}
-
-	printBootstrap(cfg, key, pw)
+	printBootstrap(cfg, key, creds)
 	return nil
 }
 
-func printBootstrap(cfg config.Config, key string, pw adminPassword) {
+func printBootstrap(cfg config.Config, key string, creds generatedCreds) {
 	var b strings.Builder
 	b.WriteString("\n=== Agenterr: first run ===\n")
-	if cfg.AdminPassword == "" {
-		fmt.Fprintf(&b, "Generated admin password: %s\n", pw)
+	if creds.password != "" {
+		fmt.Fprintf(&b, "Generated admin password: %s\n", creds.password)
 	}
 	fmt.Fprintf(&b, "Admin API key:            %s\n", key)
 	fmt.Fprintf(&b, "Setup URL:                %s/\n", setupURL(cfg.ListenAddr))
