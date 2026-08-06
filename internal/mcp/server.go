@@ -15,6 +15,8 @@ package mcp
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -125,4 +127,30 @@ func errorResult(err error) *mcpsdk.CallToolResult {
 	res := &mcpsdk.CallToolResult{}
 	res.SetError(err)
 	return res
+}
+
+// errNotFound is the tool-level "not found" error: returned both when a
+// row genuinely doesn't exist and when it belongs to another project
+// (a project-scoped key must not learn that the row exists elsewhere).
+var errNotFound = errors.New("not found")
+
+// errInternal is the tool-level error for any store failure that isn't
+// store.ErrNotFound. Its text is deliberately generic.
+var errInternal = errors.New("internal error")
+
+// toolErr maps a store error to the error text a client is allowed to
+// see. store.ErrNotFound becomes the uniform errNotFound message; any
+// other error — a driver error, a wrapped SQL fragment, anything with
+// internal detail — must never reach the client over the wire, so it's
+// logged server-side and replaced with errInternal. This mirrors the
+// REST edge's policy (internal/api/handlers: respondErr(w, 500,
+// "internal") on every non-ErrNotFound store error) and is the one
+// place all tool handlers route store errors through, so that policy
+// can't be missed at a call site.
+func toolErr(err error) error {
+	if errors.Is(err, store.ErrNotFound) {
+		return errNotFound
+	}
+	slog.Error("mcp: store error", "error", err)
+	return errInternal
 }

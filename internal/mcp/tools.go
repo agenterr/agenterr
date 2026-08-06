@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -60,11 +59,6 @@ func (s *Server) registerTools() {
 	}, s.getStats)
 }
 
-// errNotFound is the tool-level "not found" error: returned both when a
-// row genuinely doesn't exist and when it belongs to another project
-// (a project-scoped key must not learn that the row exists elsewhere).
-var errNotFound = errors.New("not found")
-
 // ---- list_projects ----
 
 type listProjectsInput struct{}
@@ -81,7 +75,7 @@ func (s *Server) listProjects(ctx context.Context, _ *mcpsdk.CallToolRequest, _ 
 
 	projects, err := s.admin.Projects(ctx)
 	if err != nil {
-		return nil, nil, err
+		return errorResult(toolErr(err)), nil, nil
 	}
 	if !isAdmin {
 		filtered := projects[:0]
@@ -99,7 +93,7 @@ func (s *Server) listProjects(ctx context.Context, _ *mcpsdk.CallToolRequest, _ 
 	for _, p := range projects {
 		st, err := s.reader.Stats(ctx, store.StatsFilter{ProjectID: p.ID, Since: now.Add(-24 * time.Hour)})
 		if err != nil {
-			return nil, nil, err
+			return errorResult(toolErr(err)), nil, nil
 		}
 		rows = append(rows, projectRow{ID: p.ID, Slug: p.Slug, OpenIssues: st.OpenIssues, Logs24h: st.Logs})
 	}
@@ -161,7 +155,7 @@ func (s *Server) listIssues(ctx context.Context, _ *mcpsdk.CallToolRequest, in l
 
 	issues, err := s.reader.Issues(ctx, f)
 	if err != nil {
-		return nil, nil, err
+		return errorResult(toolErr(err)), nil, nil
 	}
 
 	hdr := issueListHeader{Status: status, Environment: in.Environment, SinceLabel: in.Since}
@@ -227,10 +221,7 @@ type getIssueInput struct {
 func (s *Server) getIssue(ctx context.Context, _ *mcpsdk.CallToolRequest, in getIssueInput) (*mcpsdk.CallToolResult, any, error) {
 	iss, events, err := s.reader.Issue(ctx, in.ID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return errorResult(errNotFound), nil, nil
-		}
-		return nil, nil, err
+		return errorResult(toolErr(err)), nil, nil
 	}
 
 	callerProjectID, isAdmin := callerScope(ctx)
@@ -264,10 +255,10 @@ func renderIssue(iss core.Issue, events []core.Event, now time.Time) string {
 		lines = append(lines, "")
 		lines = append(lines, fmt.Sprintf("newest event (%s):", formatRFC3339(newest.Time)))
 		lines = append(lines, "service: "+newest.Log.Service)
-		lines = append(lines, newest.Log.Body)
+		lines = append(lines, truncateChars(newest.Log.Body, maxBodyChars))
 		if st, ok := newest.Log.Attrs["exception.stacktrace"]; ok {
 			lines = append(lines, "exception.stacktrace:")
-			lines = append(lines, st)
+			lines = append(lines, truncateChars(st, maxStacktraceChars))
 		}
 		keys := make([]string, 0, len(newest.Log.Attrs))
 		for k := range newest.Log.Attrs {
@@ -390,7 +381,7 @@ func (s *Server) searchLogs(ctx context.Context, _ *mcpsdk.CallToolRequest, in s
 
 	logs, err := s.reader.SearchLogs(ctx, f)
 	if err != nil {
-		return nil, nil, err
+		return errorResult(toolErr(err)), nil, nil
 	}
 
 	hdr := logListHeader{Query: in.Query, Service: in.Service, Environment: in.Environment, SinceLabel: in.Since}
@@ -429,7 +420,8 @@ func logsHeaderLine(total int, hdr logListHeader) string {
 
 func renderLogRow(l core.Log, prefix string) string {
 	return fmt.Sprintf("%s%s [%s] %s %s id=%d",
-		prefix, formatRFC3339(l.Time), l.Severity.String(), l.Service, firstLineOf(l.Body), l.ID)
+		prefix, formatRFC3339(l.Time), l.Severity.String(), l.Service,
+		truncateChars(firstLineOf(l.Body), maxRowLineChars), l.ID)
 }
 
 func renderLogs(logs []core.Log, limit int, hdr logListHeader) string {
@@ -467,10 +459,7 @@ func (s *Server) getLogContext(ctx context.Context, _ *mcpsdk.CallToolRequest, i
 
 	logs, err := s.reader.LogContext(ctx, in.LogID, n)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return errorResult(errNotFound), nil, nil
-		}
-		return nil, nil, err
+		return errorResult(toolErr(err)), nil, nil
 	}
 
 	callerProjectID, isAdmin := callerScope(ctx)
@@ -517,10 +506,7 @@ func (s *Server) setIssueStatus(ctx context.Context, id int64, status core.Issue
 	if !isAdmin {
 		iss, _, err := s.reader.Issue(ctx, id)
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return errorResult(errNotFound), nil, nil
-			}
-			return nil, nil, err
+			return errorResult(toolErr(err)), nil, nil
 		}
 		if iss.ProjectID != callerProjectID {
 			return errorResult(errNotFound), nil, nil
@@ -528,10 +514,7 @@ func (s *Server) setIssueStatus(ctx context.Context, id int64, status core.Issue
 	}
 
 	if err := s.admin.SetIssueStatus(ctx, id, status); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return errorResult(errNotFound), nil, nil
-		}
-		return nil, nil, err
+		return errorResult(toolErr(err)), nil, nil
 	}
 	return textResult(fmt.Sprintf("issue #%d %s", id, label)), nil, nil
 }
@@ -564,7 +547,7 @@ func (s *Server) getStats(ctx context.Context, _ *mcpsdk.CallToolRequest, in get
 
 	st, err := s.reader.Stats(ctx, f)
 	if err != nil {
-		return nil, nil, err
+		return errorResult(toolErr(err)), nil, nil
 	}
 	return textResult(renderStats(st)), nil, nil
 }
@@ -580,6 +563,29 @@ func renderStats(st store.Stats) string {
 }
 
 // ---- shared helpers ----
+
+// Payload caps that keep a single tool result within a token-frugal
+// budget even when the underlying log body or stack trace is huge (a
+// multi-KB panic dump, a giant JSON blob logged as the body, etc).
+// Without these, get_issue's single newest-sample-event block — the one
+// place a full body/stacktrace is rendered — could dwarf every other
+// tool's entire output.
+const (
+	maxBodyChars       = 2000 // get_issue's newest-event body
+	maxStacktraceChars = 4000 // get_issue's exception.stacktrace attr
+	maxRowLineChars    = 300  // one row's body-first-line, in list/context tools
+)
+
+// truncateChars caps s at max runes, appending a marker that states the
+// true total so an agent knows content was cut rather than assuming the
+// value was simply short.
+func truncateChars(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + fmt.Sprintf("… (truncated, %d chars total)", len(r))
+}
 
 // relTime renders t relative to now as a compact human string: "45s ago",
 // "2m ago", "3h ago", "2d ago". Never negative — a t in now's future

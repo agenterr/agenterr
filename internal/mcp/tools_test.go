@@ -3,14 +3,17 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/agenterr/agenterr/internal/auth"
+	"github.com/agenterr/agenterr/internal/auth/authtest"
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/store"
 )
@@ -38,6 +41,12 @@ type fakeStore struct {
 	lastContextID   int64
 	lastContextN    int
 	contextNotFound bool
+
+	// forcedErr, when set, is returned by Issues in place of the canned
+	// issueList — used to simulate a non-ErrNotFound store failure (e.g.
+	// a wrapped driver error) and assert it never reaches the client
+	// verbatim.
+	forcedErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -55,6 +64,9 @@ func newFakeStore() *fakeStore {
 
 func (f *fakeStore) Issues(ctx context.Context, filter store.IssueFilter) ([]core.Issue, error) {
 	f.lastIssueFilter = filter
+	if f.forcedErr != nil {
+		return nil, f.forcedErr
+	}
 	return f.issueList, nil
 }
 
@@ -122,11 +134,11 @@ func (f *fakeStore) LookupKey(ctx context.Context, plaintext string) (int64, str
 // ---- context helpers (bypass HTTP auth for handler-level tests) ----
 
 func apiCtx(projectID int64) context.Context {
-	return auth.NewTestContext(context.Background(), projectID, "api")
+	return authtest.Context(projectID, "api")
 }
 
 func adminCtx() context.Context {
-	return auth.NewTestContext(context.Background(), 0, "admin")
+	return authtest.Context(0, "admin")
 }
 
 var fixedNow = time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
@@ -250,6 +262,86 @@ func TestRenderIssue(t *testing.T) {
 		"exception.type=*fiber.Error"
 	if got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestRenderIssue_CapsOversizedBodyAndStacktrace(t *testing.T) {
+	iss := core.Issue{
+		ID: 12, Fingerprint: "fp-abc", Title: "boom",
+		Severity: core.SeverityError, Status: core.StatusOpen,
+		FirstSeen: fixedNow, LastSeen: fixedNow, Count: 1,
+	}
+	bigBody := strings.Repeat("b", 2500)
+	bigStack := strings.Repeat("s", 5000)
+	events := []core.Event{
+		{
+			LogID: 1, IssueID: 12, Time: fixedNow,
+			Log: core.Log{
+				ID: 1, Service: "svc", Body: bigBody,
+				Attrs: map[string]string{"exception.stacktrace": bigStack},
+			},
+		},
+	}
+	got := renderIssue(iss, events, fixedNow)
+
+	wantBody := strings.Repeat("b", maxBodyChars) + "… (truncated, 2500 chars total)"
+	wantStack := strings.Repeat("s", maxStacktraceChars) + "… (truncated, 5000 chars total)"
+
+	lines := splitLines(got)
+	var gotBody, gotStack string
+	for i, l := range lines {
+		if l == "service: svc" && i+1 < len(lines) {
+			gotBody = lines[i+1]
+		}
+		if l == "exception.stacktrace:" && i+1 < len(lines) {
+			gotStack = lines[i+1]
+		}
+	}
+	if gotBody != wantBody {
+		t.Errorf("body line len=%d, want len=%d (mismatch)", len(gotBody), len(wantBody))
+	}
+	if gotStack != wantStack {
+		t.Errorf("stacktrace line len=%d, want len=%d (mismatch)", len(gotStack), len(wantStack))
+	}
+	if !strings.Contains(gotBody, "(truncated, 2500 chars total)") {
+		t.Errorf("body missing truncation marker: %q", gotBody)
+	}
+	if !strings.Contains(gotStack, "(truncated, 5000 chars total)") {
+		t.Errorf("stacktrace missing truncation marker: %q", gotStack)
+	}
+}
+
+func TestRenderIssue_UnderCap_NotTruncated(t *testing.T) {
+	iss := core.Issue{ID: 1, FirstSeen: fixedNow, LastSeen: fixedNow}
+	events := []core.Event{{LogID: 1, IssueID: 1, Time: fixedNow, Log: core.Log{ID: 1, Service: "svc", Body: "short body"}}}
+	got := renderIssue(iss, events, fixedNow)
+	if !strings.Contains(got, "short body") || strings.Contains(got, "truncated") {
+		t.Errorf("got:\n%s\nwant untruncated short body", got)
+	}
+}
+
+func TestTruncateChars(t *testing.T) {
+	short := "hello"
+	if got := truncateChars(short, 10); got != short {
+		t.Errorf("got %q, want unchanged %q", got, short)
+	}
+	long := strings.Repeat("x", 10)
+	got := truncateChars(long, 5)
+	want := "xxxxx… (truncated, 10 chars total)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestRenderLogRow_CapsOversizedFirstLine(t *testing.T) {
+	body := strings.Repeat("x", 500) + "\nsecond line"
+	l := core.Log{ID: 1, Time: fixedNow, Severity: core.SeverityInfo, Service: "svc", Body: body}
+	got := renderLogRow(l, "")
+	if strings.Contains(got, "second line") {
+		t.Errorf("row leaked past first line: %q", got)
+	}
+	if !strings.Contains(got, "(truncated, 500 chars total)") {
+		t.Errorf("row missing truncation marker: %q", got)
 	}
 }
 
@@ -389,6 +481,28 @@ func TestListIssues_DefaultStatusOpen(t *testing.T) {
 	}
 	if fs.lastIssueFilter.Status != core.StatusOpen {
 		t.Errorf("filter.Status = %q, want open", fs.lastIssueFilter.Status)
+	}
+}
+
+func TestListIssues_StoreError_ReturnsGenericInternalError(t *testing.T) {
+	s, fs := newTestMCPServer()
+	// Simulate a raw, sqlite-flavored driver error — the kind of thing
+	// that must never reach an MCP client verbatim.
+	fs.forcedErr = fmt.Errorf("querying issues: %w", errors.New("sqlite: SQL logic error near \"WHRE\": syntax error (code:1)"))
+
+	res, _, err := s.listIssues(apiCtx(1), nil, listIssuesInput{})
+	if err != nil {
+		t.Fatalf("err = %v, want nil (tool error goes in result)", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true")
+	}
+	text := textOf(t, res)
+	if text != "internal error" {
+		t.Errorf("text = %q, want %q", text, "internal error")
+	}
+	if strings.Contains(text, "sqlite") || strings.Contains(text, "WHRE") {
+		t.Errorf("text leaked raw store error detail: %q", text)
 	}
 }
 
