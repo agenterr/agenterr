@@ -62,7 +62,7 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (f *fakeStore) Issues(ctx context.Context, filter store.IssueFilter) ([]core.Issue, error) {
+func (f *fakeStore) Issues(_ context.Context, filter store.IssueFilter) ([]core.Issue, error) {
 	f.lastIssueFilter = filter
 	if f.forcedErr != nil {
 		return nil, f.forcedErr
@@ -70,7 +70,7 @@ func (f *fakeStore) Issues(ctx context.Context, filter store.IssueFilter) ([]cor
 	return f.issueList, nil
 }
 
-func (f *fakeStore) Issue(ctx context.Context, id int64) (core.Issue, []core.Event, error) {
+func (f *fakeStore) Issue(_ context.Context, id int64) (core.Issue, []core.Event, error) {
 	iss, ok := f.issues[id]
 	if !ok {
 		return core.Issue{}, nil, store.ErrNotFound
@@ -78,12 +78,12 @@ func (f *fakeStore) Issue(ctx context.Context, id int64) (core.Issue, []core.Eve
 	return iss, f.issueEvents[id], nil
 }
 
-func (f *fakeStore) SearchLogs(ctx context.Context, filter store.LogFilter) ([]core.Log, error) {
+func (f *fakeStore) SearchLogs(_ context.Context, filter store.LogFilter) ([]core.Log, error) {
 	f.lastLogFilter = filter
 	return f.logList, nil
 }
 
-func (f *fakeStore) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, error) {
+func (f *fakeStore) LogContext(_ context.Context, logID int64, n int) ([]core.Log, error) {
 	f.lastContextID = logID
 	f.lastContextN = n
 	if f.contextNotFound {
@@ -92,16 +92,16 @@ func (f *fakeStore) LogContext(ctx context.Context, logID int64, n int) ([]core.
 	return f.logList, nil
 }
 
-func (f *fakeStore) Stats(ctx context.Context, filter store.StatsFilter) (store.Stats, error) {
+func (f *fakeStore) Stats(_ context.Context, filter store.StatsFilter) (store.Stats, error) {
 	f.lastStatsFilter = filter
 	return f.stats[filter.ProjectID], nil
 }
 
-func (f *fakeStore) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeStore) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	return core.Project{}, errors.New("not implemented")
 }
 
-func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
+func (f *fakeStore) Projects(_ context.Context) ([]core.Project, error) {
 	out := make([]core.Project, 0, len(f.projects))
 	for _, p := range f.projects {
 		out = append(out, p)
@@ -109,7 +109,7 @@ func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
 	return out, nil
 }
 
-func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeStore) SetIssueStatus(_ context.Context, id int64, s core.IssueStatus) error {
 	iss, ok := f.issues[id]
 	if !ok {
 		return store.ErrNotFound
@@ -119,11 +119,11 @@ func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueSt
 	return nil
 }
 
-func (f *fakeStore) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeStore) MintKey(_ context.Context, _ int64, _ string) (string, error) {
 	return "", errors.New("not implemented")
 }
 
-func (f *fakeStore) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeStore) LookupKey(_ context.Context, plaintext string) (int64, string, error) {
 	e, ok := f.keys[plaintext]
 	if !ok {
 		return 0, "", store.ErrNotFound
@@ -683,7 +683,7 @@ func TestMCP_OverTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	tools, err := cs.ListTools(context.Background(), nil)
 	if err != nil {

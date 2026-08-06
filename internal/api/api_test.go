@@ -53,12 +53,12 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (f *fakeStore) Issues(ctx context.Context, filter store.IssueFilter) ([]core.Issue, error) {
+func (f *fakeStore) Issues(_ context.Context, filter store.IssueFilter) ([]core.Issue, error) {
 	f.lastIssueFilter = filter
 	return f.issueList, nil
 }
 
-func (f *fakeStore) Issue(ctx context.Context, id int64) (core.Issue, []core.Event, error) {
+func (f *fakeStore) Issue(_ context.Context, id int64) (core.Issue, []core.Event, error) {
 	iss, ok := f.issues[id]
 	if !ok {
 		return core.Issue{}, nil, store.ErrNotFound
@@ -66,12 +66,12 @@ func (f *fakeStore) Issue(ctx context.Context, id int64) (core.Issue, []core.Eve
 	return iss, f.issueEvents[id], nil
 }
 
-func (f *fakeStore) SearchLogs(ctx context.Context, filter store.LogFilter) ([]core.Log, error) {
+func (f *fakeStore) SearchLogs(_ context.Context, filter store.LogFilter) ([]core.Log, error) {
 	f.lastLogFilter = filter
 	return f.logList, nil
 }
 
-func (f *fakeStore) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, error) {
+func (f *fakeStore) LogContext(_ context.Context, logID int64, n int) ([]core.Log, error) {
 	f.lastContextID = logID
 	f.lastContextN = n
 	if f.contextNotFound {
@@ -80,19 +80,19 @@ func (f *fakeStore) LogContext(ctx context.Context, logID int64, n int) ([]core.
 	return f.logList, nil
 }
 
-func (f *fakeStore) Stats(ctx context.Context, filter store.StatsFilter) (store.Stats, error) {
+func (f *fakeStore) Stats(_ context.Context, filter store.StatsFilter) (store.Stats, error) {
 	f.lastStatsFilter = filter
 	return f.stats, nil
 }
 
-func (f *fakeStore) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeStore) CreateProject(_ context.Context, name string, retentionDays int) (core.Project, error) {
 	f.nextID++
 	p := core.Project{ID: f.nextID, Name: name, Slug: "slug-" + name, RetentionDays: retentionDays, CreatedAt: time.Now().UTC()}
 	f.projects[p.ID] = p
 	return p, nil
 }
 
-func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
+func (f *fakeStore) Projects(_ context.Context) ([]core.Project, error) {
 	out := make([]core.Project, 0, len(f.projects))
 	for _, p := range f.projects {
 		out = append(out, p)
@@ -100,7 +100,7 @@ func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
 	return out, nil
 }
 
-func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeStore) SetIssueStatus(_ context.Context, id int64, s core.IssueStatus) error {
 	iss, ok := f.issues[id]
 	if !ok {
 		return store.ErrNotFound
@@ -110,7 +110,7 @@ func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueSt
 	return nil
 }
 
-func (f *fakeStore) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeStore) MintKey(_ context.Context, projectID int64, kind string) (string, error) {
 	if _, ok := f.projects[projectID]; !ok {
 		return "", store.ErrNotFound
 	}
@@ -122,7 +122,7 @@ func (f *fakeStore) MintKey(ctx context.Context, projectID int64, kind string) (
 	return plaintext, nil
 }
 
-func (f *fakeStore) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeStore) LookupKey(_ context.Context, plaintext string) (int64, string, error) {
 	e, ok := f.keys[plaintext]
 	if !ok {
 		return 0, "", store.ErrNotFound
@@ -131,10 +131,8 @@ func (f *fakeStore) LookupKey(ctx context.Context, plaintext string) (int64, str
 }
 
 const (
-	validAPIKey        = "agt_api_valid"    // project 1
-	otherProjectAPIKey = "agt_api_other"    // project 2
-	adminKey           = "agt_admin_valid"  // instance-level, unscoped
-	ingestKey          = "agt_ingest_valid" // project 1, wrong kind for /api/v1
+	validAPIKey = "agt_api_valid"   // project 1
+	adminKey    = "agt_admin_valid" // instance-level, unscoped
 )
 
 func newTestServer(fs *fakeStore) *httptest.Server {
@@ -142,18 +140,10 @@ func newTestServer(fs *fakeStore) *httptest.Server {
 		projectID int64
 		kind      string
 	}{projectID: 1, kind: "api"}
-	fs.keys[otherProjectAPIKey] = struct {
-		projectID int64
-		kind      string
-	}{projectID: 2, kind: "api"}
 	fs.keys[adminKey] = struct {
 		projectID int64
 		kind      string
 	}{projectID: 0, kind: "admin"}
-	fs.keys[ingestKey] = struct {
-		projectID int64
-		kind      string
-	}{projectID: 1, kind: "ingest"}
 
 	a := auth.New(fs, []byte{})
 	api := New(fs, fs)
@@ -191,7 +181,7 @@ func TestProjects_Create_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects", adminKey, []byte(`{"name":"acme","retention_days":30}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", resp.StatusCode)
 	}
@@ -216,7 +206,7 @@ func TestProjects_List_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/projects", adminKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -239,7 +229,7 @@ func TestProjects_MintKey_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/keys", adminKey, []byte(`{"kind":"ingest"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want 201", resp.StatusCode)
 	}
@@ -260,7 +250,7 @@ func TestProjects_MintKey_UnknownProject_Returns404(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/999/keys", adminKey, []byte(`{"kind":"ingest"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -272,7 +262,7 @@ func TestProjects_Create_APIKey_Returns401(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects", validAPIKey, []byte(`{"name":"acme","retention_days":30}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
@@ -284,7 +274,7 @@ func TestProjects_List_APIKey_Returns401(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/projects", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
@@ -296,7 +286,7 @@ func TestProjects_Create_NonPositiveRetention_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects", adminKey, []byte(`{"name":"acme","retention_days":0}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -315,7 +305,7 @@ func TestIssues_List_HappyPath_FilterMapping(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues?project=1&env=prod&status=open&since=2026-01-01T00:00:00Z&limit=10", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -369,14 +359,14 @@ func TestIssues_List_BadSince_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues?since=not-a-time", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 	var got struct {
 		Error string `json:"error"`
 	}
-	json.NewDecoder(resp.Body).Decode(&got)
+	_ = json.NewDecoder(resp.Body).Decode(&got)
 	if got.Error == "" {
 		t.Errorf("expected non-empty error message")
 	}
@@ -388,7 +378,7 @@ func TestIssues_List_BadLimit_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues?limit=abc", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -400,14 +390,14 @@ func TestIssues_List_NegativeLimit_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues?limit=-1", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 	var got struct {
 		Error string `json:"error"`
 	}
-	json.NewDecoder(resp.Body).Decode(&got)
+	_ = json.NewDecoder(resp.Body).Decode(&got)
 	if got.Error == "" {
 		t.Errorf("expected error naming the limit param")
 	}
@@ -422,7 +412,7 @@ func TestIssues_List_APIKey_IgnoresProjectParam(t *testing.T) {
 	// trusted, since an api key is authoritatively scoped to its own
 	// project.
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues?project=999", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -437,7 +427,7 @@ func TestIssues_List_AdminKey_UsesProjectParam(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues?project=5", adminKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -457,7 +447,7 @@ func TestIssues_Get_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues/1", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -490,7 +480,7 @@ func TestIssues_Get_UnknownID_Returns404(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues/999", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -513,7 +503,7 @@ func TestIssues_Get_APIKey_OtherProjectIssue_Returns404(t *testing.T) {
 
 	// validAPIKey belongs to project 1; the issue belongs to project 2.
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues/1", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -535,7 +525,7 @@ func TestIssues_Get_AdminKey_SeesAnyProject(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues/1", adminKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -548,7 +538,7 @@ func TestIssues_UpdateStatus_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPatch, "/api/v1/issues/1", validAPIKey, []byte(`{"status":"resolved"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", resp.StatusCode)
 	}
@@ -564,7 +554,7 @@ func TestIssues_UpdateStatus_BadValue_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPatch, "/api/v1/issues/1", validAPIKey, []byte(`{"status":"bogus"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -576,7 +566,7 @@ func TestIssues_UpdateStatus_UnknownID_Returns404(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPatch, "/api/v1/issues/999", validAPIKey, []byte(`{"status":"resolved"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -589,7 +579,7 @@ func TestIssues_UpdateStatus_APIKey_OtherProjectIssue_Returns404(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPatch, "/api/v1/issues/1", validAPIKey, []byte(`{"status":"resolved"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -605,7 +595,7 @@ func TestIssues_UpdateStatus_AdminKey_OtherProjectIssue_Succeeds(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPatch, "/api/v1/issues/1", adminKey, []byte(`{"status":"resolved"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", resp.StatusCode)
 	}
@@ -621,7 +611,7 @@ func TestIssues_UpdateStatus_UnknownField_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodPatch, "/api/v1/issues/1", validAPIKey, []byte(`{"status":"resolved","bogus":true}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -639,7 +629,7 @@ func TestLogs_Search_HappyPath_FilterMapping(t *testing.T) {
 	resp := doReq(t, srv, http.MethodGet,
 		"/api/v1/logs?project=1&q=hello&min_severity=error&service=api&env=prod&since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00Z&limit=25",
 		validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -685,7 +675,7 @@ func TestLogs_Search_NegativeLimit_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs?limit=-5", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -697,7 +687,7 @@ func TestLogs_Search_APIKey_IgnoresProjectParam(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs?project=999", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -712,7 +702,7 @@ func TestLogs_Search_AdminKey_UsesProjectParam(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs?project=7", adminKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -732,7 +722,7 @@ func TestLogs_Context_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs/5/context?n=20", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -760,7 +750,7 @@ func TestLogs_Context_UnknownID_Returns404(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs/999/context", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -772,7 +762,7 @@ func TestLogs_Context_NegativeN_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs/5/context?n=-1", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -785,7 +775,7 @@ func TestLogs_Context_APIKey_OtherProjectLog_Returns404(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs/5/context", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
@@ -798,7 +788,7 @@ func TestLogs_Context_AdminKey_SeesAnyProject(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs/5/context", adminKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -814,7 +804,7 @@ func TestStats_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/stats?project=1&since=2026-01-01T00:00:00Z", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -848,7 +838,7 @@ func TestStats_APIKey_IgnoresProjectParam(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/stats?project=999", validAPIKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -863,7 +853,7 @@ func TestStats_AdminKey_UsesProjectParam(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/stats?project=9", adminKey, nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -878,7 +868,7 @@ func TestNoAuth_Returns401(t *testing.T) {
 	defer srv.Close()
 
 	resp := doReq(t, srv, http.MethodGet, "/api/v1/issues", "", nil)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
