@@ -51,6 +51,17 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("NoiseRules/SetProjectParseBodies", func(t *testing.T) { testNoiseRulesSetProjectParseBodies(t, open) })
 	t.Run("NoiseRules/CreateProjectDefaultsParseBodiesTrue", func(t *testing.T) { testNoiseRulesCreateProjectDefaultsParseBodiesTrue(t, open) })
 	t.Run("NoiseRules/SeverityRoundTripsLowercase", func(t *testing.T) { testNoiseRulesSeverityRoundTripsLowercase(t, open) })
+	t.Run("AlertRules/UpsertInsertReturnsIDAndDefaults", func(t *testing.T) { testAlertRulesUpsertInsertReturnsIDAndDefaults(t, open) })
+	t.Run("AlertRules/UpsertUpdateRoundTripsFields", func(t *testing.T) { testAlertRulesUpsertUpdateRoundTripsFields(t, open) })
+	t.Run("AlertRules/UpsertUpdateMissingIDNotFound", func(t *testing.T) { testAlertRulesUpsertUpdateMissingIDNotFound(t, open) })
+	t.Run("AlertRules/UpsertUnknownKindRejected", func(t *testing.T) { testAlertRulesUpsertUnknownKindRejected(t, open) })
+	t.Run("AlertRules/DeleteThenNotFound", func(t *testing.T) { testAlertRulesDeleteThenNotFound(t, open) })
+	t.Run("AlertRules/ListScopedByProjectAndOrdered", func(t *testing.T) { testAlertRulesListScopedByProjectAndOrdered(t, open) })
+	t.Run("AlertRules/ListAllProjects", func(t *testing.T) { testAlertRulesListAllProjects(t, open) })
+	t.Run("AlertRules/RecordAlertResultSetsAndClearsFields", func(t *testing.T) { testAlertRulesRecordAlertResultSetsAndClearsFields(t, open) })
+	t.Run("AlertRules/RecordAlertResultMissingIDNoOp", func(t *testing.T) { testAlertRulesRecordAlertResultMissingIDNoOp(t, open) })
+	t.Run("AlertRules/SeverityRoundTripsLowercase", func(t *testing.T) { testAlertRulesSeverityRoundTripsLowercase(t, open) })
+	t.Run("AlertRules/HeadersNilRoundTrips", func(t *testing.T) { testAlertRulesHeadersNilRoundTrips(t, open) })
 	t.Run("ServiceCounts/GroupsAndOrdersDescending", func(t *testing.T) { testServiceCountsGroupsAndOrdersDescending(t, open) })
 }
 

@@ -126,12 +126,37 @@ type NoiseRuleRow struct {
 	CreatedAt    time.Time
 }
 
+// AlertRules manages per-project alert rules and their delivery outcomes.
+type AlertRules interface {
+	// AlertRules returns rules for a project (projectID 0 = all
+	// projects), ordered by ascending ID.
+	AlertRules(ctx context.Context, projectID int64) ([]AlertRuleRow, error)
+	// UpsertAlertRule inserts (ID 0) or updates (ID set) and returns the
+	// stored row. Updating a missing ID returns ErrNotFound. Unknown
+	// kinds are rejected with an error.
+	UpsertAlertRule(ctx context.Context, r core.AlertRule) (AlertRuleRow, error)
+	DeleteAlertRule(ctx context.Context, id int64) error // missing → ErrNotFound
+	// RecordAlertResult stores the outcome of a delivery attempt: firedAt
+	// is the attempt time, lastError "" on success. A missing ID (rule
+	// deleted mid-flight) is a silent no-op.
+	RecordAlertResult(ctx context.Context, id int64, firedAt time.Time, lastError string) error
+}
+
+// AlertRuleRow is a stored alert rule plus persistence-side fields.
+type AlertRuleRow struct {
+	core.AlertRule
+	LastFired time.Time // zero = never
+	LastError string
+	CreatedAt time.Time
+}
+
 // Store is the full persistence surface a backend must implement.
 type Store interface {
 	Reader
 	Writer
 	Admin
 	NoiseRules
+	AlertRules
 	Close() error
 }
 
