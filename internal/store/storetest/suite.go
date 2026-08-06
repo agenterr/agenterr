@@ -51,6 +51,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("NoiseRules/SetProjectParseBodies", func(t *testing.T) { testNoiseRulesSetProjectParseBodies(t, open) })
 	t.Run("NoiseRules/CreateProjectDefaultsParseBodiesTrue", func(t *testing.T) { testNoiseRulesCreateProjectDefaultsParseBodiesTrue(t, open) })
 	t.Run("NoiseRules/SeverityRoundTripsLowercase", func(t *testing.T) { testNoiseRulesSeverityRoundTripsLowercase(t, open) })
+	t.Run("ServiceCounts/GroupsAndOrdersDescending", func(t *testing.T) { testServiceCountsGroupsAndOrdersDescending(t, open) })
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -1233,5 +1234,38 @@ func testNoiseRulesSeverityRoundTripsLowercase(t *testing.T, open func(t *testin
 	}
 	if len(rows) != 1 || rows[0].Severity != core.SeverityWarn {
 		t.Fatalf("rows = %+v, want single row with Severity=%v", rows, core.SeverityWarn)
+	}
+}
+
+func testServiceCountsGroupsAndOrdersDescending(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+	other := mustProject(ctx, t, s)
+
+	entries := []store.Entry{
+		entry(p.ID, core.SeverityInfo, "a1", "svc-a", baseTime),
+		entry(p.ID, core.SeverityInfo, "a2", "svc-a", baseTime.Add(time.Minute)),
+		entry(p.ID, core.SeverityInfo, "a3", "svc-a", baseTime.Add(2*time.Minute)),
+		entry(p.ID, core.SeverityInfo, "b1", "svc-b", baseTime.Add(3*time.Minute)),
+		entry(p.ID, core.SeverityInfo, "too-old", "svc-a", baseTime.Add(-time.Hour)),
+		entry(other.ID, core.SeverityInfo, "other-project", "svc-a", baseTime),
+	}
+	if err := s.WriteBatch(ctx, entries); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+
+	counts, err := s.ServiceCounts(ctx, p.ID, baseTime.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("ServiceCounts: %v", err)
+	}
+	if len(counts) != 2 {
+		t.Fatalf("counts = %+v, want 2 services", counts)
+	}
+	if counts[0].Service != "svc-a" || counts[0].Logs != 3 {
+		t.Errorf("counts[0] = %+v, want svc-a with 3 logs", counts[0])
+	}
+	if counts[1].Service != "svc-b" || counts[1].Logs != 1 {
+		t.Errorf("counts[1] = %+v, want svc-b with 1 log", counts[1])
 	}
 }

@@ -97,6 +97,10 @@ func (f *fakeStore) Stats(_ context.Context, filter store.StatsFilter) (store.St
 	return f.stats[filter.ProjectID], nil
 }
 
+func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]store.ServiceCount, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	return core.Project{}, errors.New("not implemented")
 }

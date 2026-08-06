@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/core"
+	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
 )
 
@@ -31,7 +34,12 @@ type fakeStore struct {
 
 	logList []core.Log
 
-	stats store.Stats
+	stats         store.Stats
+	serviceCounts []store.ServiceCount
+
+	rules      map[int64]store.NoiseRuleRow
+	nextRuleID int64
+	dropCalls  []map[int64]int64
 
 	lastIssueFilter store.IssueFilter
 	lastLogFilter   store.LogFilter
@@ -50,6 +58,7 @@ func newFakeStore() *fakeStore {
 		}),
 		issues:      make(map[int64]core.Issue),
 		issueEvents: make(map[int64][]core.Event),
+		rules:       make(map[int64]store.NoiseRuleRow),
 	}
 }
 
@@ -83,6 +92,73 @@ func (f *fakeStore) LogContext(_ context.Context, logID int64, n int) ([]core.Lo
 func (f *fakeStore) Stats(_ context.Context, filter store.StatsFilter) (store.Stats, error) {
 	f.lastStatsFilter = filter
 	return f.stats, nil
+}
+
+func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]store.ServiceCount, error) {
+	return f.serviceCounts, nil
+}
+
+func (f *fakeStore) NoiseRules(_ context.Context, projectID int64) ([]store.NoiseRuleRow, error) {
+	ids := make([]int64, 0, len(f.rules))
+	for id := range f.rules {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var out []store.NoiseRuleRow
+	for _, id := range ids {
+		row := f.rules[id]
+		if projectID == 0 || row.ProjectID == projectID {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertNoiseRule(_ context.Context, r core.NoiseRule) (store.NoiseRuleRow, error) {
+	if r.ID == 0 {
+		f.nextRuleID++
+		r.ID = f.nextRuleID
+	} else if _, ok := f.rules[r.ID]; !ok {
+		return store.NoiseRuleRow{}, store.ErrNotFound
+	}
+	row := store.NoiseRuleRow{NoiseRule: r}
+	if existing, ok := f.rules[r.ID]; ok {
+		row.DroppedCount = existing.DroppedCount
+		row.CreatedAt = existing.CreatedAt
+	}
+	f.rules[r.ID] = row
+	return row, nil
+}
+
+func (f *fakeStore) DeleteNoiseRule(_ context.Context, id int64) error {
+	if _, ok := f.rules[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.rules, id)
+	return nil
+}
+
+func (f *fakeStore) AddNoiseDrops(_ context.Context, counts map[int64]int64) error {
+	cp := make(map[int64]int64, len(counts))
+	for id, n := range counts {
+		cp[id] = n
+		if row, ok := f.rules[id]; ok {
+			row.DroppedCount += n
+			f.rules[id] = row
+		}
+	}
+	f.dropCalls = append(f.dropCalls, cp)
+	return nil
+}
+
+func (f *fakeStore) SetProjectParseBodies(_ context.Context, projectID int64, on bool) error {
+	p, ok := f.projects[projectID]
+	if !ok {
+		p = core.Project{ID: projectID}
+	}
+	p.ParseBodies = on
+	f.projects[projectID] = p
+	return nil
 }
 
 func (f *fakeStore) CreateProject(_ context.Context, name string, retentionDays int) (core.Project, error) {
@@ -146,7 +222,8 @@ func newTestServer(fs *fakeStore) *httptest.Server {
 	}{projectID: 0, kind: "admin"}
 
 	a := auth.New(fs, []byte{})
-	api := New(fs, fs)
+	engine := rules.New(fs, fs)
+	api := New(fs, fs, fs, engine)
 	mux := http.NewServeMux()
 	api.Mount(mux, a)
 	return httptest.NewServer(mux)
@@ -871,5 +948,265 @@ func TestNoAuth_Returns401(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestNoiseRules_CreateListDelete_RoundTrip(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"severity_floor","service":"traefik","severity":"warn","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		ID       int64  `json:"id"`
+		Kind     string `json:"kind"`
+		Severity string `json:"severity"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.ID == 0 || created.Kind != "severity_floor" || created.Severity != "warn" {
+		t.Errorf("created = %+v", created)
+	}
+
+	listResp := doReq(t, srv, http.MethodGet, "/api/v1/projects/1/noise-rules", validAPIKey, nil)
+	defer func() { _ = listResp.Body.Close() }()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", listResp.StatusCode)
+	}
+	var listed []struct {
+		ID           int64 `json:"id"`
+		DroppedCount int64 `json:"dropped_count"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("listed = %+v, want single rule with id %d", listed, created.ID)
+	}
+
+	delResp := doReq(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/noise-rules/%d", created.ID), validAPIKey, nil)
+	defer func() { _ = delResp.Body.Close() }()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204", delResp.StatusCode)
+	}
+
+	listResp2 := doReq(t, srv, http.MethodGet, "/api/v1/projects/1/noise-rules", validAPIKey, nil)
+	defer func() { _ = listResp2.Body.Close() }()
+	var listed2 []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(listResp2.Body).Decode(&listed2); err != nil {
+		t.Fatalf("decode list2: %v", err)
+	}
+	if len(listed2) != 0 {
+		t.Errorf("listed2 = %+v, want empty after delete", listed2)
+	}
+}
+
+func TestNoiseRules_UnknownKind_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"bogus","service":"traefik","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestNoiseRules_BadSeverity_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"severity_floor","service":"traefik","severity":"wrn","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestNoiseRules_Delete_CrossProject_Returns404(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextRuleID = 1
+	fs.rules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "x", Enabled: true}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	// validAPIKey belongs to project 1; the rule belongs to project 2.
+	resp := doReq(t, srv, http.MethodDelete, "/api/v1/noise-rules/1", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if _, ok := fs.rules[1]; !ok {
+		t.Errorf("rule was deleted despite cross-project caller")
+	}
+}
+
+func TestNoiseRules_Create_UpdateCrossProjectRule_Returns404(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextRuleID = 1
+	fs.rules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "x", Enabled: true}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	// validAPIKey belongs to project 1; trying to update rule 1 (project 2's)
+	// must not succeed, and must not leak that the rule exists.
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"id":1,"kind":"drop_match","pattern":"y","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if fs.rules[1].Pattern != "x" {
+		t.Errorf("rule was mutated despite cross-project caller: %+v", fs.rules[1])
+	}
+}
+
+func TestNoiseRules_List_APIKey_IgnoresPathProject(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextRuleID = 1
+	fs.rules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "x", Enabled: true}}
+	fs.rules[2] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 2, ProjectID: 2, Kind: core.NoiseDropMatch, Pattern: "y", Enabled: true}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	// validAPIKey belongs to project 1; path says project 2, must be ignored.
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/projects/2/noise-rules", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != 1 {
+		t.Errorf("got = %+v, want only project 1's rule", got)
+	}
+}
+
+func TestNoiseReport_Shape(t *testing.T) {
+	fs := newFakeStore()
+	fs.serviceCounts = []store.ServiceCount{{Service: "svc-a", Logs: 10}, {Service: "svc-b", Logs: 3}}
+	fs.nextRuleID = 1
+	fs.rules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "x", Enabled: true}, DroppedCount: 7}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/noise-report?project=1&hours=24", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		TopServices []struct {
+			Service string `json:"service"`
+			Logs    int64  `json:"logs"`
+		} `json:"top_services"`
+		Rules []struct {
+			ID           int64 `json:"id"`
+			DroppedCount int64 `json:"dropped_count"`
+		} `json:"rules"`
+		TotalDropped int64 `json:"total_dropped"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.TopServices) != 2 || got.TopServices[0].Service != "svc-a" {
+		t.Errorf("top_services = %+v", got.TopServices)
+	}
+	if len(got.Rules) != 1 || got.Rules[0].DroppedCount != 7 {
+		t.Errorf("rules = %+v", got.Rules)
+	}
+	if got.TotalDropped != 7 {
+		t.Errorf("total_dropped = %d, want 7", got.TotalDropped)
+	}
+}
+
+func TestStats_IncludesDropped(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextRuleID = 1
+	fs.rules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "x", Enabled: true}, DroppedCount: 5}
+	fs.rules[2] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 2, ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "y", Enabled: true}, DroppedCount: 2}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/stats", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Dropped int64 `json:"dropped"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Dropped != 7 {
+		t.Errorf("dropped = %d, want 7", got.Dropped)
+	}
+}
+
+func TestProjects_Patch_ParseBodiesToggle_VisibleInList(t *testing.T) {
+	fs := newFakeStore()
+	fs.projects[1] = core.Project{ID: 1, Name: "acme", Slug: "acme", RetentionDays: 14, ParseBodies: true}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPatch, "/api/v1/projects/1", adminKey, []byte(`{"parse_bodies":false}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+
+	listResp := doReq(t, srv, http.MethodGet, "/api/v1/projects", adminKey, nil)
+	defer func() { _ = listResp.Body.Close() }()
+	var got []struct {
+		ID          int64 `json:"id"`
+		ParseBodies bool  `json:"parse_bodies"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].ParseBodies {
+		t.Errorf("got = %+v, want parse_bodies=false", got)
+	}
+}
+
+func TestProjects_Patch_UnknownField_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	fs.projects[1] = core.Project{ID: 1, Name: "acme"}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPatch, "/api/v1/projects/1", adminKey, []byte(`{"parse_bodies":false,"name":"nope"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestProjects_Patch_UnknownProject_Returns404(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPatch, "/api/v1/projects/999", adminKey, []byte(`{"parse_bodies":false}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
 }

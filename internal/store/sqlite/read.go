@@ -353,6 +353,33 @@ WHERE project_id = ? AND ts >= ?
 GROUP BY day
 ORDER BY day ASC`
 
+const serviceCounts = `
+SELECT service, COUNT(*) AS logs FROM logs
+WHERE project_id = ? AND ts >= ?
+GROUP BY service
+ORDER BY logs DESC, service ASC
+LIMIT 20`
+
+// ServiceCounts returns the top 20 services by log count for projectID
+// since the given time, ordered descending by count.
+func (db *DB) ServiceCounts(ctx context.Context, projectID int64, since time.Time) ([]store.ServiceCount, error) {
+	rows, err := db.sql.QueryContext(ctx, serviceCounts, projectID, since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: service counts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []store.ServiceCount
+	for rows.Next() {
+		var sc store.ServiceCount
+		if err := rows.Scan(&sc.Service, &sc.Logs); err != nil {
+			return nil, fmt.Errorf("sqlite: scan service count: %w", err)
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
 // Stats computes aggregate log/event/issue counts and a per-day breakdown
 // for the given project since f.Since.
 func (db *DB) Stats(ctx context.Context, f store.StatsFilter) (store.Stats, error) {

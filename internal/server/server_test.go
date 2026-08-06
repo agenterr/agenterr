@@ -21,6 +21,7 @@ import (
 	"github.com/agenterr/agenterr/internal/ingest/otlp"
 	"github.com/agenterr/agenterr/internal/mcp"
 	"github.com/agenterr/agenterr/internal/pipeline"
+	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
 	"github.com/agenterr/agenterr/internal/store/sqlite"
 	"github.com/agenterr/agenterr/internal/web"
@@ -45,6 +46,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 	a := auth.New(db, hash)
 
 	pipe := pipeline.New(db, core.DefaultGrouper{}, pipeline.NopNotifier{}, pipeline.NopDropper{}, pipeline.Options{})
+	engine := rules.New(db, db)
 
 	deps := Deps{
 		Cfg:       config.Config{ListenAddr: ":0"},
@@ -52,7 +54,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 		Pipe:      pipe,
 		Ingesters: []ingest.Ingester{jsonapi.New(pipe, 0), otlp.New(pipe, 0)},
 		Auth:      a,
-		API:       api.New(db, db),
+		API:       api.New(db, db, db, engine),
 		MCP:       mcp.New(db, db),
 		Web:       web.New(db, db, a),
 	}

@@ -9,24 +9,30 @@ import (
 
 	"github.com/agenterr/agenterr/internal/api/handlers"
 	"github.com/agenterr/agenterr/internal/auth"
+	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
 )
 
 // API mounts the /api/v1 route table.
 type API struct {
-	projects *handlers.Projects
-	issues   *handlers.Issues
-	logs     *handlers.Logs
-	stats    *handlers.Stats
+	projects   *handlers.Projects
+	issues     *handlers.Issues
+	logs       *handlers.Logs
+	stats      *handlers.Stats
+	noiseRules *handlers.NoiseRules
 }
 
 // New constructs an API reading via reader and administering via admin.
-func New(reader store.Reader, admin store.Admin) *API {
+// nr and engine back the noise-rule management/report routes: nr for
+// plain reads, engine for every mutation so the pipeline's cached view
+// of rules stays fresh (see internal/rules.Engine).
+func New(reader store.Reader, admin store.Admin, nr store.NoiseRules, engine *rules.Engine) *API {
 	return &API{
-		projects: &handlers.Projects{Admin: admin},
-		issues:   &handlers.Issues{Reader: reader, Admin: admin},
-		logs:     &handlers.Logs{Reader: reader},
-		stats:    &handlers.Stats{Reader: reader},
+		projects:   &handlers.Projects{Admin: admin, Engine: engine},
+		issues:     &handlers.Issues{Reader: reader, Admin: admin},
+		logs:       &handlers.Logs{Reader: reader},
+		stats:      &handlers.Stats{Reader: reader, NR: nr},
+		noiseRules: &handlers.NoiseRules{NR: nr, Reader: reader, Engine: engine},
 	}
 }
 
@@ -48,6 +54,7 @@ func (a *API) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
 	mux.Handle("POST /api/v1/projects", admin(a.projects.Create))
 	mux.Handle("GET /api/v1/projects", admin(a.projects.List))
 	mux.Handle("POST /api/v1/projects/{id}/keys", admin(a.projects.MintKey))
+	mux.Handle("PATCH /api/v1/projects/{id}", admin(a.projects.Update))
 
 	mux.Handle("GET /api/v1/issues", wrap(a.issues.List))
 	mux.Handle("GET /api/v1/issues/{id}", wrap(a.issues.Get))
@@ -57,4 +64,9 @@ func (a *API) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
 	mux.Handle("GET /api/v1/logs/{id}/context", wrap(a.logs.Context))
 
 	mux.Handle("GET /api/v1/stats", wrap(a.stats.Get))
+
+	mux.Handle("GET /api/v1/projects/{id}/noise-rules", wrap(a.noiseRules.List))
+	mux.Handle("POST /api/v1/projects/{id}/noise-rules", wrap(a.noiseRules.Create))
+	mux.Handle("DELETE /api/v1/noise-rules/{id}", wrap(a.noiseRules.Delete))
+	mux.Handle("GET /api/v1/noise-report", wrap(a.noiseRules.Report))
 }

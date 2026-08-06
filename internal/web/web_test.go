@@ -79,6 +79,10 @@ func (f *fakeStore) Stats(_ context.Context, _ store.StatsFilter) (store.Stats, 
 	return f.stats, nil
 }
 
+func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]store.ServiceCount, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) CreateProject(_ context.Context, name string, retentionDays int) (core.Project, error) {
 	f.nextID++
 	p := core.Project{ID: f.nextID, Name: name, Slug: "slug-" + name, RetentionDays: retentionDays, CreatedAt: time.Now().UTC()}

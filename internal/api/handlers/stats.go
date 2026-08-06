@@ -11,6 +11,7 @@ import (
 // Stats serves the /api/v1/stats route.
 type Stats struct {
 	Reader store.Reader
+	NR     store.NoiseRules
 }
 
 type dayCountDTO struct {
@@ -23,15 +24,16 @@ type statsDTO struct {
 	Logs       int64         `json:"logs"`
 	Events     int64         `json:"events"`
 	OpenIssues int64         `json:"open_issues"`
+	Dropped    int64         `json:"dropped"`
 	PerDay     []dayCountDTO `json:"per_day"`
 }
 
-func toStatsDTO(s store.Stats) statsDTO {
+func toStatsDTO(s store.Stats, dropped int64) statsDTO {
 	perDay := make([]dayCountDTO, len(s.PerDay))
 	for i, d := range s.PerDay {
 		perDay[i] = dayCountDTO{Day: d.Day, Logs: d.Logs, Events: d.Events}
 	}
-	return statsDTO{Logs: s.Logs, Events: s.Events, OpenIssues: s.OpenIssues, PerDay: perDay}
+	return statsDTO{Logs: s.Logs, Events: s.Events, OpenIssues: s.OpenIssues, Dropped: dropped, PerDay: perDay}
 }
 
 // Get handles GET /api/v1/stats.
@@ -68,5 +70,19 @@ func (s *Stats) Get(w http.ResponseWriter, r *http.Request) {
 		respondErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	respond(w, http.StatusOK, toStatsDTO(stats))
+
+	// f.ProjectID conveniently doubles as the NoiseRules scope: 0 means
+	// "no ?project given by an admin key", which store.NoiseRules also
+	// treats as "all projects" — the same fan-out this field needs.
+	ruleRows, err := s.NR.NoiseRules(r.Context(), f.ProjectID)
+	if err != nil {
+		respondErr(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	var dropped int64
+	for _, rr := range ruleRows {
+		dropped += rr.DroppedCount
+	}
+
+	respond(w, http.StatusOK, toStatsDTO(stats, dropped))
 }

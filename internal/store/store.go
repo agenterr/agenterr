@@ -78,6 +78,16 @@ type Reader interface {
 	SearchLogs(ctx context.Context, f LogFilter) ([]core.Log, error)
 	LogContext(ctx context.Context, logID int64, n int) ([]core.Log, error)
 	Stats(ctx context.Context, f StatsFilter) (Stats, error)
+	// ServiceCounts returns the top 20 services by log count for
+	// projectID since the given time, ordered descending by count.
+	ServiceCounts(ctx context.Context, projectID int64, since time.Time) ([]ServiceCount, error)
+}
+
+// ServiceCount is one service's log volume, used to build the noise
+// report's top_services list.
+type ServiceCount struct {
+	Service string
+	Logs    int64
 }
 
 // Admin manages projects, issue status, and API keys.
