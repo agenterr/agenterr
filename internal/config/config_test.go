@@ -24,6 +24,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -56,6 +57,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  500,
 				MaxBodyBytes:  10485760,
 				MaxDBBytes:    1073741824,
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -80,6 +82,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -102,6 +105,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    123, // env overrides default
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -124,6 +128,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  100,
 				MaxBodyBytes:  2097152,
 				MaxDBBytes:    536870912,
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -204,6 +209,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -218,6 +224,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -232,6 +239,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    100000000,
+				ParseBodies:   true,
 			},
 		},
 		{
@@ -251,6 +259,7 @@ func TestLoad(t *testing.T) {
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    2147483648,
+				ParseBodies:   true,
 			},
 		},
 	}
@@ -274,6 +283,58 @@ func TestLoad(t *testing.T) {
 				t.Errorf("Load() = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseBodiesConfig(t *testing.T) {
+	noEnv := func(string) string { return "" }
+
+	cfg, err := Load(nil, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ParseBodies {
+		t.Error("ParseBodies default = false, want true")
+	}
+
+	cfg, err = Load([]string{"-parse-bodies=false"}, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ParseBodies {
+		t.Error("flag -parse-bodies=false not applied")
+	}
+
+	env := func(k string) string {
+		if k == "AGENTERR_PARSE_BODIES" {
+			return "false"
+		}
+		return ""
+	}
+	cfg, err = Load(nil, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ParseBodies {
+		t.Error("env AGENTERR_PARSE_BODIES=false not applied")
+	}
+
+	// Flag wins over env, per the package's precedence contract.
+	cfg, err = Load([]string{"-parse-bodies=true"}, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ParseBodies {
+		t.Error("flag should override env")
+	}
+
+	if _, err := Load(nil, func(k string) string {
+		if k == "AGENTERR_PARSE_BODIES" {
+			return "banana"
+		}
+		return ""
+	}); err == nil {
+		t.Error("invalid AGENTERR_PARSE_BODIES accepted")
 	}
 }
 

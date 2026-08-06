@@ -19,6 +19,7 @@ type Config struct {
 	FlushEveryMS  int
 	MaxBodyBytes  int64
 	MaxDBBytes    int64
+	ParseBodies   bool
 }
 
 // configFlags holds the flag.Value pointers registered against a FlagSet,
@@ -32,6 +33,7 @@ type configFlags struct {
 	flushEvery    *int
 	maxBodyBytes  *int64
 	maxDBBytes    *int64
+	parseBodies   *bool
 }
 
 // Load loads configuration from flags and environment variables.
@@ -45,6 +47,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		FlushEveryMS:  200,
 		MaxBodyBytes:  5 << 20, // 5MB
 		MaxDBBytes:    0,
+		ParseBodies:   true,
 	}
 
 	if err := applyEnvOverrides(&cfg, getenv); err != nil {
@@ -114,6 +117,13 @@ func applyEnvOverrides(cfg *Config, getenv func(string) string) error {
 		}
 		cfg.MaxDBBytes = maxDB
 	}
+	if val := getenv("AGENTERR_PARSE_BODIES"); val != "" {
+		parse, err := strconv.ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("AGENTERR_PARSE_BODIES: invalid value %q: %w", val, err)
+		}
+		cfg.ParseBodies = parse
+	}
 	return nil
 }
 
@@ -129,6 +139,7 @@ func registerFlags(fs *flag.FlagSet, cfg Config) configFlags {
 		flushEvery:    fs.Int("flush-every", cfg.FlushEveryMS, "Flush interval in milliseconds"),
 		maxBodyBytes:  fs.Int64("max-body-bytes", cfg.MaxBodyBytes, "Max body bytes"),
 		maxDBBytes:    fs.Int64("max-db-bytes", cfg.MaxDBBytes, "Max database bytes"),
+		parseBodies:   fs.Bool("parse-bodies", cfg.ParseBodies, "Lift fields from JSON/logfmt log bodies at ingest"),
 	}
 }
 
@@ -156,6 +167,9 @@ func applyFlagOverrides(cfg *Config, flags configFlags, flagSet map[string]bool)
 	}
 	if flagSet["max-db-bytes"] {
 		cfg.MaxDBBytes = *flags.maxDBBytes
+	}
+	if flagSet["parse-bodies"] {
+		cfg.ParseBodies = *flags.parseBodies
 	}
 }
 

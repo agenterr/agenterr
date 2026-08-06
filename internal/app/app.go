@@ -103,8 +103,9 @@ func newNotifier() pipeline.Notifier { return pipeline.NopNotifier{} }
 
 func newPipeline(cfg config.Config, w store.Writer, g pipeline.Grouper, n pipeline.Notifier) *pipeline.Pipeline {
 	return pipeline.New(w, g, n, pipeline.Options{
-		BufferSize: cfg.BufferSize,
-		FlushEvery: time.Duration(cfg.FlushEveryMS) * time.Millisecond,
+		BufferSize:       cfg.BufferSize,
+		FlushEvery:       time.Duration(cfg.FlushEveryMS) * time.Millisecond,
+		DisableBodyParse: !cfg.ParseBodies,
 	})
 }
 
