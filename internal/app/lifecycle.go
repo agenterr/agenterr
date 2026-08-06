@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/fx"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/config"
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/pipeline"
@@ -38,16 +39,21 @@ const guardrailWindow = 24 * time.Hour
 const shutdownServerBudget = 7 * time.Second
 
 // register wires the fx.Lifecycle hooks that turn the constructed graph
-// into a running process: OnStart loads the noise-rule engine's cache,
-// performs first-run bootstrap, then starts the pipeline writer loop, the
-// HTTP server, the retention job, and the drop-counter flush loop, each
-// in its own goroutine. OnStop reverses the order — server, then
-// pipeline, then store — so nothing is torn down out from under a
-// request that's still in flight.
-func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.DB, engine *rules.Engine, pipe *pipeline.Pipeline, srv *http.Server, creds generatedCreds) {
+// into a running process: OnStart loads the noise-rule and alert-rule
+// engines' caches, performs first-run bootstrap, then starts the pipeline
+// writer loop, the HTTP server, the retention job, the drop-counter flush
+// loop, and the alerts delivery worker, each in its own goroutine. OnStop
+// reverses the order — server, then pipeline, then the alerts worker
+// (which must not be canceled until pipeline drain has stopped the only
+// caller of its IssueEvent, see the OnStop body below), then store — so
+// nothing is torn down out from under a request, or a notification, still
+// in flight.
+func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.DB, engine *rules.Engine, alertsEngine *alerts.Engine, pipe *pipeline.Pipeline, srv *http.Server, creds generatedCreds) {
 	pipeCtx, cancelPipe := context.WithCancel(context.Background())
 	retentionCtx, cancelRetention := context.WithCancel(context.Background())
 	flushCtx, cancelFlush := context.WithCancel(context.Background())
+	alertsCtx, cancelAlerts := context.WithCancel(context.Background())
+	alertsDone := make(chan struct{})
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
@@ -61,6 +67,14 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.D
 			// instead of racing the pipeline's first Enqueue.
 			if err := engine.Load(ctx); err != nil {
 				return fmt.Errorf("app: load noise rules: %w", err)
+			}
+
+			// Same reasoning as the noise engine above: load the alert-rule
+			// cache before the pipeline can call IssueEvent, so rules apply
+			// from the first record instead of racing the pipeline's first
+			// Enqueue.
+			if err := alertsEngine.Load(ctx); err != nil {
+				return fmt.Errorf("app: load alert rules: %w", err)
 			}
 
 			go pipe.Run(pipeCtx)
@@ -77,6 +91,11 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.D
 			go retentionLoop(retentionCtx, cfg, db)
 
 			go flushDropsLoop(flushCtx, engine, time.Duration(cfg.NoiseFlushMS)*time.Millisecond)
+
+			go func() {
+				defer close(alertsDone)
+				alertsEngine.Run(alertsCtx)
+			}()
 
 			return nil
 		},
@@ -103,6 +122,20 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.D
 			if err := pipe.Drain(ctx); err != nil {
 				slog.Error("app: pipeline drain", "err", err)
 			}
+
+			// Only cancel the alerts worker's ctx once pipe.Drain has
+			// returned: pipe.Drain is the last place IssueEvent can still
+			// be called (the drain loop runs events through the same
+			// process/Decide path as the live loop), and alerts.Run's
+			// documented precondition is that callers stop invoking
+			// IssueEvent before canceling its ctx. Canceling it stops the
+			// worker from accepting new fires but not before it drains
+			// whatever's already queued — waiting on alertsDone below
+			// blocks until that drain (with its in-flight webhook
+			// deliveries) actually finishes, so shutdown never leaves the
+			// worker goroutine running past OnStop.
+			cancelAlerts()
+			<-alertsDone
 
 			// After drain, not before: any drops the pipeline recorded
 			// while shutting down (the drain loop goes through the same

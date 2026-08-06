@@ -18,6 +18,7 @@ import (
 	"go.uber.org/fx"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/api"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/config"
@@ -57,9 +58,11 @@ var Module = fx.Options(
 		asWriter,
 		asAdmin,
 		asNoiseRules,
+		asAlertRules,
 		newGrouper,
-		newNotifier,
+		asNotifier,
 		rules.New,
+		newAlertsEngine,
 		asDropper,
 		newPipeline,
 		asSink,
@@ -98,19 +101,33 @@ func asReader(db *sqlite.DB) store.Reader         { return db }
 func asWriter(db *sqlite.DB) store.Writer         { return db }
 func asAdmin(db *sqlite.DB) store.Admin           { return db }
 func asNoiseRules(db *sqlite.DB) store.NoiseRules { return db }
+func asAlertRules(db *sqlite.DB) store.AlertRules { return db }
 
 // asSessionAuth adapts *auth.Auth to the auth.SessionAuth interface
 // web.New depends on.
 func asSessionAuth(a *auth.Auth) auth.SessionAuth { return a }
 
-func newGrouper() pipeline.Grouper   { return core.DefaultGrouper{} }
-func newNotifier() pipeline.Notifier { return pipeline.NopNotifier{} }
+func newGrouper() pipeline.Grouper { return core.DefaultGrouper{} }
 
 // asDropper adapts *rules.Engine to the narrower pipeline.Dropper
 // interface pipeline.New depends on. pipeline never imports internal/rules
 // (see pipeline/ports.go) — rules.Engine satisfies Dropper structurally,
 // and this is where that structural fit gets made explicit for fx.
 func asDropper(e *rules.Engine) pipeline.Dropper { return e }
+
+// newAlertsEngine constructs the alerts.Engine with a nil *http.Client so
+// it falls back to its documented 5s-timeout default — nothing else in the
+// graph needs an *http.Client, so there is no reason to provide a real one
+// just to satisfy this constructor.
+func newAlertsEngine(ar store.AlertRules) *alerts.Engine { return alerts.New(ar, nil) }
+
+// asNotifier adapts *alerts.Engine to the narrower pipeline.Notifier
+// interface pipeline.New depends on. pipeline never imports internal/alerts
+// (mirrors asDropper/internal/rules above) — alerts.Engine satisfies
+// Notifier structurally, and this is where that structural fit gets made
+// explicit for fx. pipeline.NopNotifier remains only for pipeline's own
+// tests now that the production graph wires the real engine.
+func asNotifier(e *alerts.Engine) pipeline.Notifier { return e }
 
 func newPipeline(cfg config.Config, w store.Writer, g pipeline.Grouper, n pipeline.Notifier, d pipeline.Dropper) *pipeline.Pipeline {
 	return pipeline.New(w, g, n, d, pipeline.Options{
