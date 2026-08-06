@@ -44,6 +44,9 @@ func New(nr store.NoiseRules, adm store.Admin) *Engine {
 // after mutations. On error the previous cache (or unloaded state) is
 // left untouched, so a failed reload never widens what gets dropped.
 func (e *Engine) Load(ctx context.Context) error {
+	// No defensive sort here: store.NoiseRules is documented (store.go)
+	// to return rows ordered by ascending ID, and Decide's first-drop-wins
+	// evaluation relies on that order being preserved per-project below.
 	rows, err := e.nr.NoiseRules(ctx, 0)
 	if err != nil {
 		return err

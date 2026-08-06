@@ -2,6 +2,8 @@ package rules
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +19,10 @@ func mustLoad(t *testing.T, e *Engine) {
 }
 
 // 1. Sample rules keep the 1st and every nth banded record; the rest drop.
+// Records are distinguishable (r0..r8) so this pins WHICH records survive
+// (indices 0, 3, 6), not just how many — an off-by-one that shifted the
+// band (e.g. surviving 1,4,7 instead of 0,3,6) would still pass a
+// count-only assertion but fails this one.
 func TestDecide_SampleKeepsEveryNth(t *testing.T) {
 	fs := newFakeStore()
 	fs.seedRule(core.NoiseRule{
@@ -26,20 +32,25 @@ func TestDecide_SampleKeepsEveryNth(t *testing.T) {
 	e := New(fs, fs)
 	mustLoad(t, e)
 
-	survivors, drops := 0, 0
+	var kept []string
+	var dropped []string
 	for i := 0; i < 9; i++ {
-		l := core.Log{ProjectID: 1, Service: "api", Severity: core.SeverityInfo, Body: "banded"}
+		body := fmt.Sprintf("r%d", i)
+		l := core.Log{ProjectID: 1, Service: "api", Severity: core.SeverityInfo, Body: body}
 		if drop, _ := e.Decide(l); drop {
-			drops++
+			dropped = append(dropped, body)
 		} else {
-			survivors++
+			kept = append(kept, body)
 		}
 	}
-	if survivors != 3 {
-		t.Errorf("survivors = %d, want 3 (1st, 4th, 7th)", survivors)
+
+	wantKept := []string{"r0", "r3", "r6"}
+	wantDropped := []string{"r1", "r2", "r4", "r5", "r7", "r8"}
+	if !slices.Equal(kept, wantKept) {
+		t.Errorf("kept = %v, want %v", kept, wantKept)
 	}
-	if drops != 6 {
-		t.Errorf("drops = %d, want 6", drops)
+	if !slices.Equal(dropped, wantDropped) {
+		t.Errorf("dropped = %v, want %v", dropped, wantDropped)
 	}
 }
 
