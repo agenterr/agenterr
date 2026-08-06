@@ -135,6 +135,20 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.D
 			// deliveries) actually finishes, so shutdown never leaves the
 			// worker goroutine running past OnStop.
 			cancelAlerts()
+			// Deliberately unbounded, not tied to ctx: this must wait out
+			// whatever alerts.Run's own drain pass is doing so every
+			// queued fire gets its delivery attempt and its outcome
+			// recorded (no-silent-failure) rather than being abandoned
+			// mid-flight. Worst case is the serial worker draining up to
+			// queueCap (256) queued fires against a dead webhook at
+			// ~20s each (3 attempts x 5s client timeout, plus 1s/4s
+			// backoff) — in practice bounded well below that by per-rule
+			// cooldowns (at most one queued fire per rule per cooldown
+			// window) and the short window between pipe.Drain and here.
+			// fx cannot preempt this: if it ever proves too slow in
+			// practice, the tracked follow-up is a hard cap here (with
+			// whatever's left in the queue counted as dropped) rather
+			// than trusting the process orchestrator's SIGKILL.
 			<-alertsDone
 
 			// After drain, not before: any drops the pipeline recorded
