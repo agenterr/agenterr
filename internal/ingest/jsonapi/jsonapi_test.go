@@ -311,6 +311,27 @@ func TestIngest_MalformedJSON_Returns400(t *testing.T) {
 	}
 }
 
+func TestIngest_WrongMethod_Returns405(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/ingest", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+validKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+}
+
 func TestIngest_WrongKindKey_Returns401(t *testing.T) {
 	sink := &fakeSink{}
 	srv := newTestServer(sink)

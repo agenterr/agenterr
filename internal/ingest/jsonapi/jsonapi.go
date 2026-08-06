@@ -31,7 +31,7 @@ func New(sink ingest.Sink) *Handler {
 
 // Mount registers the ingest route behind key auth.
 func (h *Handler) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
-	mux.Handle("/api/v1/ingest", keys.RequireKey("ingest", http.HandlerFunc(h.serveIngest)))
+	mux.Handle("POST /api/v1/ingest", keys.RequireKey("ingest", http.HandlerFunc(h.serveIngest)))
 }
 
 func (h *Handler) serveIngest(w http.ResponseWriter, r *http.Request) {
