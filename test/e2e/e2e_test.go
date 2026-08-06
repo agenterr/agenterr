@@ -70,6 +70,12 @@ type harness struct {
 	otlpIssueID int64
 	jsonIssueID int64
 
+	// alertReceiver and alertMCPRuleID are set by testAlerting and read by
+	// testMCP, so the MCP subtest can drive test_alert_rule against the
+	// same live webhook receiver instead of standing up a second one.
+	alertReceiver  *webhookReceiver
+	alertMCPRuleID int64
+
 	// shutdownOnce guards shutdown so it's safe to call it both from
 	// t.Cleanup (registered right after the process starts, so a failure
 	// anywhere afterwards — including inside testBuildAndStart itself,
@@ -99,6 +105,7 @@ func TestE2E(t *testing.T) {
 	t.Run("structured JSON body lifted and grouped", h.testStructuredBodyParsing)
 	t.Run("resolve then regression reopen", h.testResolveAndRegression)
 	t.Run("noise rules drop and are reported", h.testNoiseRules)
+	t.Run("alert rules deliver over the real webhook edge", h.testAlerting)
 	t.Run("mcp tools", h.testMCP)
 	t.Run("admin route scoping guard", h.testScopingGuard)
 	t.Run("graceful shutdown", h.testGracefulShutdown)
@@ -665,6 +672,342 @@ func (h *harness) testNoiseRules(t *testing.T) {
 		"application/json", []byte(`{"parse_bodies":true}`), http.StatusNoContent)
 }
 
+// ---- alerting: rule creation, delivery, cooldown suppression, regression,
+// threshold windows, and test-fire, all proven against a real webhook
+// receiver running in this test process ----
+
+type alertRuleDTO struct {
+	ID              int64             `json:"id"`
+	ProjectID       int64             `json:"project_id"`
+	Name            string            `json:"name"`
+	Kind            string            `json:"kind"`
+	Service         string            `json:"service"`
+	Environment     string            `json:"environment"`
+	MinSeverity     string            `json:"min_severity"`
+	N               int               `json:"n"`
+	WindowMinutes   int               `json:"window_minutes"`
+	CooldownSeconds int               `json:"cooldown_seconds"`
+	URL             string            `json:"url"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Enabled         bool              `json:"enabled"`
+	LastFired       *string           `json:"last_fired"`
+	LastError       string            `json:"last_error"`
+}
+
+// alertPayloadDTO mirrors the wire shape documented in the alert semantics
+// doc and implemented by internal/alerts/deliver.go's alertPayload:
+// {"rule":{"id","name","kind"},"project_id","issue":{...},"event_count",
+// "window_minutes","fired_at"[,"test"]}.
+type alertPayloadDTO struct {
+	Rule struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+		Kind string `json:"kind"`
+	} `json:"rule"`
+	ProjectID int64 `json:"project_id"`
+	Issue     struct {
+		ID        int64  `json:"id"`
+		Title     string `json:"title"`
+		Severity  string `json:"severity"`
+		Count     int64  `json:"count"`
+		FirstSeen string `json:"first_seen"`
+		LastSeen  string `json:"last_seen"`
+	} `json:"issue"`
+	EventCount    int    `json:"event_count"`
+	WindowMinutes int    `json:"window_minutes"`
+	FiredAt       string `json:"fired_at"`
+	Test          bool   `json:"test"`
+}
+
+// webhookReceiver is a plain net/http server bound to a 127.0.0.1 ephemeral
+// port, standing in for a real alert destination: every POST body lands on
+// a buffered channel for the test to drain, and the receiver always
+// answers 200 so deliveries succeed on the first attempt (no retry/backoff
+// noise in the assertions below).
+type webhookReceiver struct {
+	url string
+	ch  chan []byte
+}
+
+// newWebhookReceiver starts the receiver and registers its shutdown on
+// h.t (the whole-test T) — not any subtest's t — so it stays alive for
+// every subtest that needs it (testAlerting, then testMCP's test_alert_rule
+// call), mirroring the temp-dir rule in testBuildAndStart.
+func newWebhookReceiver(h *harness) *webhookReceiver {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		h.t.Fatalf("webhook receiver: listen: %v", err)
+	}
+	ch := make(chan []byte, 32)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			select {
+			case ch <- body:
+			default:
+				// Never block the delivery worker's HTTP client on a full
+				// channel; a stuck receiver must not hang the subject
+				// under test.
+			}
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	go func() { _ = srv.Serve(ln) }()
+	h.t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	return &webhookReceiver{url: "http://" + ln.Addr().String(), ch: ch}
+}
+
+// recv blocks for up to timeout for the next delivered body, failing the
+// test on timeout.
+func (wr *webhookReceiver) recv(t *testing.T, timeout time.Duration) []byte {
+	t.Helper()
+	select {
+	case b := <-wr.ch:
+		return b
+	case <-time.After(timeout):
+		t.Fatalf("webhook receiver: no delivery within %s", timeout)
+		return nil
+	}
+}
+
+// expectNone asserts nothing arrives during a bounded quiet window. quiet
+// only needs to comfortably exceed the pipeline's async
+// ingest->evaluate->enqueue path (observed well under 200ms elsewhere in
+// this suite); it deliberately isn't unbounded since there is no positive
+// event to wait for — a real spurious delivery would show up well inside
+// this window.
+func (wr *webhookReceiver) expectNone(t *testing.T, quiet time.Duration) {
+	t.Helper()
+	select {
+	case b := <-wr.ch:
+		t.Fatalf("webhook receiver: unexpected delivery: %s", b)
+	case <-time.After(quiet):
+	}
+}
+
+// testAlerting drives the alerting feature end to end against a real
+// webhook receiver: new_issue delivery + cooldown suppression, a
+// resolve->regression reopen delivering a regression payload, a threshold
+// rule firing once N events land in the window, and the synchronous
+// REST test-fire route. Every rule here is scoped to a service name no
+// other subtest uses (e2e-alerts), both because rules only ever evaluate
+// events ingested after they're created (so earlier subtests' ingests
+// can't retroactively fire them) and defensively, in case a later subtest
+// is reordered above this one.
+func (h *harness) testAlerting(t *testing.T) {
+	wr := newWebhookReceiver(h)
+	h.alertReceiver = wr
+
+	const svc = "e2e-alerts"
+
+	// 1: a new_issue rule and a regression rule, both scoped to
+	// svc/min_severity=error and both pointing at the receiver. Two
+	// separate rules because kind is exclusive per rule; sharing one
+	// receiver lets both steps below assert off the same channel.
+	var newIssueRule alertRuleDTO
+	h.doJSON(t, http.MethodPost, fmt.Sprintf("/api/v1/projects/%d/alert-rules", h.projectID), h.adminKey,
+		map[string]any{
+			"name":         "e2e new issue",
+			"kind":         "new_issue",
+			"service":      svc,
+			"min_severity": "error",
+			"url":          wr.url,
+		}, http.StatusOK, &newIssueRule)
+	if newIssueRule.ID == 0 {
+		t.Fatalf("expected non-zero alert rule id, got %+v", newIssueRule)
+	}
+	if newIssueRule.CooldownSeconds != 900 {
+		t.Errorf("expected cooldown_seconds to default to 900 when omitted, got %d", newIssueRule.CooldownSeconds)
+	}
+
+	var regressionRule alertRuleDTO
+	h.doJSON(t, http.MethodPost, fmt.Sprintf("/api/v1/projects/%d/alert-rules", h.projectID), h.adminKey,
+		map[string]any{
+			"name":         "e2e regression",
+			"kind":         "regression",
+			"service":      svc,
+			"min_severity": "error",
+			"url":          wr.url,
+		}, http.StatusOK, &regressionRule)
+	if regressionRule.ID == 0 {
+		t.Fatalf("expected non-zero alert rule id, got %+v", regressionRule)
+	}
+
+	errorBatch, err := json.Marshal([]map[string]any{{
+		"message":  "e2e alert boom",
+		"severity": "error",
+		"service":  svc,
+	}})
+	if err != nil {
+		t.Fatalf("marshal error batch: %v", err)
+	}
+	h.postRaw(t, "/api/v1/ingest", h.ingestKey, "application/json", errorBatch, http.StatusAccepted)
+
+	raw := wr.recv(t, 5*time.Second)
+	newIssueRaw := raw
+	var newIssuePayload alertPayloadDTO
+	if err := json.Unmarshal(raw, &newIssuePayload); err != nil {
+		t.Fatalf("decode new_issue payload: %v; body: %s", err, raw)
+	}
+	if newIssuePayload.Rule.ID != newIssueRule.ID || newIssuePayload.Rule.Kind != "new_issue" {
+		t.Errorf("expected rule.id=%d rule.kind=new_issue, got %+v", newIssueRule.ID, newIssuePayload.Rule)
+	}
+	if !strings.Contains(newIssuePayload.Issue.Title, "e2e alert boom") {
+		t.Errorf("expected issue.title to contain the ingested message, got %q", newIssuePayload.Issue.Title)
+	}
+	// Pin the wire contract explicitly: issue.severity is UPPERCASE, not
+	// the lowercase form the ingest request used or the REST DTO renders
+	// min_severity in.
+	if !bytes.Contains(raw, []byte(`"severity":"ERROR"`)) {
+		t.Errorf("expected payload to carry uppercase issue.severity, got: %s", raw)
+	}
+	if newIssuePayload.Issue.ID == 0 {
+		t.Fatalf("expected non-zero issue.id in new_issue payload, got %+v", newIssuePayload)
+	}
+	alertIssueID := newIssuePayload.Issue.ID
+
+	// last_fired set: poll the list endpoint rather than assuming the
+	// store write (which happens after delivery, on the worker goroutine)
+	// has landed by the time recv returned.
+	deadline := time.Now().Add(5 * time.Second)
+	var fired bool
+	for time.Now().Before(deadline) {
+		var rules []alertRuleDTO
+		h.doJSON(t, http.MethodGet, fmt.Sprintf("/api/v1/projects/%d/alert-rules", h.projectID), h.adminKey, nil, http.StatusOK, &rules)
+		for _, r := range rules {
+			if r.ID == newIssueRule.ID && r.LastFired != nil {
+				fired = true
+				break
+			}
+		}
+		if fired {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !fired {
+		t.Fatal("new_issue rule's last_fired was never set")
+	}
+
+	// 2: the same error again is neither new (the fingerprint's already
+	// been seen) nor past cooldown (900s default) — no second delivery.
+	// This is a bounded negative wait, not proof of "never": it's
+	// comfortably longer than the async ingest->evaluate->enqueue path
+	// exercised in step 1 above.
+	h.postRaw(t, "/api/v1/ingest", h.ingestKey, "application/json", errorBatch, http.StatusAccepted)
+	wr.expectNone(t, 700*time.Millisecond)
+
+	// 3: resolve the issue, then re-ingest the same error — a regression
+	// reopen — and expect the regression rule (never fired before, so its
+	// own cooldown doesn't block it) to deliver.
+	h.doRaw(t, http.MethodPatch, fmt.Sprintf("/api/v1/issues/%d", alertIssueID), h.adminKey,
+		"application/json", []byte(`{"status":"resolved"}`), http.StatusNoContent)
+	h.postRaw(t, "/api/v1/ingest", h.ingestKey, "application/json", errorBatch, http.StatusAccepted)
+
+	raw = wr.recv(t, 5*time.Second)
+	var regressionPayload alertPayloadDTO
+	if err := json.Unmarshal(raw, &regressionPayload); err != nil {
+		t.Fatalf("decode regression payload: %v; body: %s", err, raw)
+	}
+	if regressionPayload.Rule.ID != regressionRule.ID || regressionPayload.Rule.Kind != "regression" {
+		t.Errorf("expected rule.id=%d rule.kind=regression, got %+v", regressionRule.ID, regressionPayload.Rule)
+	}
+	if !strings.Contains(regressionPayload.Issue.Title, "e2e alert boom") {
+		t.Errorf("expected regression payload's issue.title to contain the ingested message, got %q", regressionPayload.Issue.Title)
+	}
+
+	// 4: a threshold rule (n=3, window 1 minute, service-scoped, explicit
+	// 1s cooldown so a later test-fire in step 5 isn't itself suppressed).
+	var thresholdRule alertRuleDTO
+	h.doJSON(t, http.MethodPost, fmt.Sprintf("/api/v1/projects/%d/alert-rules", h.projectID), h.adminKey,
+		map[string]any{
+			"name":             "e2e threshold",
+			"kind":             "threshold",
+			"service":          svc,
+			"n":                3,
+			"window_minutes":   1,
+			"cooldown_seconds": 1,
+			"url":              wr.url,
+		}, http.StatusOK, &thresholdRule)
+	if thresholdRule.ID == 0 {
+		t.Fatalf("expected non-zero alert rule id, got %+v", thresholdRule)
+	}
+	if thresholdRule.CooldownSeconds != 1 {
+		t.Errorf("expected explicit cooldown_seconds=1 to be honored (not the 900 default), got %d", thresholdRule.CooldownSeconds)
+	}
+
+	// The pipeline only ever calls the alerts engine for entries
+	// core.IsEvent flags — severity >= error, or an exception attribute
+	// present (internal/pipeline/pipeline.go: "if !e.IsEvent { continue }"
+	// gates the Notifier call before it happens) — so a threshold rule can
+	// only ever count error-and-up records, regardless of its own
+	// min_severity. Each message is distinct so these are 3 fresh
+	// fingerprints (three new issues), but that's harmless here: the
+	// new_issue rule already spent its cooldown on step 1's issue and
+	// stays silent for 900s, so only the threshold rule delivers below.
+	thresholdBatch := make([]map[string]any, 3)
+	for i := range thresholdBatch {
+		thresholdBatch[i] = map[string]any{
+			"message":  fmt.Sprintf("e2e alert threshold %d", i),
+			"severity": "error",
+			"service":  svc,
+		}
+	}
+	thresholdBody, err := json.Marshal(thresholdBatch)
+	if err != nil {
+		t.Fatalf("marshal threshold batch: %v", err)
+	}
+	h.postRaw(t, "/api/v1/ingest", h.ingestKey, "application/json", thresholdBody, http.StatusAccepted)
+
+	raw = wr.recv(t, 5*time.Second)
+	var thresholdPayload alertPayloadDTO
+	if err := json.Unmarshal(raw, &thresholdPayload); err != nil {
+		t.Fatalf("decode threshold payload: %v; body: %s", err, raw)
+	}
+	if thresholdPayload.Rule.ID != thresholdRule.ID || thresholdPayload.Rule.Kind != "threshold" {
+		t.Errorf("expected rule.id=%d rule.kind=threshold, got %+v", thresholdRule.ID, thresholdPayload.Rule)
+	}
+	if thresholdPayload.EventCount < 3 {
+		t.Errorf("expected event_count >= 3, got %d", thresholdPayload.EventCount)
+	}
+	if thresholdPayload.WindowMinutes != 1 {
+		t.Errorf("expected window_minutes=1, got %d", thresholdPayload.WindowMinutes)
+	}
+	// Pin the wire contract explicitly: threshold payloads carry
+	// event_count/window_minutes as real JSON keys (the new_issue and
+	// regression payloads above must not — deliver.go's omitempty tags
+	// only populate them for the threshold kind).
+	if !bytes.Contains(raw, []byte(`"event_count"`)) || !bytes.Contains(raw, []byte(`"window_minutes"`)) {
+		t.Errorf("expected threshold payload to carry event_count/window_minutes keys, got: %s", raw)
+	}
+	if bytes.Contains(newIssueRaw, []byte(`"event_count"`)) {
+		t.Errorf("new_issue payload unexpectedly carries event_count: %s", newIssueRaw)
+	}
+
+	// 5: POST /api/v1/alert-rules/{id}/test fires synchronously with
+	// "test":true.
+	var testResp struct {
+		Delivered bool `json:"delivered"`
+	}
+	h.doJSON(t, http.MethodPost, fmt.Sprintf("/api/v1/alert-rules/%d/test", thresholdRule.ID), h.adminKey, nil, http.StatusOK, &testResp)
+	if !testResp.Delivered {
+		t.Errorf("expected {\"delivered\":true} from the REST test-fire route, got %+v", testResp)
+	}
+
+	raw = wr.recv(t, 5*time.Second)
+	if !bytes.Contains(raw, []byte(`"test":true`)) {
+		t.Errorf("expected REST test-fire payload to carry test:true, got: %s", raw)
+	}
+
+	// testMCP drives test_alert_rule through the MCP edge next, against
+	// this same threshold rule and receiver.
+	h.alertMCPRuleID = thresholdRule.ID
+}
+
 // ---- MCP ----
 
 func (h *harness) testMCP(t *testing.T) {
@@ -693,15 +1036,17 @@ func (h *harness) testMCP(t *testing.T) {
 		names[i] = tl.Name
 		byName[tl.Name] = true
 	}
-	if len(toolsResult.Tools) != 13 {
-		t.Errorf("expected 13 tools, got %d: %v", len(toolsResult.Tools), names)
+	if len(toolsResult.Tools) != 17 {
+		t.Errorf("expected 17 tools, got %d: %v", len(toolsResult.Tools), names)
 	}
 	// The five noise-control tools, added alongside the REST noise-rule
-	// surface: confirm each is actually registered on the live server, not
-	// just that the total count happens to match.
+	// surface, and the four alert-rule tools, added alongside the REST
+	// alert-rule surface: confirm each is actually registered on the live
+	// server, not just that the total count happens to match.
 	for _, want := range []string{
 		"list_noise_rules", "upsert_noise_rule", "delete_noise_rule",
 		"get_noise_report", "set_project_parse",
+		"list_alert_rules", "upsert_alert_rule", "delete_alert_rule", "test_alert_rule",
 	} {
 		if !byName[want] {
 			t.Errorf("expected tool %q in tools/list, got: %v", want, names)
@@ -768,6 +1113,25 @@ func (h *harness) testMCP(t *testing.T) {
 	}
 	if !strings.Contains(reportText, "2 total dropped") {
 		t.Errorf("get_noise_report expected 2 total dropped (from testNoiseRules), got: %q", reportText)
+	}
+
+	// test_alert_rule over MCP: fires the same threshold rule testAlerting
+	// created, against the same live webhook receiver, proving the MCP
+	// edge reaches the alerts engine and not just REST.
+	testResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "test_alert_rule",
+		Arguments: map[string]any{"id": h.alertMCPRuleID},
+	})
+	if err != nil {
+		t.Fatalf("call test_alert_rule: %v", err)
+	}
+	testText := mcpTextContent(testResult)
+	if !strings.Contains(testText, "delivered") {
+		t.Errorf("test_alert_rule result missing delivery confirmation: %q", testText)
+	}
+	testRaw := h.alertReceiver.recv(t, 5*time.Second)
+	if !bytes.Contains(testRaw, []byte(`"test":true`)) {
+		t.Errorf("test_alert_rule webhook payload missing test:true: %s", testRaw)
 	}
 }
 

@@ -156,6 +156,77 @@ and cut noise on its own:
 | `get_noise_report` | Top services by volume plus every rule's drop count |
 | `set_project_parse` | Toggle structured-body parsing for a project |
 
+### Alerting
+
+Per-project rules that POST a webhook when something worth paging on
+happens — evaluated on the pipeline's write path, right alongside issue
+grouping. Three kinds:
+
+- **`new_issue`** — fires the first time a fingerprint is seen.
+- **`regression`** — fires when a resolved issue reopens on a new event.
+- **`threshold`** — fires when at least `n` matching events land within a
+  sliding `window_minutes` window.
+
+All three kinds share the same scope fields — `service`, `environment`,
+`min_severity` — each optional and each empty meaning "any". Only events
+that would already group into an issue (severity `error`/`fatal`, or a
+record carrying an `exception.*` attribute) are ever evaluated against a
+rule, so a `threshold` rule's `min_severity` narrows within that set
+rather than admitting plain `info`/`debug` noise.
+
+A rule fires at most once per `cooldown_seconds` (default 900); a fire
+that's suppressed by cooldown is never queued at all, so it costs nothing.
+Delivery itself is best-effort: a POST with a 5s timeout, retried up to
+3 times with 1s/4s backoff, success being any 2xx. Every attempt's outcome
+lands in the rule's `last_fired`/`last_error` — nothing fails silently —
+and a full delivery queue drops the notification (logged, counted) rather
+than block ingest, since alerting must never be able to slow down or stall
+log ingestion.
+
+The webhook body is the same shape for every kind, `event_count` and
+`window_minutes` present only for `threshold`:
+
+```json
+{
+  "rule": {"id": 3, "name": "checkout errors", "kind": "new_issue"},
+  "project_id": 1,
+  "issue": {
+    "id": 42,
+    "title": "PoolExhaustedError: no connections available",
+    "severity": "ERROR",
+    "count": 1,
+    "first_seen": "2026-08-06T15:44:39Z",
+    "last_seen": "2026-08-06T15:44:39Z"
+  },
+  "fired_at": "2026-08-06T15:44:39Z"
+}
+```
+
+`issue.severity` is always rendered UPPERCASE, regardless of the case used
+at ingest. Threshold windows are tracked in memory, not persisted — a
+restart loses whatever partial window was in progress (a rule mid-count
+starts over), though `last_fired` itself is persisted, so cooldowns
+survive a restart. This is a deliberate v1 trade-off for a single-process
+tracker.
+
+Manage rules over REST:
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/v1/projects/{id}/alert-rules` | List a project's rules |
+| `POST /api/v1/projects/{id}/alert-rules` | Create or update a rule (include `id` to update) |
+| `DELETE /api/v1/alert-rules/{id}` | Remove a rule |
+| `POST /api/v1/alert-rules/{id}/test` | Fire a rule immediately with a sample issue (`"test":true` in the payload) and report whether delivery succeeded |
+
+The same surface is available as four MCP tools:
+
+| Tool | Purpose |
+|---|---|
+| `list_alert_rules` | List the rules configured for a project |
+| `upsert_alert_rule` | Create or update a rule |
+| `delete_alert_rule` | Remove a rule |
+| `test_alert_rule` | Fire a rule immediately with a sample issue and report the outcome |
+
 ## Agent setup
 
 Give an agent access to the seventeen MCP tools (`list_projects`,
