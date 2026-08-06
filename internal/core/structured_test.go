@@ -157,6 +157,37 @@ func TestParseStructuredBody_JSON(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "empty msg falls through to message",
+			in: Log{Time: arrival, Severity: SeverityInfo,
+				Body: `{"msg":"","message":"hi","level":"warn"}`},
+			want: func(t *testing.T, got Log) {
+				if got.Body != "hi" {
+					t.Errorf("body = %q, want hi (empty msg should fall through)", got.Body)
+				}
+				if got.Severity != SeverityWarn {
+					t.Errorf("severity = %v, want WARN", got.Severity)
+				}
+			},
+		},
+		{
+			name: "attrs map not mutated on caller side",
+			in: Log{Time: arrival,
+				Attrs: map[string]string{"orig_key": "orig_val"},
+				Body: `{"msg":"m","new_key":"new_val"}`},
+			want: func(t *testing.T, got Log) {
+				if got.Attrs["orig_key"] != "orig_val" {
+					t.Errorf("original attr lost: %v", got.Attrs)
+				}
+				if got.Attrs["new_key"] != "new_val" {
+					t.Errorf("new attr not lifted: %v", got.Attrs)
+				}
+				// Verify the returned Log has both keys
+				if len(got.Attrs) != 2 {
+					t.Errorf("attrs count = %d, want 2", len(got.Attrs))
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

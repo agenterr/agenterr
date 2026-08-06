@@ -65,7 +65,7 @@ func hasLiftKeys(m map[string]any) bool {
 // liftFields applies the lifting semantics to l, consuming recognized keys
 // from m and folding the remainder into Attrs.
 func liftFields(l Log, m map[string]any) Log {
-	if s, ok := takeFirstString(m, messageKeys); ok && s != "" {
+	if s, ok := takeFirstNonEmptyString(m, messageKeys); ok {
 		l.Body = s
 	}
 	if s, ok := takeFirstScalar(m, levelKeys); ok && l.Severity == SeverityInfo {
@@ -86,8 +86,21 @@ func liftFields(l Log, m map[string]any) Log {
 	if len(m) == 0 {
 		return l
 	}
+	return liftAttrs(l, m)
+}
+
+// liftAttrs folds remaining keys from m into l.Attrs, respecting caps and
+// cloning l.Attrs if non-nil to avoid mutating the caller's map.
+func liftAttrs(l Log, m map[string]any) Log {
 	if l.Attrs == nil {
 		l.Attrs = make(map[string]string, len(m))
+	} else {
+		// Clone to avoid mutating caller's Attrs map.
+		cloned := make(map[string]string, len(l.Attrs)+len(m))
+		for k, v := range l.Attrs {
+			cloned[k] = v
+		}
+		l.Attrs = cloned
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -162,6 +175,21 @@ func takeFirstString(m map[string]any, keys []string) (string, bool) {
 				return s, true
 			}
 			return "", false
+		}
+	}
+	return "", false
+}
+
+// takeFirstNonEmptyString returns (and removes) the first of keys present
+// in m whose value is a non-empty string; empty strings fall through to the
+// next key. This ensures {"msg":"","message":"hi"} lifts "hi".
+func takeFirstNonEmptyString(m map[string]any, keys []string) (string, bool) {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			delete(m, k)
+			if s, ok := v.(string); ok && s != "" {
+				return s, true
+			}
 		}
 	}
 	return "", false
