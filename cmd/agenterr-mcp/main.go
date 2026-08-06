@@ -13,8 +13,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -28,7 +31,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(context.Background(), cfg.url, cfg.key, os.Stdin, os.Stdout); err != nil {
+	// SIGINT/SIGTERM cancel ctx rather than killing the process outright,
+	// so run() gets a chance to close the remote session cleanly instead
+	// of leaving it to time out server-side.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, cfg.url, cfg.key, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "agenterr-mcp:", err)
 		os.Exit(1)
 	}
@@ -86,7 +95,9 @@ func normalizeMCPURL(u string) string {
 // endpoint at url (failing fast on error), then serves MCP over stdin/
 // stdout, forwarding every tools/list and tools/call request to the
 // remote session verbatim. It returns when stdin closes (client
-// disconnect) or ctx is cancelled; a nil return means clean shutdown.
+// disconnect) or ctx is cancelled; a nil return means clean shutdown —
+// including shutdown triggered by ctx cancellation (e.g. SIGINT/SIGTERM
+// via signal.NotifyContext in main), which is not itself an error.
 func run(ctx context.Context, url, key string, stdin io.ReadCloser, stdout io.WriteCloser) error {
 	remoteClient := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "agenterr-mcp-proxy", Version: "0.1.0"}, nil)
 	transport := &mcpsdk.StreamableClientTransport{
@@ -95,8 +106,11 @@ func run(ctx context.Context, url, key string, stdin io.ReadCloser, stdout io.Wr
 	}
 	remote, err := remoteClient.Connect(ctx, transport, nil)
 	if err != nil {
-		return fmt.Errorf("connect to %s: %w", url, err)
+		return fmt.Errorf("connect to %s: %w", redactURL(url), err)
 	}
+	// Runs on every return path below, so ctx cancellation, a local.Run
+	// error, and clean client disconnect all end with the remote session
+	// explicitly closed rather than abandoned to an idle timeout.
 	defer remote.Close()
 
 	local := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "agenterr-mcp-proxy", Version: "0.1.0"}, &mcpsdk.ServerOptions{
@@ -104,53 +118,33 @@ func run(ctx context.Context, url, key string, stdin io.ReadCloser, stdout io.Wr
 	})
 	local.AddReceivingMiddleware(proxyMiddleware(remote))
 
-	return local.Run(ctx, &mcpsdk.IOTransport{Reader: stdin, Writer: stdout})
-}
+	done := make(chan error, 1)
+	go func() {
+		done <- local.Run(ctx, &mcpsdk.IOTransport{Reader: stdin, Writer: stdout})
+	}()
 
-// proxyMiddleware forwards tools/list and tools/call requests verbatim to
-// remote, and lets everything else fall through to the local server's
-// default handling. This is the entire proxy: no tool knowledge, no
-// caching — the remote server's tool set is whatever the client sees.
-func proxyMiddleware(remote *mcpsdk.ClientSession) mcpsdk.Middleware {
-	return func(next mcpsdk.MethodHandler) mcpsdk.MethodHandler {
-		return func(ctx context.Context, method string, req mcpsdk.Request) (mcpsdk.Result, error) {
-			switch method {
-			case "tools/list":
-				// Rebuild bare params (just the pagination cursor) rather
-				// than forwarding req.GetParams() verbatim: the incoming
-				// params carry the local session's request Meta (protocol
-				// version, client info), which is meaningless — and
-				// rejected — on the unrelated remote session.
-				var cursor string
-				if p, ok := req.GetParams().(*mcpsdk.ListToolsParams); ok && p != nil {
-					cursor = p.Cursor
-				}
-				return remote.ListTools(ctx, &mcpsdk.ListToolsParams{Cursor: cursor})
-			case "tools/call":
-				raw, ok := req.GetParams().(*mcpsdk.CallToolParamsRaw)
-				if !ok {
-					return next(ctx, method, req)
-				}
-				return remote.CallTool(ctx, &mcpsdk.CallToolParams{
-					Name:      raw.Name,
-					Arguments: raw.Arguments,
-				})
-			default:
-				return next(ctx, method, req)
-			}
-		}
+	select {
+	case <-ctx.Done():
+		// local.Run also observes ctx (mcp.Server.Run selects on it
+		// internally) and is already tearing its own session down; wait
+		// for that to finish so the deferred remote.Close() above runs
+		// only once local resources are released, then report a clean
+		// shutdown rather than surfacing ctx.Err() as a proxy failure.
+		<-done
+		return nil
+	case err := <-done:
+		return err
 	}
 }
 
-// bearerTransport injects "Authorization: Bearer <key>" on every outbound
-// request to the remote server, mirroring the pattern in
-// internal/mcp/tools_test.go's over-the-wire test.
-type bearerTransport struct {
-	key string
-}
-
-func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", "Bearer "+b.key)
-	return http.DefaultTransport.RoundTrip(req)
+// redactURL strips embedded userinfo (user:password@) from raw before it
+// can land in an error message that gets logged or shown to an agent. If
+// raw doesn't parse as a URL, it's returned unchanged — the connect error
+// it's embedded in is informative either way.
+func redactURL(raw string) string {
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return u.Redacted()
 }

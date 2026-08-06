@@ -178,6 +178,99 @@ func TestProxy_BadKey_FailsAtStartup(t *testing.T) {
 	}
 }
 
+// TestProxy_ContextCancellation proves ctx cancellation (standing in for
+// main's signal.NotifyContext on SIGINT/SIGTERM) makes run() return
+// cleanly — nil, not ctx.Err() — rather than looking like a proxy
+// failure. No client ever connects over stdio; run() must still notice
+// the connected *remote* session and its local.Run() stdio loop, tear
+// both down, and return promptly once ctx is cancelled.
+func TestProxy_ContextCancellation(t *testing.T) {
+	url, key := newTestServer(t)
+
+	stdinR, stdinW := io.Pipe()
+	_, stdoutW := io.Pipe()
+	defer stdinW.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, url, key, stdinR, stdoutW) }()
+
+	// Give run() a moment to finish connecting to the remote before
+	// cancelling, so this actually exercises the "torn down mid-session"
+	// path rather than racing the initial connect.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run() after ctx cancellation: want nil, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return after ctx cancellation")
+	}
+}
+
+// TestProxy_RemoteErrorPropagates calls a tool the remote server doesn't
+// have and asserts the failure reaches the local client as a tool-call
+// error (either a JSON-RPC-level error or an IsError result — the SDK is
+// free to represent an unknown-tool failure either way), and that the
+// proxy is still alive afterward: a subsequent tools/list must still
+// succeed. This is the "don't crash on remote errors" half of the proxy's
+// contract from a mid-session failure, as opposed to the connect-time
+// failure covered by TestProxy_BadKey_FailsAtStartup.
+func TestProxy_RemoteErrorPropagates(t *testing.T) {
+	url, key := newTestServer(t)
+
+	clientR, proxyW := io.Pipe()
+	proxyR, clientW := io.Pipe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, url, key, proxyR, proxyW)
+	}()
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "0.0.1"}, nil)
+	transport := &mcpsdk.IOTransport{Reader: clientR, Writer: clientW}
+	cs, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "does_not_exist",
+		Arguments: map[string]any{},
+	})
+	if err == nil && (res == nil || !res.IsError) {
+		t.Fatalf("CallTool for an unknown tool: want an error or an IsError result, got res=%#v err=%v", res, err)
+	}
+
+	// The proxy must still be alive: a subsequent, valid call succeeds.
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools after a remote error: %v", err)
+	}
+	if len(tools.Tools) != 8 {
+		t.Fatalf("got %d tools after a remote error, want 8", len(tools.Tools))
+	}
+
+	cs.Close()
+	clientW.Close()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Errorf("run() returned error after clean shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return after client disconnect")
+	}
+}
+
 func TestResolveConfig(t *testing.T) {
 	env := func(vals map[string]string) func(string) string {
 		return func(k string) string { return vals[k] }
