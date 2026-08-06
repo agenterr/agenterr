@@ -1,0 +1,38 @@
+{{define "title"}}{{.Issue.Title}} — agenterr{{end}}
+
+{{define "content"}}
+<div class="panel">
+  <div class="panel-header">
+    <h1 class="mono truncate">{{.Issue.Title}}</h1>
+    {{template "status-chip" .}}
+  </div>
+  <div class="meta">
+    <span class="sev-chip sev-{{severityClass .Issue.Severity}}">{{sevChip .Issue.Severity}}</span>
+    <span class="count">×{{.Issue.Count}}</span>
+    <span class="muted">first seen {{fmtTime .Issue.FirstSeen}}</span>
+    <span class="muted">last seen {{fmtTime .Issue.LastSeen}}</span>
+  </div>
+  {{if .Sparkline}}
+  <svg class="sparkline" viewBox="0 0 100 20" preserveAspectRatio="none">
+    <polyline points="{{.Sparkline}}" fill="none" stroke="var(--sev-error)" stroke-width="1.4"></polyline>
+  </svg>
+  {{end}}
+  <div class="actions">
+    <button class="btn-primary" hx-post="/issues/{{.Issue.ID}}/resolve" hx-target="#status-chip" hx-swap="outerHTML">resolve</button>
+    <button class="btn-secondary" hx-post="/issues/{{.Issue.ID}}/ignore" hx-target="#status-chip" hx-swap="outerHTML">ignore</button>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header"><h2>Sample event</h2></div>
+  {{if .Sample}}
+  <pre class="log-body mono">{{.Sample.Body}}</pre>
+  {{else}}
+  <p class="empty-state">No sample event stored for this issue.</p>
+  {{end}}
+</div>
+{{end}}
+
+{{define "status-chip"}}
+<span id="status-chip" class="status-chip status-{{.Issue.Status}} fade-settle">{{.Issue.Status}}</span>
+{{end}}

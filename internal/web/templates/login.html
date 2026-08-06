@@ -1,0 +1,21 @@
+{{define "layout"}}<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>agenterr — log in</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@700&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-body">
+<main class="login-panel fade-settle">
+  <div class="wordmark">agent<span class="accent">err</span></div>
+  {{if .Error}}<p class="error-text">{{.Error}}</p>{{end}}
+  <form method="post" action="/login">
+    <input type="password" name="password" placeholder="password" autofocus required>
+    <button class="btn-primary" type="submit">log in</button>
+  </form>
+</main>
+</body>
+</html>
+{{end}}

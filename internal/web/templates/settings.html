@@ -1,0 +1,81 @@
+{{define "title"}}settings — agenterr{{end}}
+
+{{define "content"}}
+<div id="settings-content" class="fade-settle">
+{{template "settings-body" .}}
+</div>
+{{end}}
+
+{{define "settings-body"}}
+<div class="panel-header">
+  <h1>Settings</h1>
+</div>
+
+<div class="panel">
+  <div class="panel-header"><h2>Projects</h2></div>
+  {{if not .Projects}}
+  <p class="empty-state">No projects yet. Create one below, then send its first event:</p>
+  <pre class="snippet mono">curl -X POST {{.BaseURL}}/api/v1/ingest \
+  -H "Authorization: Bearer &lt;INGEST_KEY&gt;" \
+  -d '{"body":"hello agenterr","severity":"error"}'</pre>
+  {{else}}
+  <table class="data-table">
+    <thead>
+      <tr><th>name</th><th>retention</th><th></th></tr>
+    </thead>
+    <tbody>
+    {{range .Projects}}
+      <tr>
+        <td class="mono">{{.Name}}</td>
+        <td class="muted mono">{{.RetentionDays}}d</td>
+        <td class="row-actions">
+          <form hx-post="/settings/projects/{{.ID}}/keys" hx-target="#settings-content" hx-swap="outerHTML" class="inline-form">
+            <input type="hidden" name="kind" value="ingest">
+            <button class="btn-secondary mono" type="submit">$ mint ingest key</button>
+          </form>
+          <form hx-post="/settings/projects/{{.ID}}/keys" hx-target="#settings-content" hx-swap="outerHTML" class="inline-form">
+            <input type="hidden" name="kind" value="api">
+            <button class="btn-secondary mono" type="submit">$ mint api key</button>
+          </form>
+        </td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{end}}
+</div>
+
+<div class="panel">
+  <div class="panel-header"><h2>New project</h2></div>
+  <form class="filters" hx-post="/settings/projects" hx-target="#settings-content" hx-swap="outerHTML">
+    <input type="text" name="name" placeholder="name" required>
+    <input type="number" name="retention_days" placeholder="retention days" value="30" min="1" required>
+    <button class="btn-primary" type="submit">create</button>
+  </form>
+</div>
+
+{{if .MintedKey}}
+<div class="panel key-result">
+  <div class="panel-header"><h2>{{.MintedKind}} key</h2></div>
+  <p class="empty-state">Save this key now. It will not be shown again.</p>
+  <div class="mono-box" id="minted-key">{{.MintedKey}}</div>
+  <button class="btn-secondary" id="copy-key" onclick="navigator.clipboard.writeText(document.getElementById('minted-key').textContent);this.textContent='copied'">copy</button>
+
+  <p class="setup-label muted">curl</p>
+  <pre class="snippet mono">curl -X POST {{.BaseURL}}/api/v1/ingest \
+  -H "Authorization: Bearer {{.MintedKey}}" \
+  -d '{"body":"hello agenterr","severity":"error"}'</pre>
+
+  <p class="setup-label muted">Vector sink</p>
+  <pre class="snippet mono">[sinks.agenterr]
+type = "http"
+uri = "{{.BaseURL}}/api/v1/ingest"
+encoding.codec = "json"
+[sinks.agenterr.request.headers]
+Authorization = "Bearer {{.MintedKey}}"</pre>
+
+  <p class="setup-label muted">MCP</p>
+  <pre class="snippet mono">$ claude mcp add agenterr --transport http {{.BaseURL}}/mcp --header "Authorization: Bearer {{.MintedKey}}"</pre>
+</div>
+{{end}}
+{{end}}

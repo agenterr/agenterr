@@ -1,0 +1,319 @@
+/* Agenterr web UI — Deep Space design system.
+   Flat surfaces only: no gradients, no glows, no box-shadows. Depth comes
+   from a one-step surface raise (--bg -> --bg-raised) and 1px borders.
+   See .claude/skills/agenterr-design-system (workspace root) for the full
+   spec this file implements. */
+
+:root {
+  --bg: #0b0d10;
+  --bg-raised: #0e1116;
+  --bg-inset: #11141a;
+  --bg-chip: #161b24;
+  --border: #1c1f26;
+  --border-soft: #14171e;
+  --border-strong: #2a2e37;
+  --text: #ededf0;
+  --text-muted: #a8b0bd;
+  --accent: #3b4bc8;
+  --accent-hover: #4a5ad4;
+  --accent-text: #7c8ce8;
+  --accent-wash: rgba(59, 75, 200, .1);
+  --accent-wash-border: #2c3550;
+  --sev-error: #f47067;
+  --sev-warn: #c69026;
+  --sev-info: #58a6ff;
+  --sev-debug: #8b949e;
+  --ok: #3fb950;
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mono { font-family: var(--font-mono); }
+
+a { color: inherit; text-decoration: none; }
+
+h1, h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -.02em;
+  margin: 0;
+}
+h1 { font-size: 16px; }
+h2 { font-size: 14px; }
+
+/* ---------- entrance motion: "fade & settle" ----------
+   opacity 0->1 + translateY(4px)->0, 200ms, applied on load/swap of
+   panels and htmx-swapped fragments. Ceiling: nothing exceeds 240ms. */
+.fade-settle {
+  animation: fade-settle 200ms cubic-bezier(.2, .7, .3, 1);
+}
+@keyframes fade-settle {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- layout ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 20px;
+  height: 48px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.wordmark {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+}
+.wordmark .accent, .wordmark .accent + * { color: var(--accent-text); }
+.wordmark .accent { color: var(--accent-text); }
+
+.topnav { display: flex; gap: 16px; flex: 1; }
+.topnav a {
+  color: var(--text-muted);
+  font-weight: 500;
+  transition: color 120ms ease;
+}
+.topnav a:hover { color: var(--text); }
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+}
+
+.panel {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* ---------- buttons ---------- */
+.btn-primary, .btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-body);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.btn-primary {
+  background: var(--accent);
+  color: #eceefc;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-secondary {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.btn-secondary:hover { border-color: var(--accent); }
+.btn-secondary.mono { font-family: var(--font-mono); font-size: 12px; }
+.btn-primary:active, .btn-secondary:active { transform: translateY(1px); }
+
+/* ---------- forms ---------- */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+input, select {
+  height: 32px;
+  padding: 0 10px;
+  background: var(--bg-chip);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.inline-form { display: inline-block; margin-right: 8px; }
+.toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); }
+
+/* ---------- tables ---------- */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.data-table thead th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.data-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+.issue-row:hover, .log-row:hover {
+  background: #12151c;
+  cursor: pointer;
+}
+.truncate {
+  max-width: 560px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.empty-row td { padding: 20px 8px; }
+
+/* ---------- severity ---------- */
+.sev-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.sev-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  width: 4ch;
+  display: inline-block;
+  background: transparent;
+}
+.sev-error, .sev-error.sev-dot, .sev-dot.sev-error { color: var(--sev-error); background: var(--sev-error); }
+.sev-warn, .sev-warn.sev-dot, .sev-dot.sev-warn { color: var(--sev-warn); background: var(--sev-warn); }
+.sev-info, .sev-info.sev-dot, .sev-dot.sev-info { color: var(--sev-info); background: var(--sev-info); }
+.sev-debug, .sev-debug.sev-dot, .sev-dot.sev-debug { color: var(--sev-debug); background: var(--sev-debug); }
+.sev-chip.sev-error, .sev-chip.sev-warn, .sev-chip.sev-info, .sev-chip.sev-debug { background: transparent; }
+.sev-dot.sev-error { background: var(--sev-error); }
+.sev-dot.sev-warn { background: var(--sev-warn); }
+.sev-dot.sev-info { background: var(--sev-info); }
+.sev-dot.sev-debug { background: var(--sev-debug); }
+
+.count { color: var(--accent-text); font-family: var(--font-mono); }
+.muted { color: var(--text-muted); }
+
+/* ---------- status chip ---------- */
+.status-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--bg-chip);
+  color: var(--text-muted);
+}
+.status-chip.status-open { color: var(--sev-error); }
+.status-chip.status-resolved { color: var(--ok); }
+.status-chip.status-ignored { color: var(--text-muted); }
+
+/* ---------- issue detail ---------- */
+.meta { display: flex; gap: 14px; align-items: center; margin-bottom: 12px; }
+.sparkline { width: 100%; max-width: 320px; height: 24px; display: block; margin-bottom: 12px; }
+.actions { display: flex; gap: 8px; }
+.log-body {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+/* ---------- empty states / snippets ---------- */
+.empty-state {
+  color: var(--text-muted);
+  margin: 4px 0 8px;
+}
+.snippet {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* ---------- settings / keys ---------- */
+.row-actions { white-space: nowrap; }
+.mono-box {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-inset);
+  border: 1px solid var(--accent-wash-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.setup-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin: 12px 0 4px;
+}
+.error-text { color: var(--sev-error); margin: 0 0 12px; }
+
+/* ---------- login ---------- */
+.login-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg);
+}
+.login-panel {
+  width: 280px;
+  padding: 24px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  text-align: center;
+}
+.login-panel .wordmark { font-size: 20px; margin-bottom: 16px; }
+.login-panel form { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+
+/* ---------- dark is the reference theme; a light theme (if ever added)
+   must derive from these tokens, not be designed independently. ---------- */
+@media (prefers-color-scheme: light) {
+  :root[data-theme="dark"] { color-scheme: dark; }
+}

@@ -1,0 +1,30 @@
+{{define "layout"}}<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>{{block "title" .}}agenterr{{end}}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Progressive enhancement only: self-hosted instances without internet
+     access render fine on the system-font fallbacks in app.css. -->
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="wordmark" href="/">agent<span class="accent">err</span></a>
+  <nav class="topnav">
+    <a href="/">issues</a>
+    <a href="/search">search</a>
+    <a href="/settings">settings</a>
+  </nav>
+  <form method="post" action="/logout">
+    <button class="btn-secondary" type="submit">log out</button>
+  </form>
+</header>
+<main class="page">
+{{block "content" .}}{{end}}
+</main>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,56 @@
+{{define "title"}}issues — agenterr{{end}}
+
+{{define "content"}}
+<div class="panel-header">
+  <h1>Issues</h1>
+</div>
+<form class="filters" hx-get="/" hx-target="#issues-rows" hx-swap="outerHTML" hx-push-url="true">
+  <select name="status" onchange="this.form.requestSubmit()">
+    <option value="" {{if eq .Status ""}}selected{{end}}>all statuses</option>
+    <option value="open" {{if eq .Status "open"}}selected{{end}}>open</option>
+    <option value="resolved" {{if eq .Status "resolved"}}selected{{end}}>resolved</option>
+    <option value="ignored" {{if eq .Status "ignored"}}selected{{end}}>ignored</option>
+  </select>
+  <select name="window" onchange="this.form.requestSubmit()">
+    <option value="24h" {{if eq .Window "24h"}}selected{{end}}>24h</option>
+    <option value="7d" {{if eq .Window "7d"}}selected{{end}}>7d</option>
+    <option value="30d" {{if eq .Window "30d"}}selected{{end}}>30d</option>
+  </select>
+  <input type="text" name="env" value="{{.Env}}" placeholder="environment" class="mono" onchange="this.form.requestSubmit()">
+</form>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th></th>
+      <th>issue</th>
+      <th>severity</th>
+      <th>count</th>
+      <th>last seen</th>
+    </tr>
+  </thead>
+  {{template "issues-rows" .}}
+</table>
+{{end}}
+
+{{define "issues-rows"}}
+<tbody id="issues-rows" class="fade-settle">
+{{if not .Issues}}
+  <tr class="empty-row"><td colspan="5">
+    <p class="empty-state">No issues yet. Send your first event:</p>
+    <pre class="snippet mono">curl -X POST {{.BaseURL}}/api/v1/ingest \
+  -H "Authorization: Bearer &lt;INGEST_KEY&gt;" \
+  -d '{"body":"hello agenterr","severity":"error"}'</pre>
+  </td></tr>
+{{else}}
+  {{range .Issues}}
+  <tr class="issue-row">
+    <td><span class="sev-dot sev-{{severityClass .Severity}}"></span></td>
+    <td class="mono truncate"><a href="/issues/{{.ID}}">{{.Title}}</a></td>
+    <td class="sev-chip sev-{{severityClass .Severity}}">{{sevChip .Severity}}</td>
+    <td class="count">×{{.Count}}</td>
+    <td class="muted" title="{{fmtTime .LastSeen}}">{{relTime .LastSeen}}</td>
+  </tr>
+  {{end}}
+{{end}}
+</tbody>
+{{end}}

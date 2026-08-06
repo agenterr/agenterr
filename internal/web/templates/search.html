@@ -1,0 +1,61 @@
+{{define "title"}}search — agenterr{{end}}
+
+{{define "content"}}
+<div class="panel-header">
+  <h1>Search</h1>
+</div>
+<form class="filters" hx-get="/search" hx-target="#search-results" hx-swap="outerHTML" hx-push-url="true">
+  <input type="text" name="q" value="{{.Query}}" placeholder="search logs" class="mono">
+  <select name="severity">
+    <option value="" {{if eq .Severity ""}}selected{{end}}>any severity</option>
+    <option value="warn" {{if eq .Severity "warn"}}selected{{end}}>warn+</option>
+    <option value="error" {{if eq .Severity "error"}}selected{{end}}>error+</option>
+  </select>
+  <select name="window">
+    <option value="24h" {{if eq .Window "24h"}}selected{{end}}>24h</option>
+    <option value="7d" {{if eq .Window "7d"}}selected{{end}}>7d</option>
+    <option value="30d" {{if eq .Window "30d"}}selected{{end}}>30d</option>
+  </select>
+  <label class="toggle"><input type="checkbox" name="refresh" value="1" {{if .AutoRefresh}}checked{{end}}> auto-refresh</label>
+  <button class="btn-primary" type="submit">search</button>
+</form>
+{{template "search-results" .}}
+{{end}}
+
+{{define "search-results"}}
+<div id="search-results" class="fade-settle"
+  {{if .AutoRefresh}}hx-get="/search?{{.QueryString}}" hx-trigger="every 10s" hx-swap="outerHTML"{{end}}>
+{{if not .Logs}}
+  <p class="empty-state">No matches. Try a broader query or a longer time window.</p>
+{{else}}
+  <table class="data-table">
+    <thead>
+      <tr><th>time</th><th>severity</th><th>body</th></tr>
+    </thead>
+    <tbody>
+    {{range .Logs}}
+      <tr class="log-row" hx-get="/logs/{{.ID}}/context" hx-target="next .context-row" hx-swap="outerHTML">
+        <td class="mono">{{fmtTime .Time}}</td>
+        <td class="sev-chip sev-{{severityClass .Severity}}">{{sevChip .Severity}}</td>
+        <td class="mono truncate">{{.Body}}</td>
+      </tr>
+      <tr class="context-row"></tr>
+    {{end}}
+    </tbody>
+  </table>
+{{end}}
+</div>
+{{end}}
+
+{{define "context-rows"}}
+<tr class="context-row fade-settle">
+  <td colspan="3">
+    {{if not .Logs}}
+    <p class="empty-state">No context available.</p>
+    {{else}}
+    <pre class="log-body mono">{{range .Logs}}{{fmtTime .Time}}  {{sevChip .Severity}}  {{.Body}}
+{{end}}</pre>
+    {{end}}
+  </td>
+</tr>
+{{end}}
