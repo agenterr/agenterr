@@ -63,6 +63,7 @@ func testConfig(t *testing.T, adminPassword string) config.Config {
 		BufferSize:    1000,
 		FlushEveryMS:  50,
 		MaxBodyBytes:  5 << 20,
+		NoiseFlushMS:  50,
 	}
 }
 

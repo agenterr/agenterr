@@ -114,6 +114,48 @@ qualify), never overwrites an explicitly-set severity or existing
 attributes, and can be disabled with `--parse-bodies=false` or
 `AGENTERR_PARSE_BODIES=false`.
 
+### Noise rules
+
+Per-project rules that stop chatty, low-value logs from ever being
+stored — evaluated at ingest, before a record hits the database. Three
+kinds:
+
+- **`severity_floor`** — drop records below a given severity for a
+  service (e.g. drop `debug`/`info` noise from a chatty health-check
+  loop, keep `warn` and up).
+- **`drop_match`** — drop records whose body contains a given substring.
+- **`sample`** — keep 1 of every N records at or below a given severity,
+  dropping the rest (e.g. keep 1 in 20 `info` lines instead of all of
+  them).
+
+Rules are fail-open: an unknown kind, an empty pattern, or an unloaded
+rule engine all mean "keep the record" — a misconfigured rule can never
+silently black-hole ingest. Every record a rule drops still increments
+that rule's counter, so the volume it's cutting stays visible even
+though the record itself is gone; counters are persisted periodically
+(`--noise-flush-ms`, default 30s) and once more at shutdown.
+
+Manage rules over REST:
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/v1/projects/{id}/noise-rules` | List a project's rules |
+| `POST /api/v1/projects/{id}/noise-rules` | Create or update a rule (include `id` to update) |
+| `DELETE /api/v1/noise-rules/{id}` | Remove a rule |
+| `GET /api/v1/noise-report` | Top services by volume plus every rule's drop count |
+| `PATCH /api/v1/projects/{id}` | Toggle `parse_bodies` for a project |
+
+The same surface is available as five MCP tools, so an agent can find
+and cut noise on its own:
+
+| Tool | Purpose |
+|---|---|
+| `list_noise_rules` | List the rules configured for a project |
+| `upsert_noise_rule` | Create or update a rule |
+| `delete_noise_rule` | Remove a rule |
+| `get_noise_report` | Top services by volume plus every rule's drop count |
+| `set_project_parse` | Toggle structured-body parsing for a project |
+
 ## Agent setup
 
 Give an agent access to the thirteen MCP tools (`list_projects`,
@@ -156,6 +198,7 @@ single admin login.
 | `AGENTERR_FLUSH_EVERY_MS` | `--flush-every` | `200` | Pipeline batch-write interval |
 | `AGENTERR_MAX_BODY_BYTES` | `--max-body-bytes` | `5242880` (5MB) | Max request body any ingest edge accepts |
 | `AGENTERR_MAX_DB_BYTES` | `--max-db-bytes` | `0` (unlimited) | Guardrail: if the DB file exceeds this, prune the oldest day across every project |
+| `AGENTERR_NOISE_FLUSH_MS` | `--noise-flush-ms` | `30000` | How often noise-rule drop counters are persisted |
 
 Flags override env vars, which override the defaults above.
 

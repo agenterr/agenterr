@@ -25,6 +25,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
 				ParseBodies:   true,
+				NoiseFlushMS:  30000,
 			},
 		},
 		{
@@ -46,6 +47,8 @@ func TestLoad(t *testing.T) {
 					return "10485760" // 10MB
 				case "AGENTERR_MAX_DB_BYTES":
 					return "1073741824" // 1GB
+				case "AGENTERR_NOISE_FLUSH_MS":
+					return "5000"
 				}
 				return ""
 			},
@@ -58,6 +61,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  10485760,
 				MaxDBBytes:    1073741824,
 				ParseBodies:   true,
+				NoiseFlushMS:  5000,
 			},
 		},
 		{
@@ -83,6 +87,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
 				ParseBodies:   true,
+				NoiseFlushMS:  30000,
 			},
 		},
 		{
@@ -106,6 +111,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    123, // env overrides default
 				ParseBodies:   true,
+				NoiseFlushMS:  30000,
 			},
 		},
 		{
@@ -118,6 +124,7 @@ func TestLoad(t *testing.T) {
 				"--flush-every", "100",
 				"--max-body-bytes", "2097152",
 				"--max-db-bytes", "536870912",
+				"--noise-flush-ms", "1000",
 			},
 			getenv: func(string) string { return "" },
 			want: Config{
@@ -129,6 +136,28 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  2097152,
 				MaxDBBytes:    536870912,
 				ParseBodies:   true,
+				NoiseFlushMS:  1000,
+			},
+		},
+		{
+			name: "noise-flush-ms flag overrides env",
+			args: []string{"--noise-flush-ms", "250"},
+			getenv: func(key string) string {
+				if key == "AGENTERR_NOISE_FLUSH_MS" {
+					return "9000"
+				}
+				return ""
+			},
+			want: Config{
+				ListenAddr:    ":3617",
+				DBPath:        "./agenterr.db",
+				AdminPassword: "",
+				BufferSize:    10000,
+				FlushEveryMS:  200,
+				MaxBodyBytes:  5 << 20,
+				MaxDBBytes:    0,
+				ParseBodies:   true,
+				NoiseFlushMS:  250,
 			},
 		},
 		{
@@ -136,6 +165,35 @@ func TestLoad(t *testing.T) {
 			args:    []string{"--flush-every", "-5"},
 			getenv:  func(string) string { return "" },
 			wantErr: "flush-every",
+		},
+		{
+			name:    "error: negative noise-flush-ms",
+			args:    []string{"--noise-flush-ms", "-5"},
+			getenv:  func(string) string { return "" },
+			wantErr: "noise-flush-ms",
+		},
+		{
+			name:    "error: zero noise-flush-ms",
+			args:    []string{"--noise-flush-ms", "0"},
+			getenv:  func(string) string { return "" },
+			wantErr: "noise-flush-ms",
+		},
+		{
+			name:    "error: invalid noise-flush-ms format",
+			args:    []string{"--noise-flush-ms", "nope"},
+			getenv:  func(string) string { return "" },
+			wantErr: "noise-flush-ms",
+		},
+		{
+			name: "error: invalid AGENTERR_NOISE_FLUSH_MS format",
+			args: []string{},
+			getenv: func(key string) string {
+				if key == "AGENTERR_NOISE_FLUSH_MS" {
+					return "banana"
+				}
+				return ""
+			},
+			wantErr: "AGENTERR_NOISE_FLUSH_MS",
 		},
 		{
 			name:    "error: zero flush-every",
@@ -210,6 +268,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
 				ParseBodies:   true,
+				NoiseFlushMS:  30000,
 			},
 		},
 		{
@@ -225,6 +284,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    0,
 				ParseBodies:   true,
+				NoiseFlushMS:  30000,
 			},
 		},
 		{
@@ -240,6 +300,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    100000000,
 				ParseBodies:   true,
+				NoiseFlushMS:  30000,
 			},
 		},
 		{
@@ -260,6 +321,7 @@ func TestLoad(t *testing.T) {
 				MaxBodyBytes:  5 << 20,
 				MaxDBBytes:    2147483648,
 				ParseBodies:   true,
+				NoiseFlushMS:  30000,
 			},
 		},
 	}

@@ -20,6 +20,7 @@ type Config struct {
 	MaxBodyBytes  int64
 	MaxDBBytes    int64
 	ParseBodies   bool
+	NoiseFlushMS  int
 }
 
 // configFlags holds the flag.Value pointers registered against a FlagSet,
@@ -34,6 +35,7 @@ type configFlags struct {
 	maxBodyBytes  *int64
 	maxDBBytes    *int64
 	parseBodies   *bool
+	noiseFlushMS  *int
 }
 
 // Load loads configuration from flags and environment variables.
@@ -48,6 +50,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		MaxBodyBytes:  5 << 20, // 5MB
 		MaxDBBytes:    0,
 		ParseBodies:   true,
+		NoiseFlushMS:  30000,
 	}
 
 	if err := applyEnvOverrides(&cfg, getenv); err != nil {
@@ -124,6 +127,13 @@ func applyEnvOverrides(cfg *Config, getenv func(string) string) error {
 		}
 		cfg.ParseBodies = parse
 	}
+	if val := getenv("AGENTERR_NOISE_FLUSH_MS"); val != "" {
+		noiseFlush, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("AGENTERR_NOISE_FLUSH_MS: invalid value %q: %w", val, err)
+		}
+		cfg.NoiseFlushMS = noiseFlush
+	}
 	return nil
 }
 
@@ -140,6 +150,7 @@ func registerFlags(fs *flag.FlagSet, cfg Config) configFlags {
 		maxBodyBytes:  fs.Int64("max-body-bytes", cfg.MaxBodyBytes, "Max body bytes"),
 		maxDBBytes:    fs.Int64("max-db-bytes", cfg.MaxDBBytes, "Max database bytes"),
 		parseBodies:   fs.Bool("parse-bodies", cfg.ParseBodies, "Lift fields from JSON/logfmt log bodies at ingest"),
+		noiseFlushMS:  fs.Int("noise-flush-ms", cfg.NoiseFlushMS, "Noise-rule drop-counter flush interval in milliseconds"),
 	}
 }
 
@@ -171,6 +182,9 @@ func applyFlagOverrides(cfg *Config, flags configFlags, flagSet map[string]bool)
 	if flagSet["parse-bodies"] {
 		cfg.ParseBodies = *flags.parseBodies
 	}
+	if flagSet["noise-flush-ms"] {
+		cfg.NoiseFlushMS = *flags.noiseFlushMS
+	}
 }
 
 // validate rejects configurations that would make the rest of the app
@@ -188,6 +202,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.MaxDBBytes < 0 {
 		return fmt.Errorf("max-db-bytes must be >= 0, got %d", cfg.MaxDBBytes)
+	}
+	if cfg.NoiseFlushMS <= 0 {
+		return fmt.Errorf("noise-flush-ms must be > 0, got %d", cfg.NoiseFlushMS)
 	}
 	return nil
 }

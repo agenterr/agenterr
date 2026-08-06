@@ -31,13 +31,6 @@ const retentionInterval = time.Hour
 // retention mechanism.
 const guardrailWindow = 24 * time.Hour
 
-// flushDropsInterval is how often the noise-rule engine's in-memory drop
-// counters are persisted while the process runs. Kept short relative to
-// the retention sweep: drop counts are operator-facing (noise-rule UI),
-// so a crash should lose at most this much of the tally, not an hour's
-// worth.
-const flushDropsInterval = 30 * time.Second
-
 // shutdownServerBudget bounds how long OnStop gives srv.Shutdown before
 // moving on, so a slow/stuck HTTP shutdown can never eat the entire Stop
 // budget and starve pipe.Drain of the time it needs to flush — see
@@ -83,7 +76,7 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.D
 
 			go retentionLoop(retentionCtx, cfg, db)
 
-			go flushDropsLoop(flushCtx, engine)
+			go flushDropsLoop(flushCtx, engine, time.Duration(cfg.NoiseFlushMS)*time.Millisecond)
 
 			return nil
 		},
@@ -199,11 +192,12 @@ func setupURL(listenAddr string) string {
 }
 
 // flushDropsLoop persists the noise-rule engine's in-memory drop counters
-// on a fixed cadence until ctx is canceled. The final flush after
-// shutdown (see register's OnStop) covers whatever accumulates between
-// the last tick and the process stopping.
-func flushDropsLoop(ctx context.Context, engine *rules.Engine) {
-	ticker := time.NewTicker(flushDropsInterval)
+// on a cadence of interval (cfg.NoiseFlushMS, config.go's default 30s)
+// until ctx is canceled. The final flush after shutdown (see register's
+// OnStop) covers whatever accumulates between the last tick and the
+// process stopping.
+func flushDropsLoop(ctx context.Context, engine *rules.Engine, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

@@ -98,6 +98,7 @@ func TestE2E(t *testing.T) {
 	t.Run("log search and context", h.testLogSearchAndContext)
 	t.Run("structured JSON body lifted and grouped", h.testStructuredBodyParsing)
 	t.Run("resolve then regression reopen", h.testResolveAndRegression)
+	t.Run("noise rules drop and are reported", h.testNoiseRules)
 	t.Run("mcp tools", h.testMCP)
 	t.Run("admin route scoping guard", h.testScopingGuard)
 	t.Run("graceful shutdown", h.testGracefulShutdown)
@@ -138,6 +139,10 @@ func (h *harness) testBuildAndStart(t *testing.T) {
 		"AGENTERR_LISTEN="+addr,
 		"AGENTERR_DB="+dbPath,
 		"AGENTERR_ADMIN_PASSWORD="+adminPassword,
+		// Default is 30s (see internal/config/config.go); a short interval
+		// here lets testNoiseRules poll the drop counters flushing to the
+		// store instead of waiting out the production default.
+		"AGENTERR_NOISE_FLUSH_MS=200",
 	)
 	h.stdout = &syncBuffer{}
 	h.stderr = &syncBuffer{}
@@ -507,6 +512,145 @@ func (h *harness) testResolveAndRegression(t *testing.T) {
 	}
 }
 
+// ---- noise rules: drop-on-ingest, counted, reported, and the
+// parse_bodies override that keeps a body raw ----
+
+type noiseRuleDTO struct {
+	ID           int64  `json:"id"`
+	Kind         string `json:"kind"`
+	Service      string `json:"service"`
+	Severity     string `json:"severity"`
+	Pattern      string `json:"pattern"`
+	N            int    `json:"n"`
+	Enabled      bool   `json:"enabled"`
+	DroppedCount int64  `json:"dropped_count"`
+}
+
+type noiseReportDTO struct {
+	TopServices []struct {
+		Service string `json:"service"`
+		Logs    int64  `json:"logs"`
+	} `json:"top_services"`
+	Rules        []noiseRuleDTO `json:"rules"`
+	TotalDropped int64          `json:"total_dropped"`
+}
+
+// testNoiseRules proves the noise-rule pipeline end to end: a
+// severity_floor rule dropping below warn for one service, counted
+// (dropped_count==2, surfaced via the REST noise report once the engine's
+// flush ticker — configured at 200ms for this run, see
+// AGENTERR_NOISE_FLUSH_MS in testBuildAndStart — persists it), and the
+// parse_bodies override that keeps an ingested body raw (and therefore
+// unmatched by a severity-based search) instead of being lifted.
+func (h *harness) testNoiseRules(t *testing.T) {
+	// 1: create the rule via REST with the admin key — drop e2e-noisy
+	// below warn.
+	var rule noiseRuleDTO
+	h.doJSON(t, http.MethodPost, fmt.Sprintf("/api/v1/projects/%d/noise-rules", h.projectID), h.adminKey,
+		map[string]any{
+			"kind":     "severity_floor",
+			"service":  "e2e-noisy",
+			"severity": "warn",
+			"enabled":  true,
+		}, http.StatusOK, &rule)
+	if rule.ID == 0 {
+		t.Fatalf("expected non-zero noise rule id, got %+v", rule)
+	}
+
+	// 2: three records for e2e-noisy — an info-severity one lifted from a
+	// structured body, an explicit warn, and a debug-severity one also
+	// lifted from a structured body. Only warn clears the floor.
+	batch := `[` +
+		`{"message":"{\"level\":\"info\",\"msg\":\"e2e-noisy info dropped\"}","service":"e2e-noisy"},` +
+		`{"message":"e2e-noisy warn kept","severity":"warn","service":"e2e-noisy"},` +
+		`{"message":"{\"level\":\"debug\",\"msg\":\"e2e-noisy debug dropped\"}","service":"e2e-noisy"}` +
+		`]`
+	h.postRaw(t, "/api/v1/ingest", h.ingestKey, "application/json", []byte(batch), http.StatusAccepted)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var logs []logDTO
+	for time.Now().Before(deadline) {
+		logs = nil
+		h.doJSON(t, http.MethodGet, "/api/v1/logs?service=e2e-noisy", h.adminKey, nil, http.StatusOK, &logs)
+		if len(logs) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected exactly 1 stored log for e2e-noisy (the warn record; info/debug should be dropped), got %d: %+v\nstderr:\n%s", len(logs), logs, h.stderr.String())
+	}
+	if logs[0].Body != "e2e-noisy warn kept" {
+		t.Errorf("stored e2e-noisy log body = %q, want the warn record's lifted body", logs[0].Body)
+	}
+	if logs[0].Severity != "WARN" {
+		t.Errorf("stored e2e-noisy log severity = %q, want WARN", logs[0].Severity)
+	}
+
+	// 3: the noise report shows dropped_count==2 for the rule once the
+	// engine's flush ticker persists the in-memory counters.
+	deadline = time.Now().Add(5 * time.Second)
+	var report noiseReportDTO
+	var found noiseRuleDTO
+	for time.Now().Before(deadline) {
+		h.doJSON(t, http.MethodGet, fmt.Sprintf("/api/v1/noise-report?project=%d", h.projectID), h.adminKey, nil, http.StatusOK, &report)
+		for _, r := range report.Rules {
+			if r.ID == rule.ID {
+				found = r
+				break
+			}
+		}
+		if found.DroppedCount == 2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if found.DroppedCount != 2 {
+		t.Fatalf("expected rule %d dropped_count==2, got %+v (full report: %+v)", rule.ID, found, report)
+	}
+
+	// 4: with parse_bodies=false, a structured body is stored raw and its
+	// (unlifted) severity stays below the min_severity=error filter. Use a
+	// different service so the severity_floor rule above doesn't also
+	// swallow this record.
+	h.doRaw(t, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%d", h.projectID), h.adminKey,
+		"application/json", []byte(`{"parse_bodies":false}`), http.StatusNoContent)
+
+	rawBody := `{"level":"error","msg":"should stay raw"}`
+	ingestEntry := fmt.Sprintf(`[{"message":%q,"service":"e2e-parseoff"}]`, rawBody)
+	h.postRaw(t, "/api/v1/ingest", h.ingestKey, "application/json", []byte(ingestEntry), http.StatusAccepted)
+
+	deadline = time.Now().Add(5 * time.Second)
+	var parseOffLogs []logDTO
+	for time.Now().Before(deadline) {
+		parseOffLogs = nil
+		h.doJSON(t, http.MethodGet, "/api/v1/logs?service=e2e-parseoff", h.adminKey, nil, http.StatusOK, &parseOffLogs)
+		if len(parseOffLogs) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(parseOffLogs) != 1 {
+		t.Fatalf("expected exactly 1 stored log for e2e-parseoff, got %d: %+v", len(parseOffLogs), parseOffLogs)
+	}
+	if parseOffLogs[0].Body != rawBody {
+		t.Errorf("e2e-parseoff body = %q, want raw unparsed %q (parse_bodies=false must not lift it)", parseOffLogs[0].Body, rawBody)
+	}
+	if parseOffLogs[0].Severity == "ERROR" {
+		t.Errorf("e2e-parseoff severity lifted to ERROR despite parse_bodies=false")
+	}
+
+	var minSevLogs []logDTO
+	h.doJSON(t, http.MethodGet, "/api/v1/logs?service=e2e-parseoff&min_severity=error", h.adminKey, nil, http.StatusOK, &minSevLogs)
+	if len(minSevLogs) != 0 {
+		t.Errorf("min_severity=error unexpectedly matched the raw-body record (parse_bodies=false should have left its severity below error): %+v", minSevLogs)
+	}
+
+	// Reset for anything running after this subtest.
+	h.doRaw(t, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%d", h.projectID), h.adminKey,
+		"application/json", []byte(`{"parse_bodies":true}`), http.StatusNoContent)
+}
+
 // ---- MCP ----
 
 func (h *harness) testMCP(t *testing.T) {
@@ -529,12 +673,25 @@ func (h *harness) testMCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tools/list: %v", err)
 	}
-	if len(toolsResult.Tools) != 8 {
-		names := make([]string, len(toolsResult.Tools))
-		for i, tl := range toolsResult.Tools {
-			names[i] = tl.Name
+	names := make([]string, len(toolsResult.Tools))
+	byName := make(map[string]bool, len(toolsResult.Tools))
+	for i, tl := range toolsResult.Tools {
+		names[i] = tl.Name
+		byName[tl.Name] = true
+	}
+	if len(toolsResult.Tools) != 13 {
+		t.Errorf("expected 13 tools, got %d: %v", len(toolsResult.Tools), names)
+	}
+	// The five noise-control tools, added alongside the REST noise-rule
+	// surface: confirm each is actually registered on the live server, not
+	// just that the total count happens to match.
+	for _, want := range []string{
+		"list_noise_rules", "upsert_noise_rule", "delete_noise_rule",
+		"get_noise_report", "set_project_parse",
+	} {
+		if !byName[want] {
+			t.Errorf("expected tool %q in tools/list, got: %v", want, names)
 		}
-		t.Errorf("expected 8 tools, got %d: %v", len(toolsResult.Tools), names)
 	}
 
 	listResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -565,6 +722,38 @@ func (h *harness) testMCP(t *testing.T) {
 	}
 	if !strings.Contains(projText, "checkout-api") {
 		t.Errorf("list_projects missing expected project slug: %q", projText)
+	}
+
+	// list_noise_rules and get_noise_report over MCP: a project-scoped
+	// key's own project is authoritative for both (project_id omitted), so
+	// these must surface the severity_floor rule testNoiseRules created —
+	// proving the noise-control tools, not just the REST edge, are wired
+	// through the live server.
+	rulesResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "list_noise_rules",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("call list_noise_rules: %v", err)
+	}
+	rulesText := mcpTextContent(rulesResult)
+	if !strings.Contains(rulesText, "e2e-noisy") {
+		t.Errorf("list_noise_rules missing expected rule service: %q", rulesText)
+	}
+
+	reportResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "get_noise_report",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("call get_noise_report: %v", err)
+	}
+	reportText := mcpTextContent(reportResult)
+	if !strings.Contains(reportText, "e2e-noisy") {
+		t.Errorf("get_noise_report missing expected rule service: %q", reportText)
+	}
+	if !strings.Contains(reportText, "2 total dropped") {
+		t.Errorf("get_noise_report expected 2 total dropped (from testNoiseRules), got: %q", reportText)
 	}
 }
 
