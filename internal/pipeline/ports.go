@@ -28,3 +28,21 @@ type NopNotifier struct{}
 
 // IssueEvent does nothing.
 func (NopNotifier) IssueEvent(store.Entry) {}
+
+// Dropper decides whether an ingested log should be filtered out before
+// storage, and whether a project wants body parsing. Defined here rather
+// than consumed from internal/rules so the pipeline never imports rules —
+// rules.Engine satisfies this interface structurally.
+type Dropper interface {
+	Decide(l core.Log) (drop bool, ruleID int64)
+	ParseBodies(projectID int64) bool
+}
+
+// NopDropper keeps everything and parses everything.
+type NopDropper struct{}
+
+// Decide never drops.
+func (NopDropper) Decide(core.Log) (bool, int64) { return false, 0 }
+
+// ParseBodies always parses.
+func (NopDropper) ParseBodies(int64) bool { return true }

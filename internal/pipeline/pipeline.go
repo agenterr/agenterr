@@ -42,6 +42,7 @@ type Pipeline struct {
 	w store.Writer
 	g Grouper
 	n Notifier
+	d Dropper
 	o Options
 
 	buf chan core.Log
@@ -63,7 +64,7 @@ type Pipeline struct {
 
 // New constructs a Pipeline. Zero-valued Options fields fall back to
 // defaults (BufferSize 10_000, FlushEvery 200ms, MaxBatch 500).
-func New(w store.Writer, g Grouper, n Notifier, o Options) *Pipeline {
+func New(w store.Writer, g Grouper, n Notifier, d Dropper, o Options) *Pipeline {
 	if o.BufferSize <= 0 {
 		o.BufferSize = defaultBufferSize
 	}
@@ -77,6 +78,7 @@ func New(w store.Writer, g Grouper, n Notifier, o Options) *Pipeline {
 		w:   w,
 		g:   g,
 		n:   n,
+		d:   d,
 		o:   o,
 		buf: make(chan core.Log, o.BufferSize),
 	}
@@ -144,10 +146,12 @@ func (p *Pipeline) Run(ctx context.Context) {
 			for {
 				select {
 				case l := <-p.buf:
-					pending = append(pending, p.annotate(l))
-					if len(pending) >= p.o.MaxBatch {
-						p.flush(pending)
-						pending = pending[:0]
+					if e, ok := p.process(l); ok {
+						pending = append(pending, e)
+						if len(pending) >= p.o.MaxBatch {
+							p.flush(pending)
+							pending = pending[:0]
+						}
 					}
 				default:
 					break drain
@@ -157,7 +161,11 @@ func (p *Pipeline) Run(ctx context.Context) {
 			return
 
 		case l := <-p.buf:
-			pending = append(pending, p.annotate(l))
+			e, ok := p.process(l)
+			if !ok {
+				continue
+			}
+			pending = append(pending, e)
 			if len(pending) >= p.o.MaxBatch {
 				p.flush(pending)
 				pending = pending[:0]
@@ -212,12 +220,31 @@ func (p *Pipeline) Pending() int {
 	return int(atomic.LoadInt64(&p.unflushed))
 }
 
+// process runs the parse gate and drop decision for a single log ahead of
+// annotation, so both Run's live-receive path and its shutdown drain path
+// get identical treatment. Parsing happens before Decide because rules
+// key on lifted fields (e.g. severity_floor against a body's lifted
+// level) — dropping on the raw record would miss that. The global
+// DisableBodyParse flag still wins outright; the per-project ParseBodies
+// toggle only refines it when parsing is globally enabled. ok is false
+// when the log was dropped, in which case it must not be appended to a
+// batch — the caller's only remaining job is to have accounted for it,
+// which this already did (unflushed decrement, on par with what flush
+// does for logs that make it to the writer).
+func (p *Pipeline) process(l core.Log) (store.Entry, bool) {
+	if !p.o.DisableBodyParse && p.d.ParseBodies(l.ProjectID) {
+		l = core.ParseStructuredBody(l)
+	}
+	if drop, _ := p.d.Decide(l); drop {
+		atomic.AddInt64(&p.unflushed, -1)
+		return store.Entry{}, false
+	}
+	return p.annotate(l), true
+}
+
 // annotate runs event detection, fingerprinting, and titling for a single
 // log, producing the store.Entry the writer persists.
 func (p *Pipeline) annotate(l core.Log) store.Entry {
-	if !p.o.DisableBodyParse {
-		l = core.ParseStructuredBody(l)
-	}
 	e := store.Entry{Log: l}
 	if core.IsEvent(l) {
 		e.IsEvent = true

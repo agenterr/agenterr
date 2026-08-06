@@ -15,6 +15,7 @@ import (
 	"github.com/agenterr/agenterr/internal/config"
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/pipeline"
+	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
 	"github.com/agenterr/agenterr/internal/store/sqlite"
 )
@@ -30,6 +31,13 @@ const retentionInterval = time.Hour
 // retention mechanism.
 const guardrailWindow = 24 * time.Hour
 
+// flushDropsInterval is how often the noise-rule engine's in-memory drop
+// counters are persisted while the process runs. Kept short relative to
+// the retention sweep: drop counts are operator-facing (noise-rule UI),
+// so a crash should lose at most this much of the tally, not an hour's
+// worth.
+const flushDropsInterval = 30 * time.Second
+
 // shutdownServerBudget bounds how long OnStop gives srv.Shutdown before
 // moving on, so a slow/stuck HTTP shutdown can never eat the entire Stop
 // budget and starve pipe.Drain of the time it needs to flush — see
@@ -37,19 +45,29 @@ const guardrailWindow = 24 * time.Hour
 const shutdownServerBudget = 7 * time.Second
 
 // register wires the fx.Lifecycle hooks that turn the constructed graph
-// into a running process: OnStart performs first-run bootstrap, then
-// starts the pipeline writer loop, the HTTP server, and the retention
-// job, each in its own goroutine. OnStop reverses the order — server,
-// then pipeline, then store — so nothing is torn down out from under a
+// into a running process: OnStart loads the noise-rule engine's cache,
+// performs first-run bootstrap, then starts the pipeline writer loop, the
+// HTTP server, the retention job, and the drop-counter flush loop, each
+// in its own goroutine. OnStop reverses the order — server, then
+// pipeline, then store — so nothing is torn down out from under a
 // request that's still in flight.
-func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.DB, pipe *pipeline.Pipeline, srv *http.Server, creds generatedCreds) {
+func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.DB, engine *rules.Engine, pipe *pipeline.Pipeline, srv *http.Server, creds generatedCreds) {
 	pipeCtx, cancelPipe := context.WithCancel(context.Background())
 	retentionCtx, cancelRetention := context.WithCancel(context.Background())
+	flushCtx, cancelFlush := context.WithCancel(context.Background())
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			if err := bootstrap(ctx, cfg, db, creds); err != nil {
 				return fmt.Errorf("app: bootstrap: %w", err)
+			}
+
+			// Load before the pipeline starts accepting: fail-open (an
+			// unloaded engine keeps everything) covers the gap, but
+			// loading first means rules apply from the very first record
+			// instead of racing the pipeline's first Enqueue.
+			if err := engine.Load(ctx); err != nil {
+				return fmt.Errorf("app: load noise rules: %w", err)
 			}
 
 			go pipe.Run(pipeCtx)
@@ -64,6 +82,8 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.D
 			}()
 
 			go retentionLoop(retentionCtx, cfg, db)
+
+			go flushDropsLoop(flushCtx, engine)
 
 			return nil
 		},
@@ -85,9 +105,19 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.D
 
 			cancelRetention()
 			cancelPipe()
+			cancelFlush()
 
 			if err := pipe.Drain(ctx); err != nil {
 				slog.Error("app: pipeline drain", "err", err)
+			}
+
+			// After drain, not before: any drops the pipeline recorded
+			// while shutting down (the drain loop goes through the same
+			// process/Decide path as the live loop) must be counted in
+			// this final flush, not lost to a flush that ran ahead of
+			// them.
+			if err := engine.FlushDrops(ctx); err != nil {
+				slog.Error("app: final noise-drop flush", "err", err)
 			}
 
 			if err := db.Close(); err != nil {
@@ -166,6 +196,26 @@ func setupURL(listenAddr string) string {
 		return "http://localhost" + listenAddr
 	}
 	return "http://" + listenAddr
+}
+
+// flushDropsLoop persists the noise-rule engine's in-memory drop counters
+// on a fixed cadence until ctx is canceled. The final flush after
+// shutdown (see register's OnStop) covers whatever accumulates between
+// the last tick and the process stopping.
+func flushDropsLoop(ctx context.Context, engine *rules.Engine) {
+	ticker := time.NewTicker(flushDropsInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := engine.FlushDrops(ctx); err != nil {
+				slog.Error("app: periodic noise-drop flush", "err", err)
+			}
+		}
+	}
 }
 
 // retentionLoop runs the retention sweep once an hour until ctx is

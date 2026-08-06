@@ -27,6 +27,7 @@ import (
 	"github.com/agenterr/agenterr/internal/ingest/otlp"
 	"github.com/agenterr/agenterr/internal/mcp"
 	"github.com/agenterr/agenterr/internal/pipeline"
+	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/server"
 	"github.com/agenterr/agenterr/internal/store"
 	"github.com/agenterr/agenterr/internal/store/sqlite"
@@ -55,8 +56,11 @@ var Module = fx.Options(
 		asReader,
 		asWriter,
 		asAdmin,
+		asNoiseRules,
 		newGrouper,
 		newNotifier,
+		rules.New,
+		asDropper,
 		newPipeline,
 		asSink,
 		newAuth,
@@ -89,10 +93,11 @@ func openDB(cfg config.Config) (*sqlite.DB, error) {
 // that slice of behavior. They all close over the same *sqlite.DB — dig
 // caches openDB's result, so this does not open the database more than
 // once.
-func asStore(db *sqlite.DB) store.Store   { return db }
-func asReader(db *sqlite.DB) store.Reader { return db }
-func asWriter(db *sqlite.DB) store.Writer { return db }
-func asAdmin(db *sqlite.DB) store.Admin   { return db }
+func asStore(db *sqlite.DB) store.Store           { return db }
+func asReader(db *sqlite.DB) store.Reader         { return db }
+func asWriter(db *sqlite.DB) store.Writer         { return db }
+func asAdmin(db *sqlite.DB) store.Admin           { return db }
+func asNoiseRules(db *sqlite.DB) store.NoiseRules { return db }
 
 // asSessionAuth adapts *auth.Auth to the auth.SessionAuth interface
 // web.New depends on.
@@ -101,8 +106,14 @@ func asSessionAuth(a *auth.Auth) auth.SessionAuth { return a }
 func newGrouper() pipeline.Grouper   { return core.DefaultGrouper{} }
 func newNotifier() pipeline.Notifier { return pipeline.NopNotifier{} }
 
-func newPipeline(cfg config.Config, w store.Writer, g pipeline.Grouper, n pipeline.Notifier) *pipeline.Pipeline {
-	return pipeline.New(w, g, n, pipeline.Options{
+// asDropper adapts *rules.Engine to the narrower pipeline.Dropper
+// interface pipeline.New depends on. pipeline never imports internal/rules
+// (see pipeline/ports.go) — rules.Engine satisfies Dropper structurally,
+// and this is where that structural fit gets made explicit for fx.
+func asDropper(e *rules.Engine) pipeline.Dropper { return e }
+
+func newPipeline(cfg config.Config, w store.Writer, g pipeline.Grouper, n pipeline.Notifier, d pipeline.Dropper) *pipeline.Pipeline {
+	return pipeline.New(w, g, n, d, pipeline.Options{
 		BufferSize:       cfg.BufferSize,
 		FlushEvery:       time.Duration(cfg.FlushEveryMS) * time.Millisecond,
 		DisableBodyParse: !cfg.ParseBodies,

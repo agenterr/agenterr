@@ -44,7 +44,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 	}
 	a := auth.New(db, hash)
 
-	pipe := pipeline.New(db, core.DefaultGrouper{}, pipeline.NopNotifier{}, pipeline.Options{})
+	pipe := pipeline.New(db, core.DefaultGrouper{}, pipeline.NopNotifier{}, pipeline.NopDropper{}, pipeline.Options{})
 
 	deps := Deps{
 		Cfg:       config.Config{ListenAddr: ":0"},

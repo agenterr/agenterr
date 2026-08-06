@@ -53,6 +53,33 @@ func (f *fakeWriter) totalEntries() int {
 	return n
 }
 
+// fakeDropper is a scriptable Dropper for tests: decide is consulted per
+// log (nil means "never drop"), and parseBodies is a per-project map
+// (missing entries default to true, matching rules.Engine's fail-open
+// default).
+type fakeDropper struct {
+	decide      func(l core.Log) (bool, int64)
+	parseBodies map[int64]bool
+}
+
+func (f fakeDropper) Decide(l core.Log) (bool, int64) {
+	if f.decide == nil {
+		return false, 0
+	}
+	return f.decide(l)
+}
+
+func (f fakeDropper) ParseBodies(projectID int64) bool {
+	if f.parseBodies == nil {
+		return true
+	}
+	on, ok := f.parseBodies[projectID]
+	if !ok {
+		return true
+	}
+	return on
+}
+
 // eventually polls cond until it returns true or the deadline passes,
 // failing the test if the deadline is reached first. No sleeps as
 // assertions: every wait is bounded and polled.
@@ -94,7 +121,7 @@ func errorLog(i int) core.Log {
 
 func TestBatchesByCountAndAnnotates(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 1000, FlushEvery: time.Hour, MaxBatch: 500})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 1000, FlushEvery: time.Hour, MaxBatch: 500})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -148,7 +175,7 @@ func TestBatchesByCountAndAnnotates(t *testing.T) {
 
 func TestFlushesByTimer(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 100, FlushEvery: 30 * time.Millisecond, MaxBatch: 500})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 100, FlushEvery: 30 * time.Millisecond, MaxBatch: 500})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -172,7 +199,7 @@ func TestFlushesByTimer(t *testing.T) {
 
 func TestBackpressureErrFull(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 10, FlushEvery: time.Hour, MaxBatch: 500})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 10, FlushEvery: time.Hour, MaxBatch: 500})
 	// Run is intentionally NOT started: nothing drains the buffer.
 
 	logs := make([]core.Log, 11)
@@ -193,7 +220,7 @@ func TestBackpressureErrFull(t *testing.T) {
 
 func TestDrainFlushesEverything(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 1000, FlushEvery: time.Hour, MaxBatch: 500})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 1000, FlushEvery: time.Hour, MaxBatch: 500})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go p.Run(ctx)
@@ -229,7 +256,7 @@ func TestDrainFlushesEverything(t *testing.T) {
 
 func TestEnqueueAfterShutdownErrFull(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 1000, FlushEvery: 10 * time.Millisecond, MaxBatch: 500})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 1000, FlushEvery: 10 * time.Millisecond, MaxBatch: 500})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go p.Run(ctx)
@@ -255,7 +282,7 @@ func TestEnqueueAfterShutdownErrFull(t *testing.T) {
 
 func TestWriteErrorDropsButLoopContinues(t *testing.T) {
 	fw := &fakeWriter{failN: 1}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 100, FlushEvery: time.Hour, MaxBatch: 5})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 100, FlushEvery: time.Hour, MaxBatch: 5})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -315,7 +342,7 @@ func TestWriteErrorDropsButLoopContinues(t *testing.T) {
 //     while entries are still sitting unconsumed in the channel.
 func TestDrainNoTOCTOUWithConcurrentEnqueue(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 20000, FlushEvery: time.Hour, MaxBatch: 10})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 20000, FlushEvery: time.Hour, MaxBatch: 10})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -387,7 +414,7 @@ func TestDrainNoTOCTOUWithConcurrentEnqueue(t *testing.T) {
 // never actually run.
 func TestNew_Defaults(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{})
 
 	if cap(p.buf) != defaultBufferSize {
 		t.Errorf("BufferSize default = %d, want %d", cap(p.buf), defaultBufferSize)
@@ -404,7 +431,7 @@ func TestNew_Defaults(t *testing.T) {
 // this file only ever exercises indirectly via Drain's polling loop.
 func TestPending_InitiallyZero(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 10, FlushEvery: time.Hour, MaxBatch: 5})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{BufferSize: 10, FlushEvery: time.Hour, MaxBatch: 5})
 	if got := p.Pending(); got != 0 {
 		t.Errorf("Pending() on a fresh pipeline = %d, want 0", got)
 	}
@@ -423,7 +450,7 @@ func TestNopNotifier_IssueEvent(_ *testing.T) {
 // IsEvent, not something already true of the raw record.
 func TestRun_ParsesStructuredBodies(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go p.Run(ctx)
@@ -468,7 +495,7 @@ func TestRun_ParsesStructuredBodies(t *testing.T) {
 // structured body carrying level=error does not trigger event detection.
 func TestRun_DisableBodyParse(t *testing.T) {
 	fw := &fakeWriter{}
-	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{DisableBodyParse: true})
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{DisableBodyParse: true})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go p.Run(ctx)
@@ -496,5 +523,125 @@ func TestRun_DisableBodyParse(t *testing.T) {
 	}
 	if e.Log.Body == "payment declined" {
 		t.Error("parsing disabled but msg was lifted")
+	}
+}
+
+// TestDrop_NeverWrittenButDrainAccounts confirms a dropped log never
+// reaches the writer, and that Drain still returns — the trap this
+// guards against is the drop path forgetting to decrement unflushed,
+// which would hang Drain forever waiting for a count that never reaches
+// zero.
+func TestDrop_NeverWrittenButDrainAccounts(t *testing.T) {
+	fw := &fakeWriter{}
+	d := fakeDropper{decide: func(core.Log) (bool, int64) { return true, 1 }}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, d, Options{BufferSize: 100, FlushEvery: time.Hour, MaxBatch: 500})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Run(ctx)
+
+	if err := p.Enqueue([]core.Log{testLog(1, core.SeverityInfo)}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	drainCtx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if err := p.Drain(drainCtx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	cancel()
+
+	if got := fw.totalEntries(); got != 0 {
+		t.Fatalf("dropped log reached the writer: %d entries written", got)
+	}
+}
+
+// TestDrop_ParseThenDecideOrdering proves rules key on the lifted body:
+// a fakeDropper that drops anything below SeverityInfo must see the
+// body's level=debug lifted into Severity before Decide runs, since the
+// raw record carries no severity at all (zero value = SeverityInfo,
+// which would NOT be dropped) — only after parsing does the drop fire.
+func TestDrop_ParseThenDecideOrdering(t *testing.T) {
+	fw := &fakeWriter{}
+	d := fakeDropper{decide: func(l core.Log) (bool, int64) {
+		if l.Severity < core.SeverityInfo {
+			return true, 1
+		}
+		return false, 0
+	}}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, d, Options{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Run(ctx)
+
+	if err := p.Enqueue([]core.Log{{
+		Time: time.Now(),
+		Body: `{"level":"debug","msg":"noise"}`,
+	}}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	drainCtx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if err := p.Drain(drainCtx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	cancel()
+
+	if got := fw.totalEntries(); got != 0 {
+		t.Fatalf("expected lifted debug severity to be dropped, got %d entries written", got)
+	}
+}
+
+// TestPerProjectParseBodiesFalse confirms the per-project toggle refines
+// the global flag: with DisableBodyParse left off (global on) but this
+// project's ParseBodies false, the body must stay raw — no lift, and
+// nothing for a severity-keyed dropper to catch.
+func TestPerProjectParseBodiesFalse(t *testing.T) {
+	fw := &fakeWriter{}
+	const projectID = int64(42)
+	d := fakeDropper{parseBodies: map[int64]bool{projectID: false}}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, d, Options{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Run(ctx)
+
+	if err := p.Enqueue([]core.Log{{
+		ProjectID: projectID,
+		Time:      time.Now(),
+		Body:      `{"level":"error","msg":"payment declined"}`,
+	}}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	drainCtx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if err := p.Drain(drainCtx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	cancel()
+
+	batches := fw.snapshot()
+	if len(batches) != 1 || len(batches[0]) != 1 {
+		t.Fatalf("got %v batches, want 1 batch of 1 entry", batches)
+	}
+	e := batches[0][0]
+	if e.Log.Body != `{"level":"error","msg":"payment declined"}` {
+		t.Errorf("body = %q, want raw (unparsed) body", e.Log.Body)
+	}
+	if e.IsEvent {
+		t.Error("parse-bodies off for this project but body was still lifted into an event")
+	}
+}
+
+// TestNopDropper_PreservesPlan1Behavior pins that NopDropper never drops
+// and always parses — every pre-noise-controls pipeline test uses it via
+// New's call sites above, so this is a direct, explicit pin of the
+// contract those tests otherwise only exercise indirectly.
+func TestNopDropper_PreservesPlan1Behavior(t *testing.T) {
+	if drop, ruleID := (NopDropper{}).Decide(core.Log{}); drop || ruleID != 0 {
+		t.Errorf("NopDropper.Decide = (%v, %d), want (false, 0)", drop, ruleID)
+	}
+	if !(NopDropper{}).ParseBodies(1) {
+		t.Error("NopDropper.ParseBodies = false, want true")
 	}
 }
