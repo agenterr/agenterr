@@ -2,6 +2,7 @@ package jsonapi
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -88,6 +89,15 @@ func newTestServerMaxBody(sink *fakeSink, maxBody int64) *httptest.Server {
 
 func post(t *testing.T, srv *httptest.Server, key string, body []byte) *http.Response {
 	t.Helper()
+	return postWithEncoding(t, srv, key, "", body)
+}
+
+// postWithEncoding is post but with an explicit Content-Encoding header,
+// mirroring otlp_test.go's helper of the same name/shape, so the gzip cases
+// below exercise ingest.ReadBoundedBody through the same request path a
+// real gzip-encoding client (e.g. agenterr-ship) uses.
+func postWithEncoding(t *testing.T, srv *httptest.Server, key, contentEncoding string, body []byte) *http.Response {
+	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ingest", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
@@ -96,11 +106,29 @@ func post(t *testing.T, srv *httptest.Server, key string, body []byte) *http.Res
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	return resp
+}
+
+// gzipBytes gzip-compresses data, failing the test on error — mirrors
+// otlp_test.go's helper of the same name.
+func gzipBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func TestIngest_HappyPath(t *testing.T) {
@@ -326,6 +354,77 @@ func TestIngest_ConfiguredMaxBody_Returns413(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+// TestIngest_Gzip_HappyPath proves the JSON edge decompresses a gzip body
+// before decoding it — the shape agenterr-ship's sender always sends (see
+// internal/ship/sender), and previously unhandled here: only the OTLP edge
+// had a gzip-aware reader until it was lifted into the shared
+// ingest.ReadBoundedBody and wired into this edge too.
+func TestIngest_Gzip_HappyPath(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	body := []byte(`[{"severity":"error","message":"boom","attributes":{"k":"v"}}]`)
+	gzipped := gzipBytes(t, body)
+
+	resp := postWithEncoding(t, srv, validKey, "gzip", gzipped)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+
+	if len(sink.logs) != 1 {
+		t.Fatalf("sink got %d logs, want 1", len(sink.logs))
+	}
+	l := sink.logs[0]
+	if l.Severity != core.SeverityError {
+		t.Errorf("Severity = %v, want Error", l.Severity)
+	}
+	if l.Body != "boom" {
+		t.Errorf("Body = %q, want boom", l.Body)
+	}
+	if l.Attrs["k"] != "v" {
+		t.Errorf("Attrs[k] = %q, want v", l.Attrs["k"])
+	}
+}
+
+func TestIngest_GzipBadStream_Returns400(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	resp := postWithEncoding(t, srv, validKey, "gzip", []byte("not actually gzip"))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(sink.logs) != 0 {
+		t.Errorf("sink got %d logs, want 0", len(sink.logs))
+	}
+}
+
+// TestIngest_GzipDecompressedOversize_Returns413 is the zip-bomb bound: a
+// small compressed payload that decompresses past ingest.MaxBody (5MB) must
+// still be rejected, proving the size cap applies to the decompressed
+// stream and not just the compressed wire bytes.
+func TestIngest_GzipDecompressedOversize_Returns413(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	huge := make([]byte, 6<<20)
+	gzipped := gzipBytes(t, huge)
+
+	resp := postWithEncoding(t, srv, validKey, "gzip", gzipped)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	if len(sink.logs) != 0 {
+		t.Errorf("sink got %d logs, want 0", len(sink.logs))
 	}
 }
 
