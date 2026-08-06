@@ -129,6 +129,15 @@ func run(ctx context.Context, cfg Config, spool *buffer.Spool, snd senderRunner,
 		close(selfLogDone)
 	}()
 
+	// runSincePersister flushes SetSince's in-memory-only updates (see
+	// buffer.Spool.SetSince) to disk every 2s, independent of Ack's own
+	// piggybacked persist — see Finding 2 in the ship code review.
+	sincePersisterDone := make(chan struct{})
+	go func() {
+		runSincePersister(ctx, spool)
+		close(sincePersisterDone)
+	}()
+
 	<-ctx.Done()
 
 	// Producers first: their EOF events tell the joiner loop it has seen
@@ -137,8 +146,16 @@ func run(ctx context.Context, cfg Config, spool *buffer.Spool, snd senderRunner,
 	close(evCh)
 	<-joinerDone
 
+	// One last flush of whatever since progress accumulated since the
+	// periodic timer's last tick, so a clean shutdown doesn't rely on the
+	// resume overlap to cover a gap it didn't have to.
+	if err := spool.PersistSince(); err != nil {
+		log.Printf("ship: WARN persisting since checkpoint on shutdown: %v", err)
+	}
+
 	<-senderDone
 	<-selfLogDone
+	<-sincePersisterDone
 	return nil
 }
 
@@ -203,6 +220,34 @@ func runSelfLog(ctx context.Context, spool *buffer.Spool, snd senderRunner, appe
 			return
 		case <-ticker.C:
 			logOnce()
+		}
+	}
+}
+
+// sincePersistInterval is how often runSincePersister flushes the spool's
+// in-memory since map to disk. Chosen to keep the worst-case staleness
+// (replayed on restart via the docker resume path's existing "since minus
+// 1s" overlap) small relative to that 1s overlap without persisting so
+// often it reintroduces the fsync-per-line cost Finding 2 removed.
+const sincePersistInterval = 2 * time.Second
+
+// runSincePersister periodically flushes buffer.Spool's in-memory since map
+// to checkpoint.json. SetSince itself only updates memory (see its doc
+// comment — persisting per docker log line would fsync at line rate); Ack's
+// own checkpoint write already piggybacks a since flush, but this ticker is
+// what bounds staleness during stretches with no Ack (e.g. the sender is
+// down, or nothing has been delivered yet).
+func runSincePersister(ctx context.Context, spool *buffer.Spool) {
+	ticker := time.NewTicker(sincePersistInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := spool.PersistSince(); err != nil {
+				log.Printf("ship: WARN persisting since checkpoint: %v", err)
+			}
 		}
 	}
 }

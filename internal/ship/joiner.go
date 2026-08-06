@@ -79,9 +79,10 @@ func runJoinerLoop(spool *buffer.Spool, evCh <-chan sourceEvent, joinWindow time
 				appendRecord(spool, ev.service, r, appendDropped)
 			}
 			if ev.isDocker {
-				if err := spool.SetSince(ev.key, ev.line.Time); err != nil {
-					log.Printf("ship: WARN persisting since for container %s: %v", ev.key, err)
-				}
+				// In-memory only — see buffer.Spool.SetSince's doc comment
+				// for why persistence is decoupled from this per-line call
+				// (fsync-per-line would cap the pipeline at fsync rate).
+				spool.SetSince(ev.key, ev.line.Time)
 			}
 
 		case <-ticker.C:

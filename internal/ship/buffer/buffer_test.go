@@ -407,11 +407,15 @@ func TestSinceRoundTrip(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	ts := time.Date(2026, 8, 6, 12, 34, 56, 789000000, time.UTC)
-	if err := s.SetSince("web", ts); err != nil {
-		t.Fatalf("SetSince: %v", err)
-	}
+	s.SetSince("web", ts)
 	if _, ok := s.Since("db"); ok {
 		t.Fatal("Since(unset container) should report ok=false")
+	}
+	// SetSince no longer persists by itself (see its doc comment) — this
+	// round-trip goes through the same PersistSince path the orchestrator's
+	// periodic timer drives.
+	if err := s.PersistSince(); err != nil {
+		t.Fatalf("PersistSince: %v", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -429,6 +433,157 @@ func TestSinceRoundTrip(t *testing.T) {
 	}
 	if !got.Equal(ts) {
 		t.Fatalf("Since(\"web\") after restart = %v, want %v", got, ts)
+	}
+}
+
+// --- Regression: SetSince no longer persists per call -----------------------
+//
+// Finding 2 (ship code review): SetSince used to fsync+rename
+// checkpoint.json on every call, capping the whole docker-log pipeline at
+// fsync rate. It must now only update memory; persistence is piggybacked on
+// Ack's existing checkpoint write, or driven explicitly by PersistSince
+// (which the orchestrator calls on a 2s timer — see ship.runSincePersister).
+func TestSetSinceDoesNotPersistPerCall(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, bigCap)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	cpPath := checkpointPath(dir)
+	if _, err := os.Stat(cpPath); !os.IsNotExist(err) {
+		t.Fatalf("checkpoint.json exists before any persist call: stat err=%v", err)
+	}
+
+	for i := 0; i < 500; i++ {
+		s.SetSince("web", time.Now())
+	}
+
+	if _, err := os.Stat(cpPath); !os.IsNotExist(err) {
+		t.Fatalf("checkpoint.json was written by a tight loop of SetSince alone (stat err=%v) — SetSince must be in-memory only", err)
+	}
+	if got, ok := s.Since("web"); !ok {
+		t.Fatal("Since(\"web\") = ok=false after SetSince, want the in-memory update to still be visible")
+	} else {
+		_ = got
+	}
+
+	// The periodic-timer path still flushes it to disk.
+	if err := s.PersistSince(); err != nil {
+		t.Fatalf("PersistSince: %v", err)
+	}
+	if _, err := os.Stat(cpPath); err != nil {
+		t.Fatalf("checkpoint.json missing after PersistSince: %v", err)
+	}
+}
+
+// TestSinceSurvivesRestartViaAck proves the other persistence path: Ack's
+// existing checkpoint write piggybacks whatever is currently in the
+// in-memory since map, with no separate PersistSince call needed.
+func TestSinceSurvivesRestartViaAck(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, bigCap)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Append(rec(0)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	ts := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	s.SetSince("web", ts)
+
+	_, cur, err := s.Next(10)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if err := s.Ack(cur); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s2, err := Open(dir, bigCap)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer s2.Close()
+	got, ok := s2.Since("web")
+	if !ok || !got.Equal(ts) {
+		t.Fatalf("Since(\"web\") after restart = %v, %v; want %v, true", got, ok, ts)
+	}
+}
+
+// --- FOLD-IN: clamp a checkpoint that points past the segment's real size --
+//
+// Minor 4 (ship code review): checkpoint.json is fsynced+renamed on every
+// persist, but segment appends are NOT fsynced per record (see the package
+// doc). A power loss can therefore leave a checkpoint offset the segment
+// itself never physically reached — the checkpoint durable, the segment
+// write lost. Open must clamp that offset rather than trust it blindly:
+// otherwise every future append is stranded behind a cursor no data will
+// ever reach (readRecords just seeks past EOF forever).
+func TestOpenClampsCheckpointOffsetPastSegmentSize(t *testing.T) {
+	dir := t.TempDir()
+
+	s, err := Open(dir, bigCap)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := s.Append(rec(i)); err != nil {
+			t.Fatalf("Append(%d): %v", i, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	segFiles, err := filepath.Glob(filepath.Join(dir, "spool-*.jsonl"))
+	if err != nil || len(segFiles) != 1 {
+		t.Fatalf("expected 1 segment file, got %v (err=%v)", segFiles, err)
+	}
+	info, err := os.Stat(segFiles[0])
+	if err != nil {
+		t.Fatalf("stat segment: %v", err)
+	}
+	realSize := info.Size()
+
+	// Hand-craft the power-loss state directly: checkpoint.json (which
+	// fsyncs) claims an offset well past the segment's real on-disk size
+	// (which does not fsync per append).
+	cp := checkpointFile{Seq: 1, Offset: realSize + 10_000, Since: map[string]string{}}
+	if err := saveCheckpoint(dir, cp); err != nil {
+		t.Fatalf("craft checkpoint: %v", err)
+	}
+
+	s2, err := Open(dir, bigCap)
+	if err != nil {
+		t.Fatalf("Open with checkpoint-ahead-of-segment state: %v", err)
+	}
+	defer s2.Close()
+
+	onDisk, err := loadCheckpoint(dir)
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	if onDisk.Offset > realSize {
+		t.Fatalf("checkpoint.json still claims offset %d past real segment size %d after Open (clamp must persist immediately)", onDisk.Offset, realSize)
+	}
+
+	if err := s2.Append(rec(99)); err != nil {
+		t.Fatalf("Append after clamp: %v", err)
+	}
+	got, _, err := s2.Next(100)
+	if err != nil {
+		t.Fatalf("Next after clamp: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("Next returned nothing after clamp — the append got stranded behind a too-high cursor")
+	}
+	if last := got[len(got)-1]; string(last) != string(rec(99)) {
+		t.Fatalf("last record = %q, want %q", last, rec(99))
 	}
 }
 

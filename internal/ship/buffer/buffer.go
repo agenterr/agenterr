@@ -33,7 +33,7 @@ type Cursor struct {
 // writer goroutine is expected to call Append, one reader goroutine to call
 // Next/Ack — the orchestrator guarantees this — but Spool serializes all
 // operations behind a mutex anyway: it's cheap, and checkpoint writes
-// (triggered by Ack, SetSince, and cap eviction) would otherwise race
+// (triggered by Ack, PersistSince, and cap eviction) would otherwise race
 // Append's segment-roll bookkeeping.
 type Spool struct {
 	mu       sync.Mutex
@@ -46,6 +46,7 @@ type Spool struct {
 	ackedSeq    int64
 	ackedOffset int64
 	since       map[string]time.Time
+	sinceDirty  bool // true if since has changed since the last persistCheckpointLocked call
 
 	dropped int64
 }
@@ -80,12 +81,31 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 
 	last := segs[len(segs)-1]
 
+	// A checkpoint can point past the last segment's real on-disk size:
+	// saveCheckpoint fsyncs+renames checkpoint.json, but segment appends
+	// are NOT fsynced per record (see the package doc), so on a power loss
+	// the checkpoint can survive with an offset the segment itself never
+	// physically reached. Scanning the torn-tail repair from that
+	// too-high offset would find nothing to truncate (a Seek past EOF
+	// plus a zero-length EOF read looks identical to "nothing torn
+	// here"), and leaving ackedOffset there would strand every future
+	// append behind a cursor no data will ever reach (readRecords would
+	// just seek past EOF forever). Clamp both the scan start and the
+	// checkpoint itself to the segment's real size (as read by
+	// scanSegments, before any repair) before doing anything else.
+	clampedOffset := cp.Offset
+	if cp.Seq == last.seq && clampedOffset > last.size {
+		log.Printf("buffer: WARN checkpoint offset %d exceeds segment %s's on-disk size %d (power loss?); clamping to %d",
+			clampedOffset, last.path, last.size, last.size)
+		clampedOffset = last.size
+	}
+
 	// Repair a torn tail on the last segment only: earlier segments are
 	// immutable and complete by construction (they were rolled, meaning a
 	// clean close happened before the next segment started).
 	tornFrom := int64(0)
 	if cp.Seq == last.seq {
-		tornFrom = cp.Offset
+		tornFrom = clampedOffset
 	}
 	newSize, _, err := truncateTornTail(last.path, tornFrom)
 	if err != nil {
@@ -120,7 +140,7 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 		segments:    segs,
 		curFile:     f,
 		ackedSeq:    cp.Seq,
-		ackedOffset: cp.Offset,
+		ackedOffset: clampedOffset,
 		since:       since,
 		dropped:     cp.Dropped + tornRecordsLost,
 	}
@@ -131,13 +151,14 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 		s.ackedOffset = 0
 	}
 	s.normalizeCheckpointLocked()
-	if tornRecordsLost > 0 {
-		// Make the bumped count durable immediately rather than waiting for
-		// the next Ack/SetSince/eviction — a torn tail found on Open is
-		// exactly the kind of loss that must never be silently forgotten
-		// again if the process dies before anything else persists.
+	if tornRecordsLost > 0 || clampedOffset != cp.Offset {
+		// Make the correction durable immediately rather than waiting for
+		// the next Ack/SetSince-persist/eviction — both a torn tail and a
+		// checkpoint-ahead-of-segment clamp found on Open are exactly the
+		// kind of correction that must never be silently forgotten again
+		// if the process dies before anything else persists.
 		if err := s.persistCheckpointLocked(); err != nil {
-			return nil, fmt.Errorf("buffer: persist checkpoint after torn-tail repair: %w", err)
+			return nil, fmt.Errorf("buffer: persist checkpoint after open-time repair: %w", err)
 		}
 	}
 	return s, nil
@@ -341,15 +362,42 @@ func (s *Spool) Ack(c Cursor) error {
 	return s.persistCheckpointLocked()
 }
 
-// SetSince records the resume timestamp for container, persisted with the
-// checkpoint.
-func (s *Spool) SetSince(container string, t time.Time) error {
+// SetSince records the resume timestamp for container IN MEMORY ONLY — it
+// does not persist. Docker log lines can arrive at very high rates, and
+// persisting per call would fsync+rename checkpoint.json (see
+// saveCheckpoint) on every line, capping the whole pipeline at fsync rate
+// and risking the source-blocking backpressure the ship semantics doc
+// forbids.
+//
+// The since map instead reaches disk two other ways: piggybacked on Ack's
+// existing checkpoint write (persistCheckpointLocked always marshals the
+// current since map, Ack or not), and via PersistSince on a periodic timer
+// owned by the orchestrator (see ship.runSincePersister, every 2s). The
+// docker resume path's existing "since minus 1 second" overlap absorbs the
+// resulting staleness window: worst case ~2s of since progress is replayed
+// on restart, comfortably inside what the overlap already tolerates.
+func (s *Spool) SetSince(container string, t time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.since == nil {
 		s.since = make(map[string]time.Time)
 	}
 	s.since[container] = t
+	s.sinceDirty = true
+}
+
+// PersistSince flushes the in-memory since map to checkpoint.json if it has
+// changed since the last persist (via Ack, PersistSince, or an eviction). A
+// no-op, and cheap to call often, when nothing changed. Intended to be
+// driven by a periodic timer (see ship.runSincePersister) so SetSince's
+// now-in-memory-only updates still reach disk within a bounded window even
+// when no Ack happens in between.
+func (s *Spool) PersistSince() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.sinceDirty {
+		return nil
+	}
 	return s.persistCheckpointLocked()
 }
 
@@ -377,7 +425,9 @@ func (s *Spool) Dropped() int64 {
 
 // Close closes the current segment's file handle. It does not persist
 // anything further — the checkpoint is kept current on every Ack,
-// SetSince, and cap eviction.
+// PersistSince, and cap eviction (SetSince itself only updates memory; see
+// its doc comment). Callers that want a since update durable before Close
+// (e.g. on graceful shutdown) should call PersistSince first.
 func (s *Spool) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -395,5 +445,6 @@ func (s *Spool) persistCheckpointLocked() error {
 	if err := saveCheckpoint(s.dir, cp); err != nil {
 		return fmt.Errorf("buffer: persist checkpoint: %w", err)
 	}
+	s.sinceDirty = false
 	return nil
 }
