@@ -2,6 +2,7 @@ package otlp
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"net/http"
@@ -87,6 +88,11 @@ func newTestServer(sink *fakeSink) *httptest.Server {
 
 func post(t *testing.T, srv *httptest.Server, key, contentType string, body []byte) *http.Response {
 	t.Helper()
+	return postWithEncoding(t, srv, key, contentType, "", body)
+}
+
+func postWithEncoding(t *testing.T, srv *httptest.Server, key, contentType, contentEncoding string, body []byte) *http.Response {
+	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/logs", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
@@ -97,11 +103,28 @@ func post(t *testing.T, srv *httptest.Server, key, contentType string, body []by
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	return resp
+}
+
+// gzipBytes gzip-compresses data, failing the test on error.
+func gzipBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func loadFixture(t *testing.T) []byte {
@@ -307,6 +330,79 @@ func TestServeLogs_WrongMethod_Returns405(t *testing.T) {
 	}
 }
 
+func TestServeLogs_GzipProtobuf_HappyPath(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	req := fixtureRequest(t)
+	pbBytes, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	gzipped := gzipBytes(t, pbBytes)
+
+	resp := postWithEncoding(t, srv, validKey, "application/x-protobuf", "gzip", gzipped)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+
+	assertFixtureLogs(t, sink.logs)
+}
+
+func TestServeLogs_GzipCaseInsensitive_HappyPath(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	gzipped := gzipBytes(t, loadFixture(t))
+
+	resp := postWithEncoding(t, srv, validKey, "application/json", "GZIP", gzipped)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+
+	assertFixtureLogs(t, sink.logs)
+}
+
+func TestServeLogs_GzipDecompressedOversize_Returns413(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	// 6MB of zeros compresses down to a tiny gzip payload, but decompresses
+	// past ingest.MaxBody (5MB) — a minimal zip-bomb shape.
+	huge := make([]byte, 6<<20)
+	gzipped := gzipBytes(t, huge)
+
+	resp := postWithEncoding(t, srv, validKey, "application/json", "gzip", gzipped)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	if len(sink.logs) != 0 {
+		t.Errorf("sink got %d logs, want 0", len(sink.logs))
+	}
+}
+
+func TestServeLogs_UnknownContentEncoding_Returns415(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	resp := postWithEncoding(t, srv, validKey, "application/json", "br", loadFixture(t))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415", resp.StatusCode)
+	}
+}
+
 func readAll(resp *http.Response) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	if _, err := buf.ReadFrom(resp.Body); err != nil {
@@ -410,6 +506,61 @@ func TestRecordToLog_TraceID_HexEncoded(t *testing.T) {
 	got := recordToLog(nil, rec)
 	if got.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
 		t.Errorf("TraceID = %q, want 4bf92f3577b34da6a3ce929d0e0e4736", got.TraceID)
+	}
+}
+
+func TestDecodeLogs_MultipleResources_EachRecordKeepsOwnResource(t *testing.T) {
+	req := &collectorlogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{
+			{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						kv("service.name", strVal("service-a")),
+						kv("region", strVal("us-east")),
+					},
+				},
+				ScopeLogs: []*logspb.ScopeLogs{
+					{LogRecords: []*logspb.LogRecord{{Body: strVal("from a")}}},
+				},
+			},
+			{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						kv("service.name", strVal("service-b")),
+						kv("region", strVal("eu-west")),
+					},
+				},
+				ScopeLogs: []*logspb.ScopeLogs{
+					{LogRecords: []*logspb.LogRecord{{Body: strVal("from b")}}},
+				},
+			},
+		},
+	}
+
+	logs := decodeLogs(testProjectID, req)
+	if len(logs) != 2 {
+		t.Fatalf("got %d logs, want 2", len(logs))
+	}
+
+	a, b := logs[0], logs[1]
+	if a.Service != "service-a" {
+		t.Errorf("logs[0].Service = %q, want service-a", a.Service)
+	}
+	if a.Attrs["region"] != "us-east" {
+		t.Errorf("logs[0].Attrs[region] = %q, want us-east", a.Attrs["region"])
+	}
+	if a.Body != "from a" {
+		t.Errorf("logs[0].Body = %q, want %q", a.Body, "from a")
+	}
+
+	if b.Service != "service-b" {
+		t.Errorf("logs[1].Service = %q, want service-b", b.Service)
+	}
+	if b.Attrs["region"] != "eu-west" {
+		t.Errorf("logs[1].Attrs[region] = %q, want eu-west", b.Attrs["region"])
+	}
+	if b.Body != "from b" {
+		t.Errorf("logs[1].Body = %q, want %q", b.Body, "from b")
 	}
 }
 

@@ -6,6 +6,7 @@
 package otlp
 
 import (
+	"compress/gzip"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/auth"
@@ -65,8 +67,30 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// MaxBytesReader bounds the wire (possibly gzip-compressed) stream; for
+	// gzip requests the decompressed stream is separately bounded below to
+	// guard against zip bombs (a small compressed body expanding far past
+	// ingest.MaxBody).
 	r.Body = http.MaxBytesReader(w, r.Body, ingest.MaxBody)
-	data, err := io.ReadAll(r.Body)
+
+	var reader io.Reader
+	switch enc := r.Header.Get("Content-Encoding"); {
+	case enc == "":
+		reader = r.Body
+	case strings.EqualFold(enc, "gzip"):
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid gzip body")
+			return
+		}
+		defer gz.Close()
+		reader = io.LimitReader(gz, ingest.MaxBody+1)
+	default:
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported content encoding")
+		return
+	}
+
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
@@ -74,6 +98,10 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "error reading request body")
+		return
+	}
+	if len(data) > ingest.MaxBody {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
 
