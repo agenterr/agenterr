@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"go.uber.org/fx"
@@ -10,7 +11,16 @@ import (
 	"github.com/agenterr/agenterr/internal/app"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+// goreleaser injects the tag; a local `go build` keeps the "dev" default.
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println("agenterr " + version)
+		return
+	}
+
 	opts := []fx.Option{app.Module}
 
 	// fx's own startup/shutdown logging is noisy and aimed at debugging

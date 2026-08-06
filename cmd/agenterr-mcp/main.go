@@ -24,7 +24,16 @@ import (
 
 const usage = "usage: agenterr-mcp --url https://host --key agt_api_... (or AGENTERR_URL / AGENTERR_API_KEY)"
 
+// version is set at build time via -ldflags "-X main.version=...".
+// goreleaser injects the tag; a local `go build` keeps the "dev" default.
+var version = "dev"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println("agenterr-mcp " + version)
+		return
+	}
+
 	cfg, err := resolveConfig(os.Args[1:], os.Getenv)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, usage)

@@ -1,0 +1,125 @@
+version: 2
+
+project_name: agenterr
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agenterr
+    main: ./cmd/agenterr
+    binary: agenterr
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+  - id: agenterr-mcp
+    main: ./cmd/agenterr-mcp
+    binary: agenterr-mcp
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: agenterr
+    ids: [agenterr]
+    name_template: "agenterr_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+
+  - id: agenterr-mcp
+    ids: [agenterr-mcp]
+    name_template: "agenterr-mcp_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
+      - "^docs:"
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.+\))?:'
+      order: 1
+    - title: Other
+      order: 999
+
+# The scratch image ships only the agenterr server binary (agenterr-mcp is a
+# local stdio proxy meant to run next to an agent, not inside the server
+# container) plus a CA bundle for outbound TLS. Under Model 3 (see
+# docs/architecture.md) this image is literally what the hosted cloud
+# offering runs — treat it as production, not a convenience extra.
+dockers:
+  - id: agenterr-amd64
+    ids: [agenterr]
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/agenterr/agenterr:{{ .Version }}-amd64"
+      - "ghcr.io/agenterr/agenterr:latest-amd64"
+    dockerfile: Dockerfile
+    extra_files:
+      - ca-certificates.crt
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source={{ .GitURL }}"
+      - "--label=org.opencontainers.image.licenses=AGPL-3.0"
+
+  - id: agenterr-arm64
+    ids: [agenterr]
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/agenterr/agenterr:{{ .Version }}-arm64"
+      - "ghcr.io/agenterr/agenterr:latest-arm64"
+    dockerfile: Dockerfile
+    extra_files:
+      - ca-certificates.crt
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source={{ .GitURL }}"
+      - "--label=org.opencontainers.image.licenses=AGPL-3.0"
+
+docker_manifests:
+  - name_template: "ghcr.io/agenterr/agenterr:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/agenterr/agenterr:{{ .Version }}-amd64"
+      - "ghcr.io/agenterr/agenterr:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/agenterr/agenterr:latest"
+    image_templates:
+      - "ghcr.io/agenterr/agenterr:latest-amd64"
+      - "ghcr.io/agenterr/agenterr:latest-arm64"
+
+release:
+  github:
+    owner: agenterr
+    name: agenterr

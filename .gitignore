@@ -1,6 +1,7 @@
 /agenterr
 /agenterr-mcp
 /dist/
+/ca-certificates.crt
 *.db
 *.db-wal
 *.db-shm
