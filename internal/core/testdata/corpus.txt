@@ -19,3 +19,6 @@ http-503	GET /health 503 Service Unavailable trace=fedcba0987654321
 file-not-found	open "/data/uploads/8f3a9b2c.png": no such file or directory
 file-not-found	open "/data/uploads/1a2b3c4d.png": no such file or directory
 file-not-found	open "/data/uploads/deadbeef01.png": no such file or directory
+order-lookup-failed	order lookup failed for order_id 1004822317
+order-lookup-failed	order lookup failed for order_id 998877665544
+order-lookup-failed	order lookup failed for order_id 20260806143012

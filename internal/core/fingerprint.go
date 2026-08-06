@@ -30,7 +30,16 @@ var (
 func NormalizeMessage(s string) string {
 	s = uuidRe.ReplaceAllString(s, "<uuid>")
 	s = ipv4Re.ReplaceAllString(s, "<ip>")
-	s = hexRe.ReplaceAllString(s, "<hex>")
+	// hexRe's character class also matches pure-decimal runs (digits are a
+	// subset of hex digits), so only collapse a candidate run to <hex> when
+	// it contains at least one actual hex letter (a-f/A-F). Pure-decimal
+	// runs are left in place for intRe to normalize to <n> below.
+	s = hexRe.ReplaceAllStringFunc(s, func(match string) string {
+		if strings.ContainsAny(match, "abcdefABCDEF") {
+			return "<hex>"
+		}
+		return match
+	})
 	s = strRe.ReplaceAllString(s, "<str>")
 	s = intRe.ReplaceAllString(s, "<n>")
 	return s

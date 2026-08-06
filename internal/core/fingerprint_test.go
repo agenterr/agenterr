@@ -15,6 +15,9 @@ func TestNormalizeMessage(t *testing.T) {
 		"conn to 10.0.3.7:5432 refused":                   "conn to <ip>:<n> refused",
 		"req 550e8400-e29b-41d4-a716-446655440000 failed": "req <uuid> failed",
 		"token deadbeefcafe1234 expired":                  "token <hex> expired",
+		"ts 1722945600 fired":                             "ts <n> fired",
+		"id 12345678 done":                                "id <n> done",
+		"id deadbeef01 done":                              "id <hex> done",
 	}
 	for in, want := range cases {
 		if got := NormalizeMessage(in); got != want {
