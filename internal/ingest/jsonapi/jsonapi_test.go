@@ -1,0 +1,324 @@
+package jsonapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/agenterr/agenterr/internal/auth"
+	"github.com/agenterr/agenterr/internal/core"
+	"github.com/agenterr/agenterr/internal/pipeline"
+	"github.com/agenterr/agenterr/internal/store"
+)
+
+// fakeSink captures logs passed to Enqueue and can be configured to return
+// an error, so tests can assert exactly what jsonapi mapped without a real
+// pipeline.
+type fakeSink struct {
+	logs []core.Log
+	err  error
+}
+
+func (f *fakeSink) Enqueue(logs []core.Log) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.logs = append(f.logs, logs...)
+	return nil
+}
+
+// fakeAdmin is a minimal store.Admin backed by a map, mirroring the pattern
+// in internal/auth/auth_test.go, so RequireKey can be exercised for real
+// without a database.
+type fakeAdmin struct {
+	keys map[string]struct {
+		projectID int64
+		kind      string
+	}
+}
+
+func (f *fakeAdmin) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+	panic("unused")
+}
+func (f *fakeAdmin) Projects(ctx context.Context) ([]core.Project, error) { panic("unused") }
+func (f *fakeAdmin) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+	panic("unused")
+}
+func (f *fakeAdmin) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+	panic("unused")
+}
+func (f *fakeAdmin) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+	e, ok := f.keys[plaintext]
+	if !ok {
+		return 0, "", store.ErrNotFound
+	}
+	return e.projectID, e.kind, nil
+}
+
+const testProjectID int64 = 42
+const validKey = "agt_ingest_valid"
+
+func newTestServer(sink *fakeSink) *httptest.Server {
+	admin := &fakeAdmin{keys: map[string]struct {
+		projectID int64
+		kind      string
+	}{
+		validKey:        {projectID: testProjectID, kind: "ingest"},
+		"agt_api_valid": {projectID: testProjectID, kind: "api"},
+	}}
+	a := auth.New(admin, []byte{})
+
+	h := New(sink)
+	mux := http.NewServeMux()
+	h.Mount(mux, a)
+	return httptest.NewServer(mux)
+}
+
+func post(t *testing.T, srv *httptest.Server, key string, body []byte) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ingest", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	return resp
+}
+
+func TestIngest_HappyPath(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	before := time.Now().UTC()
+	body := `[{"severity":"error","message":"boom","attributes":{"k":"v"}}]`
+	resp := post(t, srv, validKey, []byte(body))
+	defer resp.Body.Close()
+	after := time.Now().UTC()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	var respBody struct {
+		Accepted int `json:"accepted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if respBody.Accepted != 1 {
+		t.Errorf("accepted = %d, want 1", respBody.Accepted)
+	}
+
+	if len(sink.logs) != 1 {
+		t.Fatalf("sink got %d logs, want 1", len(sink.logs))
+	}
+	l := sink.logs[0]
+	if l.ProjectID != testProjectID {
+		t.Errorf("ProjectID = %d, want %d", l.ProjectID, testProjectID)
+	}
+	if l.Severity != core.SeverityError {
+		t.Errorf("Severity = %v, want Error", l.Severity)
+	}
+	if l.Body != "boom" {
+		t.Errorf("Body = %q, want boom", l.Body)
+	}
+	if l.Attrs["k"] != "v" {
+		t.Errorf("Attrs[k] = %q, want v", l.Attrs["k"])
+	}
+	if l.Time.Before(before) || l.Time.After(after) {
+		t.Errorf("Time = %v, want between %v and %v", l.Time, before, after)
+	}
+}
+
+func TestIngest_FieldTolerance_MessageAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"message", `[{"message":"hello"}]`},
+		{"msg", `[{"msg":"hello"}]`},
+		{"body", `[{"body":"hello"}]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &fakeSink{}
+			srv := newTestServer(sink)
+			defer srv.Close()
+
+			resp := post(t, srv, validKey, []byte(tt.body))
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202", resp.StatusCode)
+			}
+			if len(sink.logs) != 1 {
+				t.Fatalf("sink got %d logs, want 1", len(sink.logs))
+			}
+			if sink.logs[0].Body != "hello" {
+				t.Errorf("Body = %q, want hello", sink.logs[0].Body)
+			}
+		})
+	}
+}
+
+func TestIngest_FieldTolerance_MessagePriority(t *testing.T) {
+	// message wins over msg and body when multiple are present.
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	body := `[{"message":"from-message","msg":"from-msg","body":"from-body"}]`
+	resp := post(t, srv, validKey, []byte(body))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	if sink.logs[0].Body != "from-message" {
+		t.Errorf("Body = %q, want from-message", sink.logs[0].Body)
+	}
+}
+
+func TestIngest_FieldTolerance_Timestamps(t *testing.T) {
+	rfc := "2020-01-02T03:04:05Z"
+	rfcTime, err := time.Parse(time.RFC3339, rfc)
+	if err != nil {
+		t.Fatalf("parse rfc time: %v", err)
+	}
+
+	unixSeconds := int64(1577934245) // 2020-01-02T03:04:05Z
+	unixTime := time.Unix(unixSeconds, 0).UTC()
+
+	tests := []struct {
+		name string
+		body string
+		want time.Time
+	}{
+		{"timestamp RFC3339", `[{"message":"m","timestamp":"2020-01-02T03:04:05Z"}]`, rfcTime},
+		{"time RFC3339", `[{"message":"m","time":"2020-01-02T03:04:05Z"}]`, rfcTime},
+		{"ts RFC3339", `[{"message":"m","ts":"2020-01-02T03:04:05Z"}]`, rfcTime},
+		{"ts unix seconds", `[{"message":"m","ts":1577934245}]`, unixTime},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &fakeSink{}
+			srv := newTestServer(sink)
+			defer srv.Close()
+
+			resp := post(t, srv, validKey, []byte(tt.body))
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202", resp.StatusCode)
+			}
+			if !sink.logs[0].Time.Equal(tt.want) {
+				t.Errorf("Time = %v, want %v", sink.logs[0].Time, tt.want)
+			}
+		})
+	}
+}
+
+func TestIngest_SingleObject_BecomesBatchOfOne(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	resp := post(t, srv, validKey, []byte(`{"message":"solo"}`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	if len(sink.logs) != 1 {
+		t.Fatalf("sink got %d logs, want 1", len(sink.logs))
+	}
+	if sink.logs[0].Body != "solo" {
+		t.Errorf("Body = %q, want solo", sink.logs[0].Body)
+	}
+}
+
+func TestIngest_EmptyArray_NoOp(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	resp := post(t, srv, validKey, []byte(`[]`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	var respBody struct {
+		Accepted int `json:"accepted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if respBody.Accepted != 0 {
+		t.Errorf("accepted = %d, want 0", respBody.Accepted)
+	}
+	if len(sink.logs) != 0 {
+		t.Errorf("sink got %d logs, want 0", len(sink.logs))
+	}
+}
+
+func TestIngest_SinkFull_Returns429(t *testing.T) {
+	sink := &fakeSink{err: pipeline.ErrFull}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	resp := post(t, srv, validKey, []byte(`[{"message":"m"}]`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+}
+
+func TestIngest_OversizeBody_Returns413(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	// Build a >5MB body: a JSON array padded with a long message string.
+	huge := strings.Repeat("a", 6<<20)
+	body := `[{"message":"` + huge + `"}]`
+
+	resp := post(t, srv, validKey, []byte(body))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+func TestIngest_MalformedJSON_Returns400(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	resp := post(t, srv, validKey, []byte(`{"not":"valid`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestIngest_WrongKindKey_Returns401(t *testing.T) {
+	sink := &fakeSink{}
+	srv := newTestServer(sink)
+	defer srv.Close()
+
+	resp := post(t, srv, "agt_api_valid", []byte(`[{"message":"m"}]`))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
