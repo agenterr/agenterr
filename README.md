@@ -99,6 +99,21 @@ service:
       exporters: [otlphttp/agenterr]
 ```
 
+### Structured log bodies
+
+If a record's body is itself a JSON object or a logfmt line — the common
+case when tailing container stdout from apps using slog, zerolog, pino,
+or logfmt loggers — Agenterr lifts its fields at ingest: `level` becomes
+the record's severity, `msg`/`message` becomes the body, `time` the
+timestamp (within a ±48h sanity window), and remaining keys become
+queryable attributes. A body-level `error` therefore triggers error
+detection and grouping even when the shipper sent no severity at all.
+
+Lifting is conservative (a body must carry a message or level key to
+qualify), never overwrites an explicitly-set severity or existing
+attributes, and can be disabled with `--parse-bodies=false` or
+`AGENTERR_PARSE_BODIES=false`.
+
 ## Agent setup
 
 Give an agent access to the eight MCP tools (`list_projects`, `list_issues`,
