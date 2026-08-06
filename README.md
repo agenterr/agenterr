@@ -11,6 +11,11 @@ separate services to run. It's built for agents first: eight MCP tools and
 a shipped Claude Code skill are the primary interface, and the web UI
 exists for verification and light management.
 
+![An agent diagnosing a production incident through Agenterr's MCP tools](docs/media/demo.gif)
+
+<sub>Replayed session — the tool outputs are captured verbatim from a live
+instance. Rendered from [`docs/demo/demo.tape`](docs/demo/demo.tape).</sub>
+
 ## Quickstart
 
 Run it with Docker, mounting a volume for the database:
@@ -115,6 +120,13 @@ Then install the shipped workflow skill from this repo's `skills/`
 directory — `skills/agenterr-debugging/SKILL.md` — which walks an agent
 through orientation, finding the top issue, pulling log context, fixing the
 code, and resolving the issue once the fix has shipped.
+
+## The web UI
+
+For when you want to look yourself: issues, search, and settings, behind a
+single admin login.
+
+![The issues list: grouped errors with severity, counts, and recency](docs/media/ui-issues.png)
 
 ## Configuration
 
