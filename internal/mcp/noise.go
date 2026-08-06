@@ -9,6 +9,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/agenterr/agenterr/internal/core"
+	"github.com/agenterr/agenterr/internal/store"
 )
 
 // This file holds the five noise-control tools: listing/upserting/deleting
@@ -28,6 +29,32 @@ var validNoiseKinds = map[core.NoiseRuleKind]bool{
 	core.NoiseSeverityFloor: true,
 	core.NoiseDropMatch:     true,
 	core.NoiseSample:        true,
+}
+
+// validateNoiseParams rejects create-time params that can never match
+// anything for the given kind. A rule that's accepted and stored but never
+// fires looks like success, silently breaking the
+// see-noise -> add-rule -> verify loop. Mirrors
+// internal/api/handlers.validateNoiseParams.
+func validateNoiseParams(kind core.NoiseRuleKind, severity, pattern string, n int) error {
+	switch kind {
+	case core.NoiseSeverityFloor:
+		if severity == "" {
+			return errors.New("severity: required for severity_floor")
+		}
+	case core.NoiseDropMatch:
+		if pattern == "" {
+			return errors.New("pattern: required for drop_match")
+		}
+	case core.NoiseSample:
+		if severity == "" {
+			return errors.New("severity: required for sample")
+		}
+		if n <= 1 {
+			return errors.New("n: must be >= 2 for sample")
+		}
+	}
+	return nil
 }
 
 // registerNoiseTools binds the five noise-control tools. Called from
@@ -96,22 +123,30 @@ type upsertNoiseRuleInput struct {
 	Severity  string `json:"severity,omitempty" jsonschema:"Severity name (trace, debug, info, warn, error, fatal): the floor for severity_floor, the band ceiling for sample"`
 	Pattern   string `json:"pattern,omitempty" jsonschema:"Substring to match in the log body (drop_match only)"`
 	N         int    `json:"n,omitempty" jsonschema:"Keep 1 of every N banded records (sample only)"`
-	Enabled   bool   `json:"enabled,omitempty" jsonschema:"Whether the rule is active"`
+	Enabled   *bool  `json:"enabled,omitempty" jsonschema:"Whether the rule is active; defaults to true on create, on update omitted preserves the current value"`
+}
+
+// findNoiseRule looks up ruleID among projectID's rules (projectID 0 = all
+// projects — used for admin lookups that aren't scoped to one project).
+// Mirrors internal/api/handlers.findNoiseRule.
+func (s *Server) findNoiseRule(ctx context.Context, ruleID, projectID int64) (store.NoiseRuleRow, bool) {
+	rows, err := s.nr.NoiseRules(ctx, projectID)
+	if err != nil {
+		return store.NoiseRuleRow{}, false
+	}
+	for _, row := range rows {
+		if row.ID == ruleID {
+			return row, true
+		}
+	}
+	return store.NoiseRuleRow{}, false
 }
 
 // ruleBelongsToProject reports whether ruleID is among projectID's rules.
 // Mirrors internal/api/handlers.ruleBelongsToProject.
 func (s *Server) ruleBelongsToProject(ctx context.Context, ruleID, projectID int64) bool {
-	rows, err := s.nr.NoiseRules(ctx, projectID)
-	if err != nil {
-		return false
-	}
-	for _, row := range rows {
-		if row.ID == ruleID {
-			return true
-		}
-	}
-	return false
+	_, ok := s.findNoiseRule(ctx, ruleID, projectID)
+	return ok
 }
 
 func (s *Server) upsertNoiseRule(ctx context.Context, _ *mcpsdk.CallToolRequest, in upsertNoiseRuleInput) (*mcpsdk.CallToolResult, any, error) {
@@ -132,13 +167,33 @@ func (s *Server) upsertNoiseRule(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		return errorResult(errors.New("project_id: required for admin keys")), nil, nil
 	}
 
-	if in.ID != 0 && !isAdmin {
-		// Updating an existing rule: verify it actually belongs to the
-		// caller's project before letting Upsert touch it, otherwise a
-		// project-bound key could hijack another project's rule by ID.
-		if !s.ruleBelongsToProject(ctx, in.ID, callerProjectID) {
+	// enabled starts at the create default (true) or, for an update, the
+	// rule's current state — either is overridden below if the caller
+	// supplied an explicit value.
+	enabled := true
+	if in.ID != 0 {
+		// Updating an existing rule: fetch it both to verify ownership
+		// (non-admin — otherwise a project-bound key could hijack another
+		// project's rule by ID) and to seed enabled's preserve-on-omit
+		// default. Admins aren't scoped to one project, so their lookup
+		// spans all projects (projectID 0); a miss here still falls
+		// through to Upsert's own not-found handling.
+		lookupProjectID := callerProjectID
+		if isAdmin {
+			lookupProjectID = 0
+		}
+		existing, ok := s.findNoiseRule(ctx, in.ID, lookupProjectID)
+		if !isAdmin && !ok {
 			return errorResult(errNotFound), nil, nil
 		}
+		if ok {
+			enabled = existing.Enabled
+		}
+	} else if err := validateNoiseParams(kind, in.Severity, in.Pattern, in.N); err != nil {
+		return errorResult(err), nil, nil
+	}
+	if in.Enabled != nil {
+		enabled = *in.Enabled
 	}
 
 	row, err := s.engine.Upsert(ctx, core.NoiseRule{
@@ -149,7 +204,7 @@ func (s *Server) upsertNoiseRule(ctx context.Context, _ *mcpsdk.CallToolRequest,
 		Severity:  severity,
 		Pattern:   in.Pattern,
 		N:         in.N,
-		Enabled:   in.Enabled,
+		Enabled:   enabled,
 	})
 	if err != nil {
 		return errorResult(toolErr(err)), nil, nil

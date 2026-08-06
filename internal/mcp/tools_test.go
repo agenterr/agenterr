@@ -212,6 +212,12 @@ func adminCtx() context.Context {
 	return authtest.Context(0, "admin")
 }
 
+// boolPtr returns a pointer to b, for populating *bool input fields (e.g.
+// upsertNoiseRuleInput.Enabled) in struct literals.
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 var fixedNow = time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 
 func fixedClock() time.Time { return fixedNow }
@@ -810,7 +816,7 @@ func TestUpsertNoiseRule_ProjectKey_CreatesUnderOwnProject(t *testing.T) {
 		Kind:      string(core.NoiseSeverityFloor),
 		Service:   "traefik",
 		Severity:  "warn",
-		Enabled:   true,
+		Enabled:   boolPtr(true),
 	})
 	if err != nil {
 		t.Fatalf("err = %v", err)
@@ -877,6 +883,124 @@ func TestUpsertNoiseRule_ProjectKey_UpdateCrossProjectRule_NotFoundError(t *test
 	}
 	if fs.noiseRules[1].Pattern != "boom" {
 		t.Errorf("rule was mutated despite cross-project ownership check failing")
+	}
+}
+
+func TestUpsertNoiseRule_Create_OmittedEnabled_DefaultsTrue(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.projects[1] = core.Project{ID: 1, Slug: "acme"}
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		Kind: string(core.NoiseSeverityFloor), Service: "traefik", Severity: "warn",
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	stored, ok := fs.noiseRules[1]
+	if !ok {
+		t.Fatalf("no rule stored")
+	}
+	if !stored.Enabled {
+		t.Errorf("stored Enabled = false, want true (omitted enabled must default true on create)")
+	}
+}
+
+func TestUpsertNoiseRule_Create_ExplicitFalse_Honored(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.projects[1] = core.Project{ID: 1, Slug: "acme"}
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		Kind: string(core.NoiseSeverityFloor), Service: "traefik", Severity: "warn",
+		Enabled: boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	stored, ok := fs.noiseRules[1]
+	if !ok {
+		t.Fatalf("no rule stored")
+	}
+	if stored.Enabled {
+		t.Errorf("stored Enabled = true, want false (explicit false must be honored)")
+	}
+}
+
+func TestUpsertNoiseRule_Update_OmittedEnabled_PreservesDisabled(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.noiseRules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: false}}
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		ID: 1, Kind: string(core.NoiseDropMatch), Pattern: "changed",
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	stored := fs.noiseRules[1]
+	if stored.Enabled {
+		t.Errorf("stored Enabled = true, want false (omitted enabled on update must preserve current state)")
+	}
+	if stored.Pattern != "changed" {
+		t.Errorf("stored Pattern = %q, want %q (other fields still update)", stored.Pattern, "changed")
+	}
+}
+
+func TestUpsertNoiseRule_Create_SeverityFloorMissingSeverity_ErrorsWithoutStoring(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		Kind: string(core.NoiseSeverityFloor),
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (severity_floor with no severity never matches)")
+	}
+	if len(fs.noiseRules) != 0 {
+		t.Errorf("a rule was stored despite missing severity")
+	}
+}
+
+func TestUpsertNoiseRule_Create_SampleNTooLow_ErrorsWithoutStoring(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		Kind: string(core.NoiseSample), Severity: "info", N: 1,
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (sample with n<=1 never matches)")
+	}
+	if len(fs.noiseRules) != 0 {
+		t.Errorf("a rule was stored despite n<=1")
+	}
+}
+
+func TestUpsertNoiseRule_Create_DropMatchEmptyPattern_ErrorsWithoutStoring(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	res, _, err := s.upsertNoiseRule(apiCtx(1), nil, upsertNoiseRuleInput{
+		Kind: string(core.NoiseDropMatch),
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (drop_match with empty pattern never matches)")
+	}
+	if len(fs.noiseRules) != 0 {
+		t.Errorf("a rule was stored despite empty pattern")
 	}
 }
 

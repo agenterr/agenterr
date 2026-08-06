@@ -97,7 +97,37 @@ type noiseRuleBody struct {
 	Severity string `json:"severity"`
 	Pattern  string `json:"pattern"`
 	N        int    `json:"n"`
-	Enabled  bool   `json:"enabled"`
+	// Enabled is a pointer so omitting it is distinguishable from an
+	// explicit false: on create, nil defaults to true (an agent that
+	// forgets the field still gets a live rule, not one that silently
+	// never fires); on update, nil preserves the rule's current enabled
+	// state instead of clobbering it back to disabled.
+	Enabled *bool `json:"enabled"`
+}
+
+// validateNoiseParams rejects create-time params that can never match
+// anything for the given kind. A rule that's accepted and stored but never
+// fires looks like success, silently breaking the
+// see-noise -> add-rule -> verify loop.
+func validateNoiseParams(kind core.NoiseRuleKind, severity, pattern string, n int) error {
+	switch kind {
+	case core.NoiseSeverityFloor:
+		if severity == "" {
+			return errors.New("severity: required for severity_floor")
+		}
+	case core.NoiseDropMatch:
+		if pattern == "" {
+			return errors.New("pattern: required for drop_match")
+		}
+	case core.NoiseSample:
+		if severity == "" {
+			return errors.New("severity: required for sample")
+		}
+		if n <= 1 {
+			return errors.New("n: must be >= 2 for sample")
+		}
+	}
+	return nil
 }
 
 // Create handles POST /api/v1/projects/{id}/noise-rules (upsert: body.ID
@@ -132,14 +162,35 @@ func (n *NoiseRules) Create(w http.ResponseWriter, r *http.Request) {
 		projectID = callerProjectID
 	}
 
-	if body.ID != 0 && !isAdmin {
-		// Updating an existing rule: verify it actually belongs to the
-		// caller's project before letting Upsert touch it, otherwise a
-		// project-bound key could hijack another project's rule by ID.
-		if !ruleBelongsToProject(r, n.NR, body.ID, callerProjectID) {
+	// enabled starts at the create default (true) or, for an update, the
+	// rule's current state — either is overridden below if the caller
+	// supplied an explicit value.
+	enabled := true
+	if body.ID != 0 {
+		// Updating an existing rule: fetch it both to verify ownership
+		// (non-admin — otherwise a project-bound key could hijack another
+		// project's rule by ID) and to seed enabled's preserve-on-omit
+		// default. Admins aren't scoped to one project, so their lookup
+		// spans all projects (projectID 0); a miss here still falls
+		// through to Upsert's own not-found handling.
+		lookupProjectID := callerProjectID
+		if isAdmin {
+			lookupProjectID = 0
+		}
+		existing, ok := findNoiseRule(r, n.NR, body.ID, lookupProjectID)
+		if !isAdmin && !ok {
 			respondErr(w, http.StatusNotFound, "not found")
 			return
 		}
+		if ok {
+			enabled = existing.Enabled
+		}
+	} else if err := validateNoiseParams(kind, body.Severity, body.Pattern, body.N); err != nil {
+		respondErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.Enabled != nil {
+		enabled = *body.Enabled
 	}
 
 	row, err := n.Engine.Upsert(r.Context(), core.NoiseRule{
@@ -150,7 +201,7 @@ func (n *NoiseRules) Create(w http.ResponseWriter, r *http.Request) {
 		Severity:  severity,
 		Pattern:   body.Pattern,
 		N:         body.N,
-		Enabled:   body.Enabled,
+		Enabled:   enabled,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -163,18 +214,25 @@ func (n *NoiseRules) Create(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, toNoiseRuleDTO(row))
 }
 
-// ruleBelongsToProject reports whether ruleID is among projectID's rules.
-func ruleBelongsToProject(r *http.Request, nr store.NoiseRules, ruleID, projectID int64) bool {
+// findNoiseRule looks up ruleID among projectID's rules (projectID 0 = all
+// projects — used for admin lookups that aren't scoped to one project).
+func findNoiseRule(r *http.Request, nr store.NoiseRules, ruleID, projectID int64) (store.NoiseRuleRow, bool) {
 	rows, err := nr.NoiseRules(r.Context(), projectID)
 	if err != nil {
-		return false
+		return store.NoiseRuleRow{}, false
 	}
 	for _, row := range rows {
 		if row.ID == ruleID {
-			return true
+			return row, true
 		}
 	}
-	return false
+	return store.NoiseRuleRow{}, false
+}
+
+// ruleBelongsToProject reports whether ruleID is among projectID's rules.
+func ruleBelongsToProject(r *http.Request, nr store.NoiseRules, ruleID, projectID int64) bool {
+	_, ok := findNoiseRule(r, nr, ruleID, projectID)
+	return ok
 }
 
 // Delete handles DELETE /api/v1/noise-rules/{id}.

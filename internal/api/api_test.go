@@ -1035,6 +1035,130 @@ func TestNoiseRules_BadSeverity_Returns400(t *testing.T) {
 	}
 }
 
+func TestNoiseRules_Create_OmittedEnabled_DefaultsTrue(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"severity_floor","service":"traefik","severity":"warn"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		ID      int64 `json:"id"`
+		Enabled bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !created.Enabled {
+		t.Errorf("created.Enabled = false, want true (omitted enabled must default true on create)")
+	}
+}
+
+func TestNoiseRules_Create_ExplicitFalse_Honored(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"severity_floor","service":"traefik","severity":"warn","enabled":false}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		ID      int64 `json:"id"`
+		Enabled bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Enabled {
+		t.Errorf("created.Enabled = true, want false (explicit false must be honored)")
+	}
+}
+
+func TestNoiseRules_Update_OmittedEnabled_PreservesDisabled(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextRuleID = 1
+	fs.rules[1] = store.NoiseRuleRow{NoiseRule: core.NoiseRule{ID: 1, ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: false}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	// Update a different field (pattern), omitting enabled entirely — the
+	// rule's existing disabled state must survive, not flip back to true.
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"id":1,"kind":"drop_match","pattern":"changed"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Enabled bool   `json:"enabled"`
+		Pattern string `json:"pattern"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Enabled {
+		t.Errorf("got.Enabled = true, want false (omitted enabled on update must preserve current state)")
+	}
+	if got.Pattern != "changed" {
+		t.Errorf("got.Pattern = %q, want %q (other fields still update)", got.Pattern, "changed")
+	}
+}
+
+func TestNoiseRules_Create_SeverityFloorMissingSeverity_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"severity_floor","service":"traefik"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(fs.rules) != 0 {
+		t.Errorf("a rule was stored despite missing severity")
+	}
+}
+
+func TestNoiseRules_Create_SampleNTooLow_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"sample","severity":"info","n":1}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(fs.rules) != 0 {
+		t.Errorf("a rule was stored despite n<=1")
+	}
+}
+
+func TestNoiseRules_Create_DropMatchEmptyPattern_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/noise-rules", validAPIKey,
+		[]byte(`{"kind":"drop_match","service":"traefik"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(fs.rules) != 0 {
+		t.Errorf("a rule was stored despite empty pattern")
+	}
+}
+
 func TestNoiseRules_Delete_CrossProject_Returns404(t *testing.T) {
 	fs := newFakeStore()
 	fs.nextRuleID = 1
