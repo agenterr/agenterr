@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"io"
 	"strconv"
 )
 
@@ -71,6 +72,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 
 	// Parse flags (they override env and defaults)
 	fs := flag.NewFlagSet("agenterr", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 
 	var (
 		listenAddr    = fs.String("listen", cfg.ListenAddr, "Listen address")

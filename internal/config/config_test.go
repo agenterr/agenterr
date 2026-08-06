@@ -83,6 +83,28 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name: "numeric flag overrides numeric env in same call",
+			args: []string{"--buffer-size", "300"},
+			getenv: func(key string) string {
+				switch key {
+				case "AGENTERR_BUFFER_SIZE":
+					return "5000"
+				case "AGENTERR_MAX_DB_BYTES":
+					return "123"
+				}
+				return ""
+			},
+			want: Config{
+				ListenAddr:    ":3617",
+				DBPath:        "./agenterr.db",
+				AdminPassword: "",
+				BufferSize:    300,      // flag overrides env
+				FlushEveryMS:  200,
+				MaxBodyBytes:  5 << 20,
+				MaxDBBytes:    123,      // env overrides default
+			},
+		},
+		{
 			name: "all flags set",
 			args: []string{
 				"--listen", ":7000",
