@@ -107,7 +107,13 @@ func TestE2E(t *testing.T) {
 // ---- 1: build the real binary and boot it ----
 
 func (h *harness) testBuildAndStart(t *testing.T) {
-	binPath := filepath.Join(t.TempDir(), "agenterr")
+	// Both temp dirs hang off h.t (the whole TestE2E), never this
+	// subtest's t: a subtest-scoped TempDir is deleted the moment this
+	// subtest returns, pulling the database directory out from under the
+	// still-running server — every later file open (pool growth, WAL/shm
+	// reopen) then fails with SQLITE_CANTOPEN, intermittently poisoning
+	// whichever subtest happens to need the write.
+	binPath := filepath.Join(h.t.TempDir(), "agenterr")
 	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancelBuild()
 	buildCmd := exec.CommandContext(buildCtx, "go", "build", "-o", binPath, "github.com/agenterr/agenterr/cmd/agenterr")
@@ -132,7 +138,7 @@ func (h *harness) testBuildAndStart(t *testing.T) {
 		t.Fatalf("release reserved port: %v", err)
 	}
 
-	dbPath := filepath.Join(t.TempDir(), "agenterr.db")
+	dbPath := filepath.Join(h.t.TempDir(), "agenterr.db")
 
 	cmd := exec.Command(binPath)
 	cmd.Env = append(os.Environ(),
@@ -160,6 +166,14 @@ func (h *harness) testBuildAndStart(t *testing.T) {
 	// (including later in this same subtest: a healthz timeout, a
 	// key-parse failure) still reaps the child when TestE2E finishes.
 	h.t.Cleanup(h.shutdown)
+	// On any failure, surface the server's own stderr — without this, a
+	// server-side error (a failed write, a dropped batch) manifests only
+	// as an opaque assertion timeout in whichever subtest noticed it.
+	h.t.Cleanup(func() {
+		if h.t.Failed() {
+			h.t.Logf("server stderr:\n%s", h.stderr.String())
+		}
+	})
 
 	if err := h.waitHealthy(5 * time.Second); err != nil {
 		t.Fatalf("agenterr never became healthy: %v\nstdout:\n%s\nstderr:\n%s", err, h.stdout.String(), h.stderr.String())
