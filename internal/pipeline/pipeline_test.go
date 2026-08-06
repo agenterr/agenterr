@@ -410,9 +410,10 @@ func TestPending_InitiallyZero(t *testing.T) {
 	}
 }
 
-// TestNopNotifier_IssueEvent just asserts the v1 no-op Notifier doesn't
-// panic when called — it has no other observable behavior.
+// TestNopNotifier_IssueEvent pins the no-panic contract of the v1 no-op
+// Notifier — it has no other observable behavior, but a future change that
+// makes it dereference something on Entry must not silently panic in
+// production.
 func TestNopNotifier_IssueEvent(t *testing.T) {
 	NopNotifier{}.IssueEvent(store.Entry{})
 }
-

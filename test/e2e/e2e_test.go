@@ -69,6 +69,14 @@ type harness struct {
 
 	otlpIssueID int64
 	jsonIssueID int64
+
+	// shutdownOnce guards shutdown so it's safe to call it both from
+	// t.Cleanup (registered right after the process starts, so a failure
+	// anywhere afterwards — including inside testBuildAndStart itself,
+	// e.g. a healthz timeout or a key-parse failure — still reaps the
+	// child) and from the happy-path SIGTERM subtest, without either
+	// signaling or waiting on an already-reaped process twice.
+	shutdownOnce sync.Once
 }
 
 func TestE2E(t *testing.T) {
@@ -82,7 +90,6 @@ func TestE2E(t *testing.T) {
 	if t.Failed() {
 		t.Fatal("e2e: cannot continue past build/start failure")
 	}
-	defer h.shutdown()
 
 	t.Run("create project and mint keys", h.testCreateProjectAndKeys)
 	t.Run("ingest OTLP and JSON batches", h.testIngest)
@@ -99,7 +106,9 @@ func TestE2E(t *testing.T) {
 
 func (h *harness) testBuildAndStart(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "agenterr")
-	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/agenterr/agenterr/cmd/agenterr")
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancelBuild()
+	buildCmd := exec.CommandContext(buildCtx, "go", "build", "-o", binPath, "github.com/agenterr/agenterr/cmd/agenterr")
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 	if err := buildCmd.Run(); err != nil {
@@ -139,6 +148,12 @@ func (h *harness) testBuildAndStart(t *testing.T) {
 	}
 	h.cmd = cmd
 	h.baseURL = "http://" + addr
+	// Registered on h.t (the whole TestE2E), not the "build and start"
+	// subtest's own *testing.T, and immediately after Start succeeds —
+	// not after this subtest returns — so a failure anywhere from here on
+	// (including later in this same subtest: a healthz timeout, a
+	// key-parse failure) still reaps the child when TestE2E finishes.
+	h.t.Cleanup(h.shutdown)
 
 	if err := h.waitHealthy(5 * time.Second); err != nil {
 		t.Fatalf("agenterr never became healthy: %v\nstdout:\n%s\nstderr:\n%s", err, h.stdout.String(), h.stderr.String())
@@ -544,7 +559,10 @@ func (h *harness) testGracefulShutdown(t *testing.T) {
 
 	select {
 	case err := <-done:
-		h.cmd = nil // shutdown() must not wait/signal an already-reaped process
+		// The process is already reaped: mark shutdownOnce consumed so
+		// the t.Cleanup registered in testBuildAndStart becomes a no-op
+		// instead of signaling/waiting on it a second time.
+		h.shutdownOnce.Do(func() {})
 		if err != nil {
 			t.Fatalf("process did not exit 0 after SIGTERM: %v\nstdout:\n%s\nstderr:\n%s", err, h.stdout.String(), h.stderr.String())
 		}
@@ -562,15 +580,21 @@ func (h *harness) testGracefulShutdown(t *testing.T) {
 	}
 }
 
-// shutdown is the top-level defer's safety net: if an earlier subtest
-// failed before testGracefulShutdown ran (or ran but didn't reach the
-// signal), this makes sure the child process is never leaked.
+// shutdown is the leak-proofing safety net, registered via t.Cleanup right
+// after the process starts (see testBuildAndStart): if any subtest fails
+// before testGracefulShutdown runs — or before it reaches the signal — this
+// makes sure the child process is never leaked. shutdownOnce makes it safe
+// to call unconditionally from t.Cleanup even when testGracefulShutdown
+// already reaped the process itself on the happy path: only the first
+// caller (whichever runs first) actually signals/waits.
 func (h *harness) shutdown() {
-	if h.cmd == nil || h.cmd.Process == nil {
-		return
-	}
-	_ = h.cmd.Process.Kill()
-	_, _ = h.cmd.Process.Wait()
+	h.shutdownOnce.Do(func() {
+		if h.cmd == nil || h.cmd.Process == nil {
+			return
+		}
+		_ = h.cmd.Process.Kill()
+		_, _ = h.cmd.Process.Wait()
+	})
 }
 
 // ---- small HTTP helpers ----

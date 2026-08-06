@@ -19,7 +19,7 @@
               "body": { "stringValue": "payment charge failed for order ord-1001" },
               "attributes": [
                 { "key": "exception.type", "value": { "stringValue": "PaymentError" } },
-                { "key": "exception.message", "value": { "stringValue": "charge declined by processor" } },
+                { "key": "exception.message", "value": { "stringValue": "charge declined by processor for order 84121" } },
                 { "key": "order_id", "value": { "stringValue": "ord-1001" } }
               ]
             },
@@ -39,7 +39,7 @@
               "body": { "stringValue": "payment charge failed for order ord-1002" },
               "attributes": [
                 { "key": "exception.type", "value": { "stringValue": "PaymentError" } },
-                { "key": "exception.message", "value": { "stringValue": "charge declined by processor" } },
+                { "key": "exception.message", "value": { "stringValue": "charge declined by processor for order 99347" } },
                 { "key": "order_id", "value": { "stringValue": "ord-1002" } }
               ]
             },
@@ -59,7 +59,7 @@
               "body": { "stringValue": "payment charge failed for order ord-1003" },
               "attributes": [
                 { "key": "exception.type", "value": { "stringValue": "PaymentError" } },
-                { "key": "exception.message", "value": { "stringValue": "charge declined by processor" } },
+                { "key": "exception.message", "value": { "stringValue": "charge declined by processor for order 10058" } },
                 { "key": "order_id", "value": { "stringValue": "ord-1003" } }
               ]
             },
