@@ -278,6 +278,22 @@ func TestParseStructuredBody_Logfmt(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "tab-separated logfmt line",
+			in: Log{Time: arrival, Severity: SeverityInfo,
+				Body: "level=error\tmsg=\"tabbed line\"\tid=3"},
+			want: func(t *testing.T, got Log) {
+				if got.Severity != SeverityError {
+					t.Errorf("severity = %v, want ERROR", got.Severity)
+				}
+				if got.Body != "tabbed line" {
+					t.Errorf("body = %q, want %q", got.Body, "tabbed line")
+				}
+				if got.Attrs["id"] != "3" {
+					t.Errorf("id = %q, want 3", got.Attrs["id"])
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

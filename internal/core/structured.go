@@ -58,7 +58,8 @@ func decodeJSONObject(body string) (map[string]any, bool) {
 // (values optionally double-quoted with backslash escapes). Any token
 // that is not a pair — prose, a bare word, a second line — rejects the
 // whole body: logfmt detection has no partial credit, which is what keeps
-// ordinary sentences containing "=" out.
+// ordinary sentences containing "=" out. Whitespace (space or tab) separates
+// tokens; newlines/carriage returns are hard rejections.
 func parseLogfmtLine(body string) (map[string]any, bool) {
 	if strings.ContainsAny(body, "\n\r") {
 		return nil, false
@@ -66,7 +67,7 @@ func parseLogfmtLine(body string) (map[string]any, bool) {
 	m := make(map[string]any)
 	i := 0
 	for i < len(body) {
-		for i < len(body) && body[i] == ' ' {
+		for i < len(body) && (body[i] == ' ' || body[i] == '\t') {
 			i++
 		}
 		if i >= len(body) {
@@ -77,7 +78,7 @@ func parseLogfmtLine(body string) (map[string]any, bool) {
 			return nil, false
 		}
 		key := body[i : i+eq]
-		if strings.ContainsAny(key, " \"") {
+		if strings.ContainsAny(key, " \t\"") {
 			return nil, false
 		}
 		i += eq + 1
@@ -89,13 +90,13 @@ func parseLogfmtLine(body string) (map[string]any, bool) {
 			}
 			val, i = s, next
 		} else {
-			end := strings.IndexByte(body[i:], ' ')
+			end := strings.IndexAny(body[i:], " \t")
 			if end < 0 {
 				end = len(body) - i
 			}
 			val, i = body[i:i+end], i+end
 		}
-		if i < len(body) && body[i] != ' ' {
+		if i < len(body) && body[i] != ' ' && body[i] != '\t' {
 			return nil, false
 		}
 		m[key] = val
