@@ -270,18 +270,30 @@ func (p *Pipeline) flush(pending []store.Entry) {
 		return
 	}
 
-	if err := p.w.WriteBatch(context.Background(), pending); err != nil {
+	outcomes, err := p.w.WriteBatch(context.Background(), pending)
+	if err != nil {
 		slog.Error("pipeline: write batch failed, dropping batch", "error", err, "batch_size", len(pending))
 	} else {
+		// outcomes has one element per event entry, in entry order (see
+		// store.Writer) — oi walks it in lockstep with the event entries
+		// found while iterating pending, which also carries non-event
+		// entries that must be skipped on both sides.
+		oi := 0
 		for _, e := range pending {
-			if e.IsEvent {
-				// Fire-and-forget: kept as a synchronous call because
-				// NopNotifier is a no-op in v1, but real Notifier
-				// implementations MUST NOT block here — this runs on the
-				// single writer goroutine, and a slow notifier would stall
-				// every subsequent flush.
-				p.n.IssueEvent(e)
+			if !e.IsEvent {
+				continue
 			}
+			var o store.IssueOutcome
+			if oi < len(outcomes) {
+				o = outcomes[oi]
+			}
+			oi++
+			// Fire-and-forget: kept as a synchronous call because
+			// NopNotifier is a no-op in v1, but real Notifier
+			// implementations MUST NOT block here — this runs on the
+			// single writer goroutine, and a slow notifier would stall
+			// every subsequent flush.
+			p.n.IssueEvent(e, o)
 		}
 	}
 

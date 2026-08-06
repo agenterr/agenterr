@@ -27,6 +27,12 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("WriteBatch/IncrementsExisting", func(t *testing.T) { testWriteBatchIncrementsExisting(t, open) })
 	t.Run("WriteBatch/RegressionReopens", func(t *testing.T) { testWriteBatchRegressionReopens(t, open) })
 	t.Run("WriteBatch/EventSampleCap", func(t *testing.T) { testWriteBatchEventSampleCap(t, open) })
+	t.Run("WriteBatch/OutcomeNewOnFirstSight", func(t *testing.T) { testWriteBatchOutcomeNewOnFirstSight(t, open) })
+	t.Run("WriteBatch/OutcomeNeitherOnRepeatSeparateBatch", func(t *testing.T) { testWriteBatchOutcomeNeitherOnRepeatSeparateBatch(t, open) })
+	t.Run("WriteBatch/OutcomeNeitherOnRepeatSameBatch", func(t *testing.T) { testWriteBatchOutcomeNeitherOnRepeatSameBatch(t, open) })
+	t.Run("WriteBatch/OutcomeReopenedAfterResolve", func(t *testing.T) { testWriteBatchOutcomeReopenedAfterResolve(t, open) })
+	t.Run("WriteBatch/OutcomeIgnoredDoesNotReopen", func(t *testing.T) { testWriteBatchOutcomeIgnoredDoesNotReopen(t, open) })
+	t.Run("WriteBatch/OutcomeAlignsByEntryOrderSkippingNonEvents", func(t *testing.T) { testWriteBatchOutcomeAlignsByEntryOrderSkippingNonEvents(t, open) })
 	t.Run("Issues/FilterByStatusEnvProject", func(t *testing.T) { testIssuesFilterByStatusEnvProject(t, open) })
 	t.Run("Issues/SortedByLastSeenDesc", func(t *testing.T) { testIssuesSortedByLastSeenDesc(t, open) })
 	t.Run("Issues/LimitHonored", func(t *testing.T) { testIssuesLimitHonored(t, open) })
@@ -142,7 +148,7 @@ func testWriteBatchReadBack(t *testing.T, open func(t *testing.T) store.Store) {
 		"exception.message": "usage at 91%",
 	}
 
-	if err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -193,7 +199,7 @@ func testWriteBatchCreatesOpenIssue(t *testing.T, open func(t *testing.T) store.
 	p := mustProject(ctx, t, s)
 
 	e := eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)
-	if err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -233,10 +239,10 @@ func testWriteBatchIncrementsExisting(t *testing.T, open func(t *testing.T) stor
 	t1 := baseTime
 	t2 := baseTime.Add(time.Hour)
 
-	if err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", t1)}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", t1)}); err != nil {
 		t.Fatalf("WriteBatch #1: %v", err)
 	}
-	if err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", t2)}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", t2)}); err != nil {
 		t.Fatalf("WriteBatch #2: %v", err)
 	}
 
@@ -264,7 +270,7 @@ func testWriteBatchRegressionReopens(t *testing.T, open func(t *testing.T) store
 	s := open(t)
 	p := mustProject(ctx, t, s)
 
-	if err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)}); err != nil {
 		t.Fatalf("WriteBatch #1: %v", err)
 	}
 	iss := findIssue(ctx, t, s, p.ID, "f1")
@@ -280,7 +286,7 @@ func testWriteBatchRegressionReopens(t *testing.T, open func(t *testing.T) store
 		t.Fatalf("expected resolved status before regression, got %q", resolved.Status)
 	}
 
-	if err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", baseTime.Add(time.Hour))}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", baseTime.Add(time.Hour))}); err != nil {
 		t.Fatalf("WriteBatch #2: %v", err)
 	}
 
@@ -305,7 +311,7 @@ func testWriteBatchEventSampleCap(t *testing.T, open func(t *testing.T) store.St
 	for i := 0; i < total; i++ {
 		at := baseTime.Add(time.Duration(i) * time.Minute)
 		e := eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", at)
-		if err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
+		if _, err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
 			t.Fatalf("WriteBatch #%d: %v", i, err)
 		}
 	}
@@ -345,6 +351,191 @@ func testWriteBatchEventSampleCap(t *testing.T, open func(t *testing.T) store.St
 	}
 	if !sawNewest {
 		t.Errorf("expected newest event sample %v to be present", newestExpected)
+	}
+}
+
+// --- WriteBatch/IssueOutcome ---------------------------------------------
+
+func testWriteBatchOutcomeNewOnFirstSight(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	outcomes, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)})
+	if err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("expected 1 outcome, got %d: %+v", len(outcomes), outcomes)
+	}
+	if !outcomes[0].New {
+		t.Errorf("outcomes[0].New = false, want true (first sight of fingerprint)")
+	}
+	if outcomes[0].Reopened {
+		t.Errorf("outcomes[0].Reopened = true, want false")
+	}
+	iss := findIssue(ctx, t, s, p.ID, "f1")
+	if outcomes[0].IssueID != iss.ID {
+		t.Errorf("outcomes[0].IssueID = %d, want %d", outcomes[0].IssueID, iss.ID)
+	}
+}
+
+func testWriteBatchOutcomeNeitherOnRepeatSeparateBatch(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)}); err != nil {
+		t.Fatalf("WriteBatch #1: %v", err)
+	}
+
+	outcomes, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", baseTime.Add(time.Hour))})
+	if err != nil {
+		t.Fatalf("WriteBatch #2: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("expected 1 outcome, got %d: %+v", len(outcomes), outcomes)
+	}
+	if outcomes[0].New {
+		t.Errorf("outcomes[0].New = true, want false (fingerprint already seen in a prior batch)")
+	}
+	if outcomes[0].Reopened {
+		t.Errorf("outcomes[0].Reopened = true, want false (issue was open, not resolved)")
+	}
+}
+
+func testWriteBatchOutcomeNeitherOnRepeatSameBatch(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	entries := []store.Entry{
+		eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime),
+		eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", baseTime.Add(time.Minute)),
+	}
+	outcomes, err := s.WriteBatch(ctx, entries)
+	if err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	if len(outcomes) != 2 {
+		t.Fatalf("expected 2 outcomes, got %d: %+v", len(outcomes), outcomes)
+	}
+	if !outcomes[0].New {
+		t.Errorf("outcomes[0].New = false, want true (first occurrence of the fingerprint in this batch)")
+	}
+	if outcomes[1].New {
+		t.Errorf("outcomes[1].New = true, want false (second occurrence of the same new fingerprint in the same batch)")
+	}
+	if outcomes[0].Reopened || outcomes[1].Reopened {
+		t.Errorf("outcomes = %+v, want Reopened=false on both", outcomes)
+	}
+}
+
+func testWriteBatchOutcomeReopenedAfterResolve(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)}); err != nil {
+		t.Fatalf("WriteBatch #1: %v", err)
+	}
+	iss := findIssue(ctx, t, s, p.ID, "f1")
+
+	if err := s.SetIssueStatus(ctx, iss.ID, core.StatusResolved); err != nil {
+		t.Fatalf("SetIssueStatus resolved: %v", err)
+	}
+
+	outcomes, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", baseTime.Add(time.Hour))})
+	if err != nil {
+		t.Fatalf("WriteBatch #2: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("expected 1 outcome, got %d: %+v", len(outcomes), outcomes)
+	}
+	if outcomes[0].New {
+		t.Errorf("outcomes[0].New = true, want false (fingerprint already existed)")
+	}
+	if !outcomes[0].Reopened {
+		t.Errorf("outcomes[0].Reopened = false, want true (issue was resolved before this event)")
+	}
+}
+
+// testWriteBatchOutcomeIgnoredDoesNotReopen pins that the reopen CASE (and
+// therefore the Reopened outcome) is keyed strictly on status='resolved':
+// an ignored issue seeing a new event must NOT be reported as reopened,
+// matching the sqlite upsert's CASE WHEN status = 'resolved' THEN 'open'
+// ELSE status END, which leaves 'ignored' untouched.
+func testWriteBatchOutcomeIgnoredDoesNotReopen(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)}); err != nil {
+		t.Fatalf("WriteBatch #1: %v", err)
+	}
+	iss := findIssue(ctx, t, s, p.ID, "f1")
+
+	if err := s.SetIssueStatus(ctx, iss.ID, core.StatusIgnored); err != nil {
+		t.Fatalf("SetIssueStatus ignored: %v", err)
+	}
+
+	outcomes, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom again", "f1", "boom", baseTime.Add(time.Hour))})
+	if err != nil {
+		t.Fatalf("WriteBatch #2: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("expected 1 outcome, got %d: %+v", len(outcomes), outcomes)
+	}
+	if outcomes[0].New {
+		t.Errorf("outcomes[0].New = true, want false")
+	}
+	if outcomes[0].Reopened {
+		t.Errorf("outcomes[0].Reopened = true, want false (ignored issues do not reopen)")
+	}
+
+	got, _, err := s.Issue(ctx, iss.ID)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if got.Status != core.StatusIgnored {
+		t.Errorf("Status = %q, want %q (ignored status must survive a new event)", got.Status, core.StatusIgnored)
+	}
+}
+
+// testWriteBatchOutcomeAlignsByEntryOrderSkippingNonEvents pins the
+// alignment contract: outcomes[i] corresponds to the i-th EVENT entry,
+// with non-event entries contributing nothing to the slice — a mixed
+// batch (plain log, event, plain log, event) must yield exactly 2
+// outcomes, in the order the two event entries appear.
+func testWriteBatchOutcomeAlignsByEntryOrderSkippingNonEvents(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	entries := []store.Entry{
+		entry(p.ID, core.SeverityInfo, "plain log a", "svc", baseTime),
+		eventEntry(p.ID, core.SeverityError, "event f1", "f1", "boom f1", baseTime.Add(time.Minute)),
+		entry(p.ID, core.SeverityInfo, "plain log b", "svc", baseTime.Add(2*time.Minute)),
+		eventEntry(p.ID, core.SeverityError, "event f2", "f2", "boom f2", baseTime.Add(3*time.Minute)),
+	}
+	outcomes, err := s.WriteBatch(ctx, entries)
+	if err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	if len(outcomes) != 2 {
+		t.Fatalf("expected 2 outcomes (one per event entry, skipping 2 plain logs), got %d: %+v", len(outcomes), outcomes)
+	}
+
+	f1 := findIssue(ctx, t, s, p.ID, "f1")
+	f2 := findIssue(ctx, t, s, p.ID, "f2")
+	if outcomes[0].IssueID != f1.ID {
+		t.Errorf("outcomes[0].IssueID = %d, want %d (f1, the first event entry)", outcomes[0].IssueID, f1.ID)
+	}
+	if outcomes[1].IssueID != f2.ID {
+		t.Errorf("outcomes[1].IssueID = %d, want %d (f2, the second event entry)", outcomes[1].IssueID, f2.ID)
+	}
+	if !outcomes[0].New || !outcomes[1].New {
+		t.Errorf("outcomes = %+v, want New=true on both (both fingerprints are first-sight)", outcomes)
 	}
 }
 
@@ -388,7 +579,7 @@ func writeIssue(ctx context.Context, t *testing.T, s store.Store, projectID int6
 	t.Helper()
 	e := eventEntry(projectID, core.SeverityError, "boom "+fingerprint, fingerprint, "boom", at)
 	e.Log.Environment = environment
-	if err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 	return findIssue(ctx, t, s, projectID, fingerprint)
@@ -460,7 +651,7 @@ func testIssuesDefaultLimitFifty(t *testing.T, open func(t *testing.T) store.Sto
 	for i := 0; i < total; i++ {
 		at := baseTime.Add(time.Duration(i) * time.Minute)
 		fp := "f" + string(rune('a'+i%26)) + string(rune('0'+i/26))
-		if err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", fp, "boom", at)}); err != nil {
+		if _, err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", fp, "boom", at)}); err != nil {
 			t.Fatalf("WriteBatch #%d: %v", i, err)
 		}
 	}
@@ -497,7 +688,7 @@ func testSearchLogsFTSMatchesBody(t *testing.T, open func(t *testing.T) store.St
 		entry(p.ID, core.SeverityError, "disk full", "svc", baseTime.Add(time.Minute)),
 		entry(p.ID, core.SeverityInfo, "request completed", "svc", baseTime.Add(2*time.Minute)),
 	}
-	if err := s.WriteBatch(ctx, entries); err != nil {
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -524,7 +715,7 @@ func testSearchLogsMinSeverityAndTimeRange(t *testing.T, open func(t *testing.T)
 		entry(p.ID, core.SeverityWarn, "warn at t2", "svc", baseTime.Add(2*time.Hour)),
 		entry(p.ID, core.SeverityFatal, "fatal at t3, out of range", "svc", baseTime.Add(10*time.Hour)),
 	}
-	if err := s.WriteBatch(ctx, entries); err != nil {
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -578,7 +769,7 @@ func testLogContextReturnsNeighborsSameProjectService(t *testing.T, open func(t 
 		entry(p.ID, core.SeverityInfo, "svc-4", "svc", baseTime.Add(4*time.Minute)),
 		entry(p.ID, core.SeverityInfo, "other-service", "other-svc", baseTime.Add(2*time.Minute+time.Second)),
 	}
-	if err := s.WriteBatch(ctx, entries); err != nil {
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -659,7 +850,7 @@ func testStatsCountsAndPerDay(t *testing.T, open func(t *testing.T) store.Store)
 		entry(p.ID, core.SeverityInfo, "day2 log", "svc", day2),
 		eventEntry(p.ID, core.SeverityError, "day2 event", "f2", "day2 event", day2.Add(time.Minute)),
 	}
-	if err := s.WriteBatch(ctx, entries); err != nil {
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -722,7 +913,7 @@ func testPruneDeletesOnlyOlderAndOnlyProject(t *testing.T, open func(t *testing.
 		eventEntry(p1.ID, core.SeverityError, "p1 old event", "old-event", "old event", oldTime),
 		eventEntry(p1.ID, core.SeverityError, "p1 new event", "new-event", "new event", newTime),
 	}
-	if err := s.WriteBatch(ctx, entries); err != nil {
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
@@ -1262,7 +1453,7 @@ func testServiceCountsGroupsAndOrdersDescending(t *testing.T, open func(t *testi
 		entry(p.ID, core.SeverityInfo, "too-old", "svc-a", baseTime.Add(-time.Hour)),
 		entry(other.ID, core.SeverityInfo, "other-project", "svc-a", baseTime),
 	}
-	if err := s.WriteBatch(ctx, entries); err != nil {
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 

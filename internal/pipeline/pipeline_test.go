@@ -22,17 +22,29 @@ type fakeWriter struct {
 
 var errWrite = errors.New("fake writer: forced failure")
 
-func (f *fakeWriter) WriteBatch(_ context.Context, e []store.Entry) error {
+// WriteBatch returns one IssueOutcome per event entry, in entry order,
+// tagged New=true with a distinguishing IssueID (1-based position in the
+// batch) so tests can assert the pipeline routes each outcome to the
+// matching event entry and skips non-event entries — the real values
+// (New/Reopened semantics) are storetest's job, not fakeWriter's.
+func (f *fakeWriter) WriteBatch(_ context.Context, e []store.Entry) ([]store.IssueOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failN > 0 {
 		f.failN--
-		return errWrite
+		return nil, errWrite
 	}
 	batch := make([]store.Entry, len(e))
 	copy(batch, e)
 	f.batches = append(f.batches, batch)
-	return nil
+
+	var outcomes []store.IssueOutcome
+	for i, entry := range e {
+		if entry.IsEvent {
+			outcomes = append(outcomes, store.IssueOutcome{IssueID: int64(i + 1), New: true})
+		}
+	}
+	return outcomes, nil
 }
 
 func (f *fakeWriter) Prune(context.Context, int64, time.Time) (int64, error) { return 0, nil }
@@ -442,7 +454,109 @@ func TestPending_InitiallyZero(t *testing.T) {
 // makes it dereference something on Entry must not silently panic in
 // production.
 func TestNopNotifier_IssueEvent(_ *testing.T) {
-	NopNotifier{}.IssueEvent(store.Entry{})
+	NopNotifier{}.IssueEvent(store.Entry{}, store.IssueOutcome{})
+}
+
+// spyNotifier records every IssueEvent call it receives, for tests that
+// need to assert the pipeline routed the right (Entry, IssueOutcome) pair
+// rather than merely that a call happened.
+type spyNotifier struct {
+	mu    sync.Mutex
+	calls []notifierCall
+}
+
+type notifierCall struct {
+	entry   store.Entry
+	outcome store.IssueOutcome
+}
+
+func (s *spyNotifier) IssueEvent(e store.Entry, o store.IssueOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, notifierCall{entry: e, outcome: o})
+}
+
+func (s *spyNotifier) snapshot() []notifierCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]notifierCall, len(s.calls))
+	copy(out, s.calls)
+	return out
+}
+
+// TestFlush_NotifierGetsMatchingOutcomePerEventEntry pins the flush routing
+// contract: outcomes returned by WriteBatch align with event entries in
+// entry order (store.Writer's contract), and non-event entries in the same
+// batch must not produce a notifier call at all.
+func TestFlush_NotifierGetsMatchingOutcomePerEventEntry(t *testing.T) {
+	fw := &fakeWriter{}
+	sn := &spyNotifier{}
+	p := New(fw, core.DefaultGrouper{}, sn, NopDropper{}, Options{BufferSize: 100, FlushEvery: time.Hour, MaxBatch: 4})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	// info, error (event), info, error (event) — MaxBatch=4 forces exactly
+	// this batch through flush in one shot.
+	logs := []core.Log{
+		testLog(1, core.SeverityInfo),
+		errorLog(2),
+		testLog(3, core.SeverityInfo),
+		errorLog(4),
+	}
+	if err := p.Enqueue(logs); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	eventually(t, 2*time.Second, func() bool { return len(sn.snapshot()) == 2 })
+
+	calls := sn.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("expected exactly 2 notifier calls (one per event entry, skipping 2 plain logs), got %d", len(calls))
+	}
+	for i, c := range calls {
+		if !c.entry.IsEvent {
+			t.Errorf("call %d: entry.IsEvent = false, want true (non-event entries must not reach the notifier)", i)
+		}
+	}
+	// fakeWriter tags outcomes with IssueID = 1-based position in the
+	// batch: entry 2 (errorLog(2)) is at batch index 1 -> IssueID 2; entry
+	// 4 (errorLog(4)) is at batch index 3 -> IssueID 4.
+	if calls[0].outcome.IssueID != 2 {
+		t.Errorf("calls[0].outcome.IssueID = %d, want 2 (first event entry's outcome)", calls[0].outcome.IssueID)
+	}
+	if calls[1].outcome.IssueID != 4 {
+		t.Errorf("calls[1].outcome.IssueID = %d, want 4 (second event entry's outcome)", calls[1].outcome.IssueID)
+	}
+	if !calls[0].outcome.New || !calls[1].outcome.New {
+		t.Errorf("calls = %+v, want New=true on both outcomes", calls)
+	}
+}
+
+// TestFlush_FailedWriteCallsNoNotifier pins that a batch dropped on a
+// WriteBatch error must not fire the notifier at all — the batch never
+// landed, so there is nothing to report.
+func TestFlush_FailedWriteCallsNoNotifier(t *testing.T) {
+	fw := &fakeWriter{failN: 1}
+	sn := &spyNotifier{}
+	p := New(fw, core.DefaultGrouper{}, sn, NopDropper{}, Options{BufferSize: 100, FlushEvery: time.Hour, MaxBatch: 2})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	if err := p.Enqueue([]core.Log{errorLog(1), errorLog(2)}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	eventually(t, 2*time.Second, func() bool {
+		return atomic.LoadInt64(&p.unflushed) == 0
+	})
+
+	if calls := sn.snapshot(); len(calls) != 0 {
+		t.Fatalf("expected 0 notifier calls after a failed write, got %d: %+v", len(calls), calls)
+	}
 }
 
 // TestRun_ParsesStructuredBodies confirms annotate lifts a structured body

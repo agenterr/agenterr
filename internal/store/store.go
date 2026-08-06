@@ -60,14 +60,26 @@ type DayCount struct {
 	Events int64
 }
 
+// IssueOutcome describes what WriteBatch did to the issue behind one event
+// entry, computed inside the same transaction as the upsert. Outcomes are
+// returned one per entry with IsEvent true, in entry order (non-event
+// entries contribute nothing to the slice).
+type IssueOutcome struct {
+	IssueID  int64
+	New      bool // fingerprint first seen for this project
+	Reopened bool // issue was 'resolved' immediately before this event's upsert
+}
+
 // Writer persists ingested log/event data.
 type Writer interface {
 	// WriteBatch persists logs and, atomically in the same transaction,
 	// upserts issues by (project, fingerprint): insert as open on first
 	// sight, else increment count / update last_seen; a resolved issue
 	// seeing a new event reopens (regression). Event sample rows are
-	// capped at 50 newest per issue.
-	WriteBatch(ctx context.Context, entries []Entry) error
+	// capped at 50 newest per issue. The returned []IssueOutcome has one
+	// element per entry with IsEvent, in entry order; two entries in the
+	// same batch sharing a new fingerprint report New only for the first.
+	WriteBatch(ctx context.Context, entries []Entry) ([]IssueOutcome, error)
 	Prune(ctx context.Context, projectID int64, before time.Time) (int64, error)
 }
 

@@ -15,19 +15,20 @@ type Grouper interface {
 	Fingerprint(l core.Log) string
 }
 
-// Notifier is fired per event entry after a batch is successfully written.
-// Real implementations must not block the writer loop — do the actual
+// Notifier is fired per event entry after a batch is successfully written,
+// carrying the store's IssueOutcome for that entry (New/Reopened). Real
+// implementations must not block the writer loop — do the actual
 // notification work asynchronously (e.g. hand off to a goroutine or a
 // buffered channel of their own) and return quickly.
 type Notifier interface {
-	IssueEvent(e store.Entry)
+	IssueEvent(e store.Entry, o store.IssueOutcome)
 }
 
 // NopNotifier is the v1 no-op Notifier.
 type NopNotifier struct{}
 
 // IssueEvent does nothing.
-func (NopNotifier) IssueEvent(store.Entry) {}
+func (NopNotifier) IssueEvent(store.Entry, store.IssueOutcome) {}
 
 // Dropper decides whether an ingested log should be filtered out before
 // storage, and whether a project wants body parsing. Defined here rather
