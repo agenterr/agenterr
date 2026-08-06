@@ -134,6 +134,122 @@ func TestJoiner_TwoBackToBackPanics(t *testing.T) {
 	}
 }
 
+// --- Panic mode (amended semantics): blank lines and non-indented frame
+// lines all continue a record whose first line matched panic/fatal, until
+// cap or Flush ends it.
+
+func TestJoiner_PanicMode_RealGoPanic(t *testing.T) {
+	t0 := mustTime("2026-08-06T12:00:00Z")
+
+	// A real go run panic dump: blank line after the panic header, and a
+	// non-indented function-signature line before the tab-indented
+	// location — neither matches the ordinary continuation rules, but
+	// panic mode swallows both.
+	lines := []Line{
+		{Text: "panic: boom", Time: t0},
+		{Text: "", Time: t0.Add(time.Millisecond)},
+		{Text: "goroutine 1 [running]:", Time: t0.Add(2 * time.Millisecond)},
+		{Text: "main.main()", Time: t0.Add(3 * time.Millisecond)},
+		{Text: "\t/tmp/main.go:5 +0x18", Time: t0.Add(4 * time.Millisecond)},
+	}
+
+	j := NewJoiner(64 * 1024)
+	completed := feedAll(j, lines)
+	if len(completed) != 0 {
+		t.Fatalf("expected no records completed mid-panic, got %d: %+v", len(completed), completed)
+	}
+
+	final := j.Flush()
+	if len(final) != 1 {
+		t.Fatalf("expected exactly 1 record from Flush, got %d", len(final))
+	}
+	want := "panic: boom\n" +
+		"\n" +
+		"goroutine 1 [running]:\n" +
+		"main.main()\n" +
+		"\t/tmp/main.go:5 +0x18"
+	if final[0].Text != want {
+		t.Errorf("joined text = %q, want %q", final[0].Text, want)
+	}
+	if !final[0].Time.Equal(t0) {
+		t.Errorf("record time = %v, want first line's time %v", final[0].Time, t0)
+	}
+}
+
+func TestJoiner_PanicMode_NormalLookingLineStillJoins(t *testing.T) {
+	t0 := mustTime("2026-08-06T12:00:00Z")
+
+	// Once panic mode is active, only cap or Flush ends the record — a
+	// line that looks like an ordinary, unrelated log line still joins.
+	// Rationale: a crashing process's stdout during its dump is terminal —
+	// nothing else legitimately interleaves with it on that fd — so
+	// anything short of the join window elapsing (the orchestrator's call)
+	// is treated as part of the same crash report; the window bounds how
+	// much can accumulate before a record is cut.
+	lines := []Line{
+		{Text: "panic: boom", Time: t0},
+		{Text: "some ordinary log line that matches no continuation rule", Time: t0.Add(time.Millisecond)},
+	}
+
+	j := NewJoiner(64 * 1024)
+	completed := feedAll(j, lines)
+	if len(completed) != 0 {
+		t.Fatalf("expected the ordinary-looking line to join in panic mode, got %d records: %+v", len(completed), completed)
+	}
+
+	final := j.Flush()
+	want := "panic: boom\nsome ordinary log line that matches no continuation rule"
+	if len(final) != 1 || final[0].Text != want {
+		t.Fatalf("Flush = %+v, want single record %q", final, want)
+	}
+}
+
+func TestJoiner_PanicMode_NewPanicLineStartsFreshRecord(t *testing.T) {
+	t0 := mustTime("2026-08-06T12:00:00Z")
+
+	// A line that itself matches panic/fatal always starts a new record,
+	// even mid panic-mode: it's the header of a distinct crash, not a
+	// continuation of the one in progress.
+	j := NewJoiner(64 * 1024)
+	got := j.Feed(Line{Text: "panic: first", Time: t0})
+	if len(got) != 0 {
+		t.Fatalf("expected no record yet, got %+v", got)
+	}
+	got = j.Feed(Line{Text: "some frame line", Time: t0.Add(time.Millisecond)})
+	if len(got) != 0 {
+		t.Fatalf("expected panic mode to swallow the frame line, got %+v", got)
+	}
+	got = j.Feed(Line{Text: "fatal error: second", Time: t0.Add(2 * time.Millisecond)})
+	if len(got) != 1 || got[0].Text != "panic: first\nsome frame line" {
+		t.Fatalf("expected the new panic/fatal line to flush the prior record, got %+v", got)
+	}
+
+	final := j.Flush()
+	if len(final) != 1 || final[0].Text != "fatal error: second" {
+		t.Fatalf("expected the second crash's own record on Flush, got %+v", final)
+	}
+}
+
+func TestJoiner_PanicMode_CapStillFlushes(t *testing.T) {
+	t0 := mustTime("2026-08-06T12:00:00Z")
+
+	// Panic mode swallows everything except cap and Flush — verify the cap
+	// still ends it.
+	j := NewJoiner(15) // "panic: boom" is 11 bytes
+	got := j.Feed(Line{Text: "panic: boom", Time: t0})
+	if len(got) != 0 {
+		t.Fatalf("expected no record yet, got %+v", got)
+	}
+	// 11 + 1 + len("more") = 16 > 15 -> cap flush
+	got = j.Feed(Line{Text: "more", Time: t0.Add(time.Millisecond)})
+	if len(got) != 1 || got[0].Text != "panic: boom" {
+		t.Fatalf("expected cap to flush the panic record, got %+v", got)
+	}
+	if j.CapHits() != 1 {
+		t.Errorf("CapHits() = %d, want 1", j.CapHits())
+	}
+}
+
 // --- Behavior 3: Java-style trace joins -------------------------------------
 
 func TestJoiner_JavaTrace(t *testing.T) {

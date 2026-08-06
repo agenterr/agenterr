@@ -61,11 +61,22 @@ func isContinuation(text string, prevMatchedPanicFatal bool) bool {
 }
 
 // pending holds the in-progress joined record plus its running byte size
-// (len of Text, tracked separately so we don't re-scan on every Feed).
+// (len of Text, tracked separately so we don't re-scan on every Feed) and
+// whether it's in panic mode: once true, only a cap hit, an explicit
+// Flush, or the start of a NEW panic/fatal line ends the record — see
+// newPending and Feed's continues check.
 type pending struct {
-	text string
-	time time.Time
-	size int
+	text      string
+	time      time.Time
+	size      int
+	panicMode bool
+}
+
+// newPending starts a fresh pending record from l. It enters panic mode
+// when l's own text matches panicFatalRe — i.e. panic mode is decided once,
+// by the record's first line, per the amended semantics.
+func newPending(l Line, matchedPanicFatal bool) *pending {
+	return &pending{text: l.Text, time: l.Time, size: len(l.Text), panicMode: matchedPanicFatal}
 }
 
 func (p *pending) toRecord() Record {
@@ -103,21 +114,37 @@ func (j *Joiner) CapHits() int {
 // pending record as a completed Record), or — if joining it would push the
 // pending record past maxBytes — force-flushes the pending record and
 // starts a new one with this line.
+//
+// Panic mode: once a pending record's first line matched
+// ^(panic:|fatal error:), every subsequent line continues it — blank lines
+// and non-indented frame lines included — regardless of the normal
+// continuation rules. Only the byte cap or an explicit Flush (the
+// orchestrator's join-window timer, or source EOF) ends it. A crashing
+// process's stdout during its dump is effectively terminal — nothing else
+// is going to interleave with it on that fd — so anything short of the
+// window elapsing is treated as part of the same crash report; the window
+// bounds how much runaway output can accumulate before we cut a record.
 func (j *Joiner) Feed(l Line) []Record {
 	var completed []Record
 
 	matchedPanicFatal := panicFatalRe.MatchString(l.Text)
+	// A line that itself matches panicFatalRe always starts a fresh record,
+	// even while panic mode is active: it's the header of a NEW crash
+	// report, not a continuation of the one in progress (two back-to-back
+	// panics must land as two records, not one merged blob).
+	continues := j.pending != nil && !matchedPanicFatal &&
+		(j.pending.panicMode || isContinuation(l.Text, j.lastMatchedPanicFatal))
 
 	switch {
 	case j.pending == nil:
-		j.pending = &pending{text: l.Text, time: l.Time, size: len(l.Text)}
+		j.pending = newPending(l, matchedPanicFatal)
 
-	case isContinuation(l.Text, j.lastMatchedPanicFatal):
+	case continues:
 		newSize := j.pending.size + 1 + len(l.Text) // +1 for the joining \n
 		if newSize > j.maxBytes {
 			completed = append(completed, j.pending.toRecord())
 			j.capHits++
-			j.pending = &pending{text: l.Text, time: l.Time, size: len(l.Text)}
+			j.pending = newPending(l, matchedPanicFatal)
 		} else {
 			j.pending.text += "\n" + l.Text
 			j.pending.size = newSize
@@ -125,7 +152,7 @@ func (j *Joiner) Feed(l Line) []Record {
 
 	default:
 		completed = append(completed, j.pending.toRecord())
-		j.pending = &pending{text: l.Text, time: l.Time, size: len(l.Text)}
+		j.pending = newPending(l, matchedPanicFatal)
 	}
 
 	j.lastMatchedPanicFatal = matchedPanicFatal
