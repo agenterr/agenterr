@@ -6,15 +6,12 @@
 package otlp
 
 import (
-	"compress/gzip"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/auth"
@@ -73,7 +70,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, ok := readBoundedBody(w, r, h.maxBody)
+	data, ok := ingest.ReadBoundedBody(w, r, h.maxBody, func(status int, msg string) { writeError(w, status, msg) })
 	if !ok {
 		return
 	}
@@ -90,51 +87,6 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAccepted(w, mediaType)
-}
-
-// readBoundedBody reads r's (possibly gzip-compressed) body, bounded to
-// maxBody either way, writing an appropriate error response and
-// returning ok=false on any failure (bad encoding, bad gzip stream, or
-// body over the limit).
-func readBoundedBody(w http.ResponseWriter, r *http.Request, maxBody int64) ([]byte, bool) {
-	// MaxBytesReader bounds the wire (possibly gzip-compressed) stream; for
-	// gzip requests the decompressed stream is separately bounded below to
-	// guard against zip bombs (a small compressed body expanding far past
-	// maxBody).
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-
-	var reader io.Reader
-	switch enc := r.Header.Get("Content-Encoding"); {
-	case enc == "":
-		reader = r.Body
-	case strings.EqualFold(enc, "gzip"):
-		gz, err := gzip.NewReader(r.Body)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid gzip body")
-			return nil, false
-		}
-		defer func() { _ = gz.Close() }()
-		reader = io.LimitReader(gz, maxBody+1)
-	default:
-		writeError(w, http.StatusUnsupportedMediaType, "unsupported content encoding")
-		return nil, false
-	}
-
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return nil, false
-		}
-		writeError(w, http.StatusBadRequest, "error reading request body")
-		return nil, false
-	}
-	if int64(len(data)) > maxBody {
-		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		return nil, false
-	}
-	return data, true
 }
 
 // unmarshalRequest decodes data per mediaType (protobuf or JSON) into an

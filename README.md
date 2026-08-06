@@ -230,6 +230,91 @@ The same surface is available as four MCP tools:
 | `delete_alert_rule` | Remove a rule |
 | `test_alert_rule` | Fire a rule immediately with a sample issue and report the outcome |
 
+### Shipping logs
+
+`agenterr ship` is a sidecar that tails Docker container logs and/or local
+files, cleans and joins them into records, buffers them to disk, and ships
+them to an ingest endpoint over HTTP — for when the thing producing logs
+can't (or shouldn't) POST to Agenterr directly. It's the same binary as the
+server, dispatched as a subcommand, so there's nothing extra to install.
+
+Docker form — tail every non-excluded container on the host:
+
+```
+docker run -d --name agenterr-ship \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v agenterr-ship-data:/data \
+  ghcr.io/agenterr/agenterr:latest ship \
+  --docker --data-dir /data \
+  --url https://your-agenterr-host --key agt_ingest_...
+```
+
+File form — tail one or more glob patterns, each mapped to a service name:
+
+```
+agenterr ship \
+  --file '/var/log/myapp/*.log=myapp' \
+  --url https://your-agenterr-host --key agt_ingest_...
+```
+
+`--file` is repeatable for multiple globs/services in one process; `--docker`
+and `--file` can both be set at once.
+
+**Semantics, in brief:**
+
+- **Sources.** `--docker` tails every container's logs unless excluded;
+  `--file 'GLOB=SERVICE'` tails matching files, reopening from the start on
+  rotation (both truncate-in-place and rename+recreate).
+- **Service naming (docker).** The container label
+  `com.docker.swarm.service.name`, then `com.docker.compose.service`, then
+  the container name — sanitized to `[a-zA-Z0-9_-]`.
+- **Selection.** `--exclude svc1,svc2` and `--only svc1,svc2` match against
+  the derived service name; the container label `agenterr.ignore=true`
+  always excludes regardless of either flag.
+- **Line processing.** ANSI color/cursor codes are stripped and multiline
+  records are joined — indented continuation lines, Java-style
+  `at `/`Caused by:`/`... N more` traces, and a Go panic/fatal-error dump
+  (blank lines and non-indented frames included, so a real crash report
+  lands as one record instead of fragmenting). A record flushes on a
+  non-continuation line, when the join window elapses (`--join-window-ms`,
+  default 1000), or at 64KB.
+- **Buffering.** Records land in an on-disk spool before they're sent, so a
+  server outage doesn't lose anything already tailed — delivery resumes from
+  the last acknowledged position on restart. This is at-least-once, not
+  exactly-once (docker sources resume with a 1s overlap); Agenterr's
+  fingerprint-based grouping absorbs the rare resulting duplicate.
+- **Delivery.** Batches are gzip-POSTed to `/api/v1/ingest` and retried
+  forever on network errors or 5xx with exponential backoff (1s..30s); an
+  oversized batch is split and retried, a 429 backs off 5s, and a 401/403 is
+  fatal at startup (bad key, wrong instance) but only logged and retried at
+  runtime (so a key rotated out from under a running shipper recovers on its
+  own once fixed).
+- **Severity.** Ship never derives or sends a severity — the server's
+  structured-body parsing (see "Structured log bodies" above) is what lifts
+  one, from a JSON or logfmt body. A plain-text panic dump therefore still
+  arrives intact as a single joined record, but stays at the default
+  severity unless the process producing it already logs in a structured
+  shape with a level field.
+
+| Env var | Flag | Default | Meaning |
+|---|---|---|---|
+| `AGENTERR_SHIP_URL` | `--url` | (required) | Agenterr ingest URL |
+| `AGENTERR_SHIP_KEY` | `--key` | (required) | Ingest API key |
+| `AGENTERR_SHIP_DOCKER` | `--docker` | `false` | Tail all non-excluded containers via the Docker socket |
+| `AGENTERR_SHIP_DOCKER_SOCK` | `--docker-sock` | `/var/run/docker.sock` | Docker socket path |
+| `AGENTERR_SHIP_FILE` | `--file` | (none) | `GLOB=SERVICE`; comma-separated in the env form, repeatable as a flag |
+| `AGENTERR_SHIP_EXCLUDE` | `--exclude` | (none) | Comma-separated service names to exclude |
+| `AGENTERR_SHIP_ONLY` | `--only` | (none) | Comma-separated service names to include exclusively |
+| `AGENTERR_SHIP_DATA_DIR` | `--data-dir` | `./agenterr-ship-data` | Spool directory for buffered records |
+| `AGENTERR_SHIP_MAX_BUFFER_BYTES` | `--max-buffer-bytes` | `536870912` (512MB) | Max on-disk spool bytes before oldest segments are dropped |
+| `AGENTERR_SHIP_JOIN_WINDOW_MS` | `--join-window-ms` | `1000` | Multiline join window in milliseconds |
+
+Flags override env vars, which override the defaults above — same
+precedence as the server's own configuration. Nothing is ever lost
+silently: a dropped batch, an oversized record, or a spool eviction is
+always logged and counted, visible in ship's own periodic self-log line
+(shipped/buffered/dropped/last-error, once a minute).
+
 ## Agent setup
 
 Give an agent access to the seventeen MCP tools (`list_projects`,

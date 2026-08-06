@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -50,15 +49,8 @@ func (h *Handler) serveIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxBody)
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "error reading request body")
+	data, ok := ingest.ReadBoundedBody(w, r, h.maxBody, func(status int, msg string) { writeError(w, status, msg) })
+	if !ok {
 		return
 	}
 

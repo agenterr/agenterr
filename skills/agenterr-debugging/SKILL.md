@@ -277,6 +277,19 @@ delivery queue itself is ever full (a receiver wedged under heavy load), the
 fire is dropped rather than stalling log ingestion — alerting can lose a
 notification, but it will never lose a log.
 
+## Getting logs into Agenterr
+
+This skill assumes logs are already flowing in. If `get_stats` comes back
+empty or suspiciously quiet, the gap is usually collection, not the query:
+Agenterr accepts direct OTLP/JSON ingest from an app or collector, or —
+when the thing producing logs can't POST to Agenterr itself, e.g. tailing
+an existing Docker host or a plain log file — `agenterr ship`, a sidecar
+that tails Docker containers and/or files, joins multiline records
+(including real panic/stack-trace dumps into one record instead of
+fragments), buffers them to disk so a server restart doesn't lose anything,
+and ships them to the ingest endpoint. See the README's "Shipping logs"
+section for the docker/file quickstart and the full flag/env reference.
+
 ## Connecting Agenterr
 
 Two ways to give an agent access to these tools.
