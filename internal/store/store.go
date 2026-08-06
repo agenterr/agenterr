@@ -1,3 +1,5 @@
+// Package store defines how Agenterr persists and queries its domain —
+// implementations live in subpackages and must pass storetest.
 package store
 
 import (
@@ -7,9 +9,6 @@ import (
 
 	"github.com/agenterr/agenterr/internal/core"
 )
-
-// Package store defines how Agenterr persists and queries its domain —
-// implementations live in subpackages and must pass storetest.
 
 type Entry struct { // one ingested log, pipeline-annotated
 	Log         core.Log
@@ -49,7 +48,7 @@ type Stats struct {
 }
 
 type DayCount struct {
-	Day    string
+	Day    string // "YYYY-MM-DD" (UTC)
 	Logs   int64
 	Events int64
 }

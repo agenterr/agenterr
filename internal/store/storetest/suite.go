@@ -29,6 +29,8 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("WriteBatch/EventSampleCap", func(t *testing.T) { testWriteBatchEventSampleCap(t, open) })
 	t.Run("Issues/FilterByStatusEnvProject", func(t *testing.T) { testIssuesFilterByStatusEnvProject(t, open) })
 	t.Run("Issues/SortedByLastSeenDesc", func(t *testing.T) { testIssuesSortedByLastSeenDesc(t, open) })
+	t.Run("Issues/LimitHonored", func(t *testing.T) { testIssuesLimitHonored(t, open) })
+	t.Run("Issues/DefaultLimitFifty", func(t *testing.T) { testIssuesDefaultLimitFifty(t, open) })
 	t.Run("Issue/NotFound", func(t *testing.T) { testIssueNotFound(t, open) })
 	t.Run("SearchLogs/FTSMatchesBody", func(t *testing.T) { testSearchLogsFTSMatchesBody(t, open) })
 	t.Run("SearchLogs/MinSeverityAndTimeRange", func(t *testing.T) { testSearchLogsMinSeverityAndTimeRange(t, open) })
@@ -400,6 +402,54 @@ func fingerprints(issues []core.Issue) []string {
 	return out
 }
 
+func testIssuesLimitHonored(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(t, ctx, s)
+
+	writeIssue(t, ctx, s, p.ID, "prod", "f1", baseTime)
+	writeIssue(t, ctx, s, p.ID, "prod", "f2", baseTime.Add(2*time.Hour))
+	writeIssue(t, ctx, s, p.ID, "prod", "f3", baseTime.Add(time.Hour))
+
+	issues, err := s.Issues(ctx, store.IssueFilter{ProjectID: p.ID, Limit: 2})
+	if err != nil {
+		t.Fatalf("Issues: %v", err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("expected 2 issues with Limit=2, got %d", len(issues))
+	}
+	// The 2 most recent by LastSeen: f2 (2h), f3 (1h).
+	want := []string{"f2", "f3"}
+	for i, w := range want {
+		if issues[i].Fingerprint != w {
+			t.Errorf("issues[%d].Fingerprint = %q, want %q (full order: %v)", i, issues[i].Fingerprint, w, fingerprints(issues))
+		}
+	}
+}
+
+func testIssuesDefaultLimitFifty(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(t, ctx, s)
+
+	const total = 55
+	for i := 0; i < total; i++ {
+		at := baseTime.Add(time.Duration(i) * time.Minute)
+		fp := "f" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+		if err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", fp, "boom", at)}); err != nil {
+			t.Fatalf("WriteBatch #%d: %v", i, err)
+		}
+	}
+
+	issues, err := s.Issues(ctx, store.IssueFilter{ProjectID: p.ID}) // Limit unset (0)
+	if err != nil {
+		t.Fatalf("Issues: %v", err)
+	}
+	if len(issues) != 50 {
+		t.Fatalf("expected default limit of 50 issues, got %d (wrote %d)", len(issues), total)
+	}
+}
+
 func testIssueNotFound(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
@@ -521,8 +571,9 @@ func testLogContextReturnsNeighborsSameProjectService(t *testing.T, open func(t 
 	if err != nil {
 		t.Fatalf("LogContext: %v", err)
 	}
-	if len(ctxLogs) == 0 {
-		t.Fatalf("expected non-empty context")
+	// Exactly 2 before + target + 2 after = 5, no more, no less.
+	if len(ctxLogs) != 5 {
+		t.Fatalf("expected exactly 5 context entries (2 before + target + 2 after), got %d: bodies=%v", len(ctxLogs), bodiesOf(ctxLogs))
 	}
 
 	for _, l := range ctxLogs {
@@ -536,15 +587,27 @@ func testLogContextReturnsNeighborsSameProjectService(t *testing.T, open func(t 
 		}
 	}
 
-	sawTarget := false
-	for _, l := range ctxLogs {
-		if l.ID == targetID {
-			sawTarget = true
+	wantBodies := []string{"svc-0", "svc-1", "svc-2-target", "svc-3", "svc-4"}
+	gotBodies := bodiesOf(ctxLogs)
+	for i, w := range wantBodies {
+		if gotBodies[i] != w {
+			t.Errorf("ctxLogs[%d].Body = %q, want %q (full: %v)", i, gotBodies[i], w, gotBodies)
 		}
 	}
-	if !sawTarget {
-		t.Errorf("LogContext did not include the target log itself")
+
+	// Target must sit in the middle of the returned window.
+	mid := len(ctxLogs) / 2
+	if ctxLogs[mid].ID != targetID {
+		t.Errorf("target log not in the middle of context window: got %v at index %d, want ID %d", ctxLogs[mid], mid, targetID)
 	}
+}
+
+func bodiesOf(logs []core.Log) []string {
+	out := make([]string, len(logs))
+	for i, l := range logs {
+		out[i] = l.Body
+	}
+	return out
 }
 
 func timesOf(logs []core.Log) []time.Time {
