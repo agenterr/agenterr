@@ -84,3 +84,11 @@ func KindFromContext(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(kindKey).(string)
 	return v, ok
 }
+
+// NewTestContext returns a context carrying the same project ID / key kind
+// values RequireKey injects, for tests that call handlers directly instead
+// of driving them through the HTTP middleware chain.
+func NewTestContext(ctx context.Context, projectID int64, kind string) context.Context {
+	ctx = context.WithValue(ctx, projectIDKey, projectID)
+	return context.WithValue(ctx, kindKey, kind)
+}

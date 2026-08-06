@@ -1,0 +1,128 @@
+// Package mcp is Agenterr's MCP edge — eight token-frugal tools served over
+// Streamable HTTP at /mcp. It reads via store.Reader and administers via
+// store.Admin (issue status transitions, project listing); it never
+// touches store.Writer.
+//
+// Every tool renders compact plain text designed for agent consumption:
+// lists lead with a count line, rows are one line each, and long lists are
+// capped and truncated with a "(+N more — refine filters)" trailer rather
+// than dumping everything. This mirrors the scoping rules enforced by the
+// REST edge (internal/api/handlers): a project-scoped "api" key sees only
+// its own project — every filter is pinned to it and every id-based lookup
+// 404s (here: returns a tool error "not found") for rows belonging to
+// another project. An "admin" key is unscoped.
+package mcp
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/agenterr/agenterr/internal/auth"
+	"github.com/agenterr/agenterr/internal/store"
+)
+
+// fetchCap bounds how many rows a list tool pulls from the store before
+// rendering caps the visible output at the caller's limit. It decouples
+// the store-side fetch (bounded, cheap) from the token-frugal render-side
+// limit (default 20): the tool reports "(+N more — refine filters)" based
+// on what it actually fetched, not a full table count.
+const fetchCap = 500
+
+// defaultLimit is applied when a list tool's limit input is unset or <= 0.
+const defaultLimit = 20
+
+// defaultContextN is applied when get_log_context's n input is unset.
+const defaultContextN = 20
+
+// Server implements Agenterr's MCP edge.
+type Server struct {
+	reader store.Reader
+	admin  store.Admin
+	mcp    *mcpsdk.Server
+
+	// clock is swapped in tests for a fixed time so relative-time renders
+	// ("2m ago") are deterministic.
+	clock func() time.Time
+}
+
+// New constructs a Server reading via r and administering via a.
+func New(r store.Reader, a store.Admin) *Server {
+	s := &Server{
+		reader: r,
+		admin:  a,
+		clock:  time.Now,
+	}
+	s.mcp = mcpsdk.NewServer(&mcpsdk.Implementation{
+		Name:    "agenterr",
+		Version: "0.1.0",
+	}, nil)
+	s.registerTools()
+	return s
+}
+
+// Mount registers the Streamable HTTP handler at /mcp, behind key auth.
+// The handler serves every method the transport needs (POST, GET, DELETE)
+// on the single /mcp endpoint. An "api" key is required — an "admin" key
+// also satisfies this per auth.RequireKey's hierarchy — and every tool
+// further scopes itself by the caller's project unless the caller is
+// admin (see callerScope).
+func (s *Server) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
+	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server {
+		return s.mcp
+	}, nil)
+	mux.Handle("/mcp", keys.RequireKey("api", handler))
+}
+
+// callerScope resolves the requesting key's project ID and whether it is
+// an instance-level "admin" key, from context values injected by
+// auth.RequireKey. Each incoming Streamable HTTP request is re-run through
+// that middleware (Mount wraps the whole handler), and the SDK ties the
+// context passed to tool handlers back to the originating HTTP request, so
+// this is safe to call per tool invocation. Mirrors
+// internal/api/handlers.callerScope — same rule, same edge.
+func callerScope(ctx context.Context) (projectID int64, isAdmin bool) {
+	projectID, _ = auth.ProjectFromContext(ctx)
+	kind, _ := auth.KindFromContext(ctx)
+	return projectID, kind == "admin"
+}
+
+// projectSlug looks up a project's slug by ID, for building list headers
+// like "in payment-api". Returns ok=false if the project can't be found.
+func (s *Server) projectSlug(ctx context.Context, id int64) (string, bool) {
+	projects, err := s.admin.Projects(ctx)
+	if err != nil {
+		return "", false
+	}
+	for _, p := range projects {
+		if p.ID == id {
+			return p.Slug, true
+		}
+	}
+	return "", false
+}
+
+// renderLimit normalizes a tool's limit input: <= 0 means "unset", which
+// falls back to defaultLimit.
+func renderLimit(n int) int {
+	if n <= 0 {
+		return defaultLimit
+	}
+	return n
+}
+
+func textResult(text string) *mcpsdk.CallToolResult {
+	return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: text}}}
+}
+
+// errorResult builds a tool-error CallToolResult from err: Content carries
+// err.Error() and IsError is set, per the MCP convention that tool-level
+// failures (as opposed to protocol failures) are reported in-band so the
+// calling agent can see and react to them.
+func errorResult(err error) *mcpsdk.CallToolResult {
+	res := &mcpsdk.CallToolResult{}
+	res.SetError(err)
+	return res
+}
