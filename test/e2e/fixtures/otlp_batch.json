@@ -1,0 +1,114 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "checkout-api" } },
+          { "key": "service.version", "value": { "stringValue": "1.4.2" } },
+          { "key": "deployment.environment.name", "value": { "stringValue": "production" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "checkout-api", "version": "1.4.2" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1732000000000000001",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "body": { "stringValue": "payment charge failed for order ord-1001" },
+              "attributes": [
+                { "key": "exception.type", "value": { "stringValue": "PaymentError" } },
+                { "key": "exception.message", "value": { "stringValue": "charge declined by processor" } },
+                { "key": "order_id", "value": { "stringValue": "ord-1001" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000002",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "checkout session started for cart cart-2001" },
+              "attributes": [
+                { "key": "cart_id", "value": { "stringValue": "cart-2001" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000003",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "body": { "stringValue": "payment charge failed for order ord-1002" },
+              "attributes": [
+                { "key": "exception.type", "value": { "stringValue": "PaymentError" } },
+                { "key": "exception.message", "value": { "stringValue": "charge declined by processor" } },
+                { "key": "order_id", "value": { "stringValue": "ord-1002" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000004",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "inventory reserved for cart cart-2002" },
+              "attributes": [
+                { "key": "cart_id", "value": { "stringValue": "cart-2002" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000005",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "body": { "stringValue": "payment charge failed for order ord-1003" },
+              "attributes": [
+                { "key": "exception.type", "value": { "stringValue": "PaymentError" } },
+                { "key": "exception.message", "value": { "stringValue": "charge declined by processor" } },
+                { "key": "order_id", "value": { "stringValue": "ord-1003" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000006",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "shipping label generated for order ord-1004" },
+              "attributes": [
+                { "key": "order_id", "value": { "stringValue": "ord-1004" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000007",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "webhook delivered to merchant endpoint" },
+              "attributes": [
+                { "key": "merchant_id", "value": { "stringValue": "m-3001" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000008",
+              "severityNumber": 13,
+              "severityText": "WARN",
+              "body": { "stringValue": "retrying payment gateway call for order ord-1005" },
+              "attributes": [
+                { "key": "order_id", "value": { "stringValue": "ord-1005" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000009",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "order ord-1006 marked complete" },
+              "attributes": [
+                { "key": "order_id", "value": { "stringValue": "ord-1006" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1732000000000000010",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": { "stringValue": "daily reconciliation job finished" },
+              "attributes": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

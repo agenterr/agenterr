@@ -11,3 +11,11 @@ jobs:
         with:
           version: v2.1
       - run: go test -race ./...
+      - run: go test -tags e2e ./test/e2e -v
+      - name: coverage gate (internal/core, internal/pipeline >= 90%)
+        run: |
+          go test -coverprofile=cover.out -covermode=atomic ./internal/core ./internal/pipeline
+          go tool cover -func=cover.out
+          total=$(go tool cover -func=cover.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+          echo "total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { exit !(t >= 90) }' || { echo "coverage ${total}% is below the 90% gate"; exit 1; }
