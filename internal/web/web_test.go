@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/store"
@@ -37,6 +38,9 @@ type fakeStore struct {
 	logList []core.Log
 	stats   store.Stats
 
+	alertRules      map[int64]store.AlertRuleRow
+	nextAlertRuleID int64
+
 	lastIssueFilter store.IssueFilter
 	lastLogFilter   store.LogFilter
 }
@@ -50,7 +54,49 @@ func newFakeStore() *fakeStore {
 		}),
 		issues:      make(map[int64]core.Issue),
 		issueEvents: make(map[int64][]core.Event),
+		alertRules:  make(map[int64]store.AlertRuleRow),
 	}
+}
+
+func (f *fakeStore) AlertRules(_ context.Context, projectID int64) ([]store.AlertRuleRow, error) {
+	var out []store.AlertRuleRow
+	for _, r := range f.alertRules {
+		if projectID == 0 || r.ProjectID == projectID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertAlertRule(_ context.Context, r core.AlertRule) (store.AlertRuleRow, error) {
+	if r.ID == 0 {
+		f.nextAlertRuleID++
+		r.ID = f.nextAlertRuleID
+	} else if _, ok := f.alertRules[r.ID]; !ok {
+		return store.AlertRuleRow{}, store.ErrNotFound
+	}
+	row := store.AlertRuleRow{AlertRule: r}
+	f.alertRules[r.ID] = row
+	return row, nil
+}
+
+func (f *fakeStore) DeleteAlertRule(_ context.Context, id int64) error {
+	if _, ok := f.alertRules[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.alertRules, id)
+	return nil
+}
+
+func (f *fakeStore) RecordAlertResult(_ context.Context, id int64, firedAt time.Time, lastError string) error {
+	row, ok := f.alertRules[id]
+	if !ok {
+		return nil
+	}
+	row.LastFired = firedAt
+	row.LastError = lastError
+	f.alertRules[id] = row
+	return nil
 }
 
 func (f *fakeStore) Issues(_ context.Context, filter store.IssueFilter) ([]core.Issue, error) {
@@ -137,7 +183,11 @@ func newTestServer(t *testing.T, fs *fakeStore) *httptest.Server {
 		t.Fatalf("bcrypt: %v", err)
 	}
 	a := auth.New(fs, hash)
-	web := New(fs, fs, a)
+	engine := alerts.New(fs, nil)
+	if err := engine.Load(context.Background()); err != nil {
+		t.Fatalf("alerts engine load: %v", err)
+	}
+	web := New(fs, fs, a, fs, engine)
 	mux := http.NewServeMux()
 	web.Mount(mux)
 	return httptest.NewServer(mux)
@@ -429,6 +479,129 @@ func TestSettings_EmptyProjectListShowsCurlSnippet(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "curl") {
 		t.Errorf("empty state missing curl snippet:\n%s", body)
+	}
+}
+
+func TestAlertsPage_ListsRulesAcrossProjects(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 2
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "p1-rule", Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: true,
+	}}
+	fs.alertRules[2] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 2, ProjectID: 2, Name: "p2-rule", Kind: core.AlertThreshold, Service: "api", URL: "https://example.com/hook", Enabled: false,
+	}, LastError: "boom"}
+	srv := newTestServer(t, fs)
+	defer srv.Close()
+	client := loggedInClient(t, srv)
+
+	resp, err := client.Get(srv.URL + "/alerts")
+	if err != nil {
+		t.Fatalf("GET /alerts: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, want := range []string{"p1-rule", "p2-rule", "new_issue", "threshold", "service=api", "boom"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("body missing %q\n---\n%s", want, s)
+		}
+	}
+}
+
+func TestAlertsPage_EmptyState(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(t, fs)
+	defer srv.Close()
+	client := loggedInClient(t, srv)
+
+	resp, err := client.Get(srv.URL + "/alerts")
+	if err != nil {
+		t.Fatalf("GET /alerts: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "No alert rules yet") {
+		t.Errorf("empty state missing expected copy:\n%s", body)
+	}
+}
+
+func TestAlertsTest_HappyPath_RendersDelivered(t *testing.T) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer receiver.Close()
+
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: receiver.URL, Enabled: true,
+	}}
+	srv := newTestServer(t, fs)
+	defer srv.Close()
+	client := loggedInClient(t, srv)
+
+	resp, err := client.Post(srv.URL+"/alerts/1/test", "application/x-www-form-urlencoded", nil)
+	if err != nil {
+		t.Fatalf("POST test: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "delivered") {
+		t.Errorf("fragment missing 'delivered':\n%s", body)
+	}
+}
+
+func TestAlertsTest_DeliveryFails_RendersFailed(t *testing.T) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer receiver.Close()
+
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: receiver.URL, Enabled: true,
+	}}
+	srv := newTestServer(t, fs)
+	defer srv.Close()
+	client := loggedInClient(t, srv)
+
+	resp, err := client.Post(srv.URL+"/alerts/1/test", "application/x-www-form-urlencoded", nil)
+	if err != nil {
+		t.Fatalf("POST test: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "failed") {
+		t.Errorf("fragment missing 'failed':\n%s", body)
+	}
+}
+
+func TestAlertsPage_Unauthenticated_RedirectsToLogin(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(t, fs)
+	defer srv.Close()
+
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(srv.URL + "/alerts")
+	if err != nil {
+		t.Fatalf("GET /alerts: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", resp.StatusCode)
 	}
 }
 

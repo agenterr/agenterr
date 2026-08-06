@@ -1,0 +1,53 @@
+{{define "title"}}alerts — agenterr{{end}}
+
+{{define "content"}}
+<div class="panel-header">
+  <h1>Alert rules</h1>
+</div>
+<table class="data-table">
+  <thead>
+    <tr>
+      <th>name</th>
+      <th>kind</th>
+      <th>scope</th>
+      <th>enabled</th>
+      <th>last fired</th>
+      <th>last error</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {{if not .Rules}}
+    <tr class="empty-row"><td colspan="7">
+      <p class="empty-state">No alert rules yet. Create one via the REST API or MCP — this page is a verification surface, not a form.</p>
+    </td></tr>
+  {{else}}
+    {{range .Rules}}
+    <tr class="alert-rule-row">
+      <td class="mono">{{.Name}}</td>
+      <td class="mono">{{.Kind}}</td>
+      <td class="muted mono">{{.ScopeSummary}}</td>
+      <td>{{if .Enabled}}<span class="status-chip status-enabled">enabled</span>{{else}}<span class="status-chip status-disabled">disabled</span>{{end}}</td>
+      <td class="muted" title="{{fmtTime .LastFired}}">{{if .LastFired.IsZero}}never{{else}}{{relTime .LastFired}}{{end}}</td>
+      <td class="muted mono truncate">{{.LastError}}</td>
+      <td class="row-actions">
+        <span id="test-result-{{.ID}}">
+          <button class="btn-secondary mono" hx-post="/alerts/{{.ID}}/test" hx-target="#test-result-{{.ID}}" hx-swap="outerHTML">$ test</button>
+        </span>
+      </td>
+    </tr>
+    {{end}}
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{define "test-result"}}
+<span id="test-result-{{.ID}}">
+{{if .Delivered}}
+  <span class="status-chip status-delivered">delivered</span>
+{{else}}
+  <span class="status-chip status-failed" title="{{.Error}}">failed</span>
+{{end}}
+</span>
+{{end}}

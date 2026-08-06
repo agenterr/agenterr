@@ -240,6 +240,9 @@ input:focus, select:focus {
 .status-chip.status-open { color: var(--sev-error); }
 .status-chip.status-resolved { color: var(--ok); }
 .status-chip.status-ignored { color: var(--text-muted); }
+.status-chip.status-enabled, .status-chip.status-delivered { color: var(--ok); }
+.status-chip.status-disabled { color: var(--text-muted); }
+.status-chip.status-failed { color: var(--sev-error); }
 
 /* ---------- issue detail ---------- */
 .meta { display: flex; gap: 14px; align-items: center; margin-bottom: 12px; }

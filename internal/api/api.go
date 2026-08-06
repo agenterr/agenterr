@@ -7,6 +7,7 @@ package api
 import (
 	"net/http"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/api/handlers"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/rules"
@@ -20,19 +21,23 @@ type API struct {
 	logs       *handlers.Logs
 	stats      *handlers.Stats
 	noiseRules *handlers.NoiseRules
+	alertRules *handlers.AlertRules
 }
 
-// New constructs an API reading via reader and administering via admin.
-// nr and engine back the noise-rule management/report routes: nr for
-// plain reads, engine for every mutation so the pipeline's cached view
-// of rules stays fresh (see internal/rules.Engine).
-func New(reader store.Reader, admin store.Admin, nr store.NoiseRules, engine *rules.Engine) *API {
+// New constructs an API reading via reader and administering via admin. nr
+// and rulesEngine back the noise-rule management/report routes: nr for
+// plain reads, rulesEngine for every mutation so the pipeline's cached
+// view of noise rules stays fresh (see internal/rules.Engine). ar and
+// alertsEngine are the alert-rule analog (see internal/alerts.Engine),
+// which additionally backs TestFire.
+func New(reader store.Reader, admin store.Admin, nr store.NoiseRules, rulesEngine *rules.Engine, ar store.AlertRules, alertsEngine *alerts.Engine) *API {
 	return &API{
-		projects:   &handlers.Projects{Admin: admin, Engine: engine},
+		projects:   &handlers.Projects{Admin: admin, Engine: rulesEngine},
 		issues:     &handlers.Issues{Reader: reader, Admin: admin},
 		logs:       &handlers.Logs{Reader: reader},
 		stats:      &handlers.Stats{Reader: reader, NR: nr},
-		noiseRules: &handlers.NoiseRules{NR: nr, Reader: reader, Engine: engine},
+		noiseRules: &handlers.NoiseRules{NR: nr, Reader: reader, Engine: rulesEngine},
+		alertRules: &handlers.AlertRules{AR: ar, Engine: alertsEngine},
 	}
 }
 
@@ -73,4 +78,9 @@ func (a *API) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
 	mux.Handle("POST /api/v1/projects/{id}/noise-rules", wrap(a.noiseRules.Create))
 	mux.Handle("DELETE /api/v1/noise-rules/{id}", wrap(a.noiseRules.Delete))
 	mux.Handle("GET /api/v1/noise-report", wrap(a.noiseRules.Report))
+
+	mux.Handle("GET /api/v1/projects/{id}/alert-rules", wrap(a.alertRules.List))
+	mux.Handle("POST /api/v1/projects/{id}/alert-rules", wrap(a.alertRules.Create))
+	mux.Handle("DELETE /api/v1/alert-rules/{id}", wrap(a.alertRules.Delete))
+	mux.Handle("POST /api/v1/alert-rules/{id}/test", wrap(a.alertRules.Test))
 }

@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/api"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/config"
@@ -47,6 +48,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 
 	pipe := pipeline.New(db, core.DefaultGrouper{}, pipeline.NopNotifier{}, pipeline.NopDropper{}, pipeline.Options{})
 	engine := rules.New(db, db)
+	alertsEngine := alerts.New(db, nil)
 
 	deps := Deps{
 		Cfg:       config.Config{ListenAddr: ":0"},
@@ -54,9 +56,9 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 		Pipe:      pipe,
 		Ingesters: []ingest.Ingester{jsonapi.New(pipe, 0), otlp.New(pipe, 0)},
 		Auth:      a,
-		API:       api.New(db, db, db, engine),
+		API:       api.New(db, db, db, engine, db, alertsEngine),
 		MCP:       mcp.New(db, db, db, engine),
-		Web:       web.New(db, db, a),
+		Web:       web.New(db, db, a, db, alertsEngine),
 	}
 	return deps, db
 }

@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"testing"
 	"time"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/rules"
@@ -41,6 +43,10 @@ type fakeStore struct {
 	nextRuleID int64
 	dropCalls  []map[int64]int64
 
+	alertRules      map[int64]store.AlertRuleRow
+	nextAlertRuleID int64
+	recordCalls     []recordAlertCall
+
 	lastIssueFilter store.IssueFilter
 	lastLogFilter   store.LogFilter
 	lastStatsFilter store.StatsFilter
@@ -59,7 +65,67 @@ func newFakeStore() *fakeStore {
 		issues:      make(map[int64]core.Issue),
 		issueEvents: make(map[int64][]core.Event),
 		rules:       make(map[int64]store.NoiseRuleRow),
+		alertRules:  make(map[int64]store.AlertRuleRow),
 	}
+}
+
+type recordAlertCall struct {
+	id      int64
+	firedAt time.Time
+	lastErr string
+}
+
+func (f *fakeStore) AlertRules(_ context.Context, projectID int64) ([]store.AlertRuleRow, error) {
+	ids := make([]int64, 0, len(f.alertRules))
+	for id := range f.alertRules {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var out []store.AlertRuleRow
+	for _, id := range ids {
+		row := f.alertRules[id]
+		if projectID == 0 || row.ProjectID == projectID {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertAlertRule(_ context.Context, r core.AlertRule) (store.AlertRuleRow, error) {
+	if r.ID == 0 {
+		f.nextAlertRuleID++
+		r.ID = f.nextAlertRuleID
+	} else if _, ok := f.alertRules[r.ID]; !ok {
+		return store.AlertRuleRow{}, store.ErrNotFound
+	}
+	row := store.AlertRuleRow{AlertRule: r}
+	if existing, ok := f.alertRules[r.ID]; ok {
+		row.LastFired = existing.LastFired
+		row.LastError = existing.LastError
+		row.CreatedAt = existing.CreatedAt
+	}
+	f.alertRules[r.ID] = row
+	return row, nil
+}
+
+func (f *fakeStore) DeleteAlertRule(_ context.Context, id int64) error {
+	if _, ok := f.alertRules[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.alertRules, id)
+	return nil
+}
+
+func (f *fakeStore) RecordAlertResult(_ context.Context, id int64, firedAt time.Time, lastError string) error {
+	f.recordCalls = append(f.recordCalls, recordAlertCall{id: id, firedAt: firedAt, lastErr: lastError})
+	row, ok := f.alertRules[id]
+	if !ok {
+		return nil
+	}
+	row.LastFired = firedAt
+	row.LastError = lastError
+	f.alertRules[id] = row
+	return nil
 }
 
 func (f *fakeStore) Issues(_ context.Context, filter store.IssueFilter) ([]core.Issue, error) {
@@ -222,8 +288,15 @@ func newTestServer(fs *fakeStore) *httptest.Server {
 	}{projectID: 0, kind: "admin"}
 
 	a := auth.New(fs, []byte{})
-	engine := rules.New(fs, fs)
-	api := New(fs, fs, fs, engine)
+	rulesEngine := rules.New(fs, fs)
+	alertsEngine := alerts.New(fs, nil)
+	// Load once up front so rules the test seeded directly into fs (rather
+	// than via the Create endpoint) are visible to List/Delete/Test —
+	// mirrors how a real boot loads the store before serving traffic.
+	if err := alertsEngine.Load(context.Background()); err != nil {
+		panic(err)
+	}
+	api := New(fs, fs, fs, rulesEngine, fs, alertsEngine)
 	mux := http.NewServeMux()
 	api.Mount(mux, a)
 	return httptest.NewServer(mux)
@@ -1386,5 +1459,398 @@ func TestProjects_Patch_UnknownProject_Returns404(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAlertRules_CreateListDelete_RoundTrip(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"errs","kind":"new_issue","url":"https://example.com/hook","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		ID   int64  `json:"id"`
+		Kind string `json:"kind"`
+		URL  string `json:"url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.ID == 0 || created.Kind != "new_issue" || created.URL != "https://example.com/hook" {
+		t.Errorf("created = %+v", created)
+	}
+
+	listResp := doReq(t, srv, http.MethodGet, "/api/v1/projects/1/alert-rules", validAPIKey, nil)
+	defer func() { _ = listResp.Body.Close() }()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", listResp.StatusCode)
+	}
+	var listed []struct {
+		ID        int64   `json:"id"`
+		LastFired *string `json:"last_fired"`
+		LastError string  `json:"last_error"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("listed = %+v, want single rule with id %d", listed, created.ID)
+	}
+	if listed[0].LastFired != nil {
+		t.Errorf("LastFired = %v, want nil (never fired)", listed[0].LastFired)
+	}
+
+	delResp := doReq(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/alert-rules/%d", created.ID), validAPIKey, nil)
+	defer func() { _ = delResp.Body.Close() }()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204", delResp.StatusCode)
+	}
+
+	listResp2 := doReq(t, srv, http.MethodGet, "/api/v1/projects/1/alert-rules", validAPIKey, nil)
+	defer func() { _ = listResp2.Body.Close() }()
+	var listed2 []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(listResp2.Body).Decode(&listed2); err != nil {
+		t.Fatalf("decode list2: %v", err)
+	}
+	if len(listed2) != 0 {
+		t.Errorf("listed2 = %+v, want empty after delete", listed2)
+	}
+}
+
+func TestAlertRules_UnknownKind_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"x","kind":"bogus","url":"https://example.com/hook"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAlertRules_BadURL_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	tests := []string{
+		`{"name":"x","kind":"new_issue","url":""}`,
+		`{"name":"x","kind":"new_issue","url":"not-a-url"}`,
+		`{"name":"x","kind":"new_issue","url":"ftp://example.com/hook"}`,
+	}
+	for _, body := range tests {
+		resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey, []byte(body))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400", body, resp.StatusCode)
+		}
+	}
+	if len(fs.alertRules) != 0 {
+		t.Errorf("a rule was stored despite invalid url")
+	}
+}
+
+func TestAlertRules_ThresholdMissingParams_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	tests := []string{
+		`{"name":"x","kind":"threshold","url":"https://example.com/hook","n":0,"window_minutes":5}`,
+		`{"name":"x","kind":"threshold","url":"https://example.com/hook","n":3,"window_minutes":0}`,
+	}
+	for _, body := range tests {
+		resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey, []byte(body))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400", body, resp.StatusCode)
+		}
+	}
+	if len(fs.alertRules) != 0 {
+		t.Errorf("a rule was stored despite missing threshold params")
+	}
+}
+
+func TestAlertRules_NegativeCooldown_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"x","kind":"new_issue","url":"https://example.com/hook","cooldown_seconds":-1}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAlertRules_BadMinSeverity_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"x","kind":"new_issue","url":"https://example.com/hook","min_severity":"wrn"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAlertRules_TooManyHeaders_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	headers := make(map[string]string, 33)
+	for i := 0; i < 33; i++ {
+		headers[fmt.Sprintf("H%d", i)] = "v"
+	}
+	buf, _ := json.Marshal(map[string]any{
+		"name": "x", "kind": "new_issue", "url": "https://example.com/hook", "headers": headers,
+	})
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey, buf)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAlertRules_HeadersTooLarge_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	big := make([]byte, 4100)
+	for i := range big {
+		big[i] = 'a'
+	}
+	buf, _ := json.Marshal(map[string]any{
+		"name": "x", "kind": "new_issue", "url": "https://example.com/hook",
+		"headers": map[string]string{"X-Big": string(big)},
+	})
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey, buf)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAlertRules_Create_OmittedEnabled_DefaultsTrue(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"name":"x","kind":"new_issue","url":"https://example.com/hook"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !created.Enabled {
+		t.Errorf("created.Enabled = false, want true (omitted enabled must default true on create)")
+	}
+}
+
+func TestAlertRules_Update_OmittedEnabled_PreservesDisabled(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: false,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"id":1,"name":"changed","kind":"new_issue","url":"https://example.com/hook"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Enabled bool   `json:"enabled"`
+		Name    string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Enabled {
+		t.Errorf("got.Enabled = true, want false (omitted enabled on update must preserve current state)")
+	}
+	if got.Name != "changed" {
+		t.Errorf("got.Name = %q, want changed", got.Name)
+	}
+}
+
+func TestAlertRules_Delete_CrossProject_Returns404(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 2, Name: "x", Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: true,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodDelete, "/api/v1/alert-rules/1", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if _, ok := fs.alertRules[1]; !ok {
+		t.Errorf("rule was deleted despite cross-project caller")
+	}
+}
+
+func TestAlertRules_Create_UpdateCrossProjectRule_Returns404(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 2, Name: "x", Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: true,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/alert-rules", validAPIKey,
+		[]byte(`{"id":1,"name":"y","kind":"new_issue","url":"https://example.com/hook","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if fs.alertRules[1].Name != "x" {
+		t.Errorf("rule was mutated despite cross-project caller: %+v", fs.alertRules[1])
+	}
+}
+
+func TestAlertRules_List_APIKey_IgnoresPathProject(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{ID: 1, ProjectID: 1, Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: true}}
+	fs.alertRules[2] = store.AlertRuleRow{AlertRule: core.AlertRule{ID: 2, ProjectID: 2, Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: true}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/projects/2/alert-rules", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != 1 {
+		t.Errorf("got = %+v, want only project 1's rule", got)
+	}
+}
+
+func TestAlertRules_Test_HappyPath_Returns200Delivered(t *testing.T) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer receiver.Close()
+
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: receiver.URL, Enabled: true,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/alert-rules/1/test", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	var got struct {
+		Delivered bool `json:"delivered"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Delivered {
+		t.Errorf("delivered = false, want true")
+	}
+}
+
+func TestAlertRules_Test_DeliveryFails_Returns502(t *testing.T) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer receiver.Close()
+
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 1, Name: "x", Kind: core.AlertNewIssue, URL: receiver.URL, Enabled: true,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/alert-rules/1/test", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	var got struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error == "" {
+		t.Errorf("expected non-empty delivery error message")
+	}
+}
+
+func TestAlertRules_Test_CrossProject_Returns404(t *testing.T) {
+	fs := newFakeStore()
+	fs.nextAlertRuleID = 1
+	fs.alertRules[1] = store.AlertRuleRow{AlertRule: core.AlertRule{
+		ID: 1, ProjectID: 2, Name: "x", Kind: core.AlertNewIssue, URL: "https://example.com/hook", Enabled: true,
+	}}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/alert-rules/1/test", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAlertRules_Test_UnknownID_Returns502(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	// adminKey is unscoped: an unknown rule ID falls through the
+	// ownership check straight to Engine.TestFire, which reports the
+	// "not found" as a delivery error (502), consistent with TestFire's
+	// contract of always returning a delivery error rather than a typed
+	// not-found.
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/alert-rules/999/test", adminKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }

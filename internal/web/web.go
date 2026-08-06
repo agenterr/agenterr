@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net/http"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/store"
 	"github.com/agenterr/agenterr/internal/web/handlers"
@@ -28,19 +29,23 @@ type Web struct {
 	issues   *handlers.Issues
 	search   *handlers.Search
 	settings *handlers.Settings
+	alerts   *handlers.Alerts
 	login    *handlers.Login
 	auth     auth.SessionAuth
 }
 
 // New constructs a Web reading via r, administering via a, and
-// authenticating the admin session via s. Templates are parsed once here,
-// at startup — not per-request.
-func New(r store.Reader, a store.Admin, s auth.SessionAuth) *Web {
+// authenticating the admin session via s. ar and engine back the alerts
+// status page: ar for the plain list read, engine for TestFire (see
+// internal/alerts.Engine). Templates are parsed once here, at startup —
+// not per-request.
+func New(r store.Reader, a store.Admin, s auth.SessionAuth, ar store.AlertRules, engine *alerts.Engine) *Web {
 	tpl := parseTemplates()
 	return &Web{
 		issues:   handlers.NewIssues(r, a, tpl.issuesList, tpl.issueDetail),
 		search:   handlers.NewSearch(r, tpl.search),
 		settings: handlers.NewSettings(a, tpl.settings),
+		alerts:   handlers.NewAlerts(ar, engine, tpl.alerts),
 		login:    handlers.NewLogin(s, tpl.login),
 		auth:     s,
 	}
@@ -55,6 +60,7 @@ type templates struct {
 	issueDetail *template.Template
 	search      *template.Template
 	settings    *template.Template
+	alerts      *template.Template
 	login       *template.Template // standalone: defines its own minimal "layout"
 }
 
@@ -74,6 +80,7 @@ func parseTemplates() *templates {
 		issueDetail: page("issue.html"),
 		search:      page("search.html"),
 		settings:    page("settings.html"),
+		alerts:      page("alerts.html"),
 		login:       login,
 	}
 }
@@ -116,4 +123,7 @@ func (web *Web) Mount(mux *http.ServeMux) {
 	mux.Handle("GET /settings", protect(http.HandlerFunc(web.settings.Page)))
 	mux.Handle("POST /settings/projects", protect(http.HandlerFunc(web.settings.CreateProject)))
 	mux.Handle("POST /settings/projects/{id}/keys", protect(http.HandlerFunc(web.settings.MintKey)))
+
+	mux.Handle("GET /alerts", protect(http.HandlerFunc(web.alerts.Page)))
+	mux.Handle("POST /alerts/{id}/test", protect(http.HandlerFunc(web.alerts.Test)))
 }
