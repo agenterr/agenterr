@@ -128,10 +128,10 @@ func buildSparkline(days []store.DayCount) string {
 	if len(days) == 0 {
 		return ""
 	}
-	var max int64 = 1
+	var maxEvents int64 = 1
 	for _, d := range days {
-		if d.Events > max {
-			max = d.Events
+		if d.Events > maxEvents {
+			maxEvents = d.Events
 		}
 	}
 	n := len(days)
@@ -142,7 +142,7 @@ func buildSparkline(days []store.DayCount) string {
 	pts := make([]string, n)
 	for i, d := range days {
 		x := float64(i) / float64(denom) * 100
-		y := 20 - (float64(d.Events)/float64(max))*20
+		y := 20 - (float64(d.Events)/float64(maxEvents))*20
 		pts[i] = fmt.Sprintf("%.1f,%.1f", x, y)
 	}
 	return strings.Join(pts, " ")

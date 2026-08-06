@@ -9,6 +9,7 @@ import (
 // Severity represents the severity level of a log entry.
 type Severity int8
 
+// Severity levels, ordered from least to most severe.
 const (
 	SeverityTrace Severity = iota
 	SeverityDebug
@@ -79,6 +80,7 @@ func (s Severity) String() string {
 // IssueStatus represents the status of an issue.
 type IssueStatus string
 
+// Issue statuses.
 const (
 	StatusOpen     IssueStatus = "open"
 	StatusResolved IssueStatus = "resolved"

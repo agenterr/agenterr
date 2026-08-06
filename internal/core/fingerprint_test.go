@@ -40,7 +40,13 @@ func TestFingerprintGroupsVariants(t *testing.T) {
 
 func TestFingerprintPrecedence(t *testing.T) {
 	override := Log{ProjectID: 1, Attrs: map[string]string{"agenterr.fingerprint": "custom-x"}}
-	if Fingerprint(override) != Fingerprint(override) || Fingerprint(override) == Fingerprint(Log{ProjectID: 1}) {
+	got := Fingerprint(override)
+	gotAgain := Fingerprint(override)
+	withoutOverride := Fingerprint(Log{ProjectID: 1})
+	if got != gotAgain {
+		t.Error("Fingerprint must be deterministic for the same input")
+	}
+	if got == withoutOverride {
 		t.Error("explicit agenterr.fingerprint must dominate")
 	}
 	exc := Log{ProjectID: 1, Severity: SeverityError, Body: "totally different text each time 12345",
@@ -80,7 +86,7 @@ func TestFingerprintCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open corpus: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	groupToFP := map[string]string{}
 	fpToGroup := map[string]string{}

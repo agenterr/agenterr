@@ -19,7 +19,7 @@ func NewLogin(a auth.SessionAuth, tpl *template.Template) *Login {
 }
 
 // Page handles GET /login.
-func (h *Login) Page(w http.ResponseWriter, r *http.Request) {
+func (h *Login) Page(w http.ResponseWriter, _ *http.Request) {
 	renderFull(w, h.Tpl, map[string]any{})
 }
 

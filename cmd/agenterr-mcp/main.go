@@ -120,7 +120,7 @@ func run(ctx context.Context, url, key string, stdin io.ReadCloser, stdout io.Wr
 	// Runs on every return path below, so ctx cancellation, a local.Run
 	// error, and clean client disconnect all end with the remote session
 	// explicitly closed rather than abandoned to an idle timeout.
-	defer remote.Close()
+	defer func() { _ = remote.Close() }()
 
 	local := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "agenterr-mcp-proxy", Version: "0.1.0"}, &mcpsdk.ServerOptions{
 		HasTools: true, // no local tools registered — every one lives remotely

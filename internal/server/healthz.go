@@ -32,7 +32,9 @@ func Healthz(st store.Store, p *pipeline.Pipeline) http.Handler {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			// Never include err.Error(): it may carry a filesystem path or
 			// driver detail an external health-check consumer shouldn't see.
-			json.NewEncoder(w).Encode(map[string]string{
+			// Encode error is unactionable: headers are already committed by
+			// WriteHeader above, so there is nothing left to do but drop it.
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"status": "degraded",
 				"db":     "error",
 			})
@@ -40,7 +42,7 @@ func Healthz(st store.Store, p *pipeline.Pipeline) http.Handler {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":         "ok",
 			"pipeline_depth": p.Pending(),
 			"db":             "ok",

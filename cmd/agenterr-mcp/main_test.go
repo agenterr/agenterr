@@ -36,43 +36,43 @@ type fakeStore struct {
 	projects []core.Project
 }
 
-func (f *fakeStore) Issues(ctx context.Context, filt store.IssueFilter) ([]core.Issue, error) {
+func (f *fakeStore) Issues(_ context.Context, _ store.IssueFilter) ([]core.Issue, error) {
 	return nil, nil
 }
 
-func (f *fakeStore) Issue(ctx context.Context, id int64) (core.Issue, []core.Event, error) {
+func (f *fakeStore) Issue(_ context.Context, _ int64) (core.Issue, []core.Event, error) {
 	return core.Issue{}, nil, store.ErrNotFound
 }
 
-func (f *fakeStore) SearchLogs(ctx context.Context, filt store.LogFilter) ([]core.Log, error) {
+func (f *fakeStore) SearchLogs(_ context.Context, _ store.LogFilter) ([]core.Log, error) {
 	return nil, nil
 }
 
-func (f *fakeStore) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, error) {
+func (f *fakeStore) LogContext(_ context.Context, _ int64, _ int) ([]core.Log, error) {
 	return nil, nil
 }
 
-func (f *fakeStore) Stats(ctx context.Context, filt store.StatsFilter) (store.Stats, error) {
+func (f *fakeStore) Stats(_ context.Context, _ store.StatsFilter) (store.Stats, error) {
 	return store.Stats{}, nil
 }
 
-func (f *fakeStore) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeStore) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	return core.Project{}, errors.New("unused")
 }
 
-func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
+func (f *fakeStore) Projects(_ context.Context) ([]core.Project, error) {
 	return f.projects, nil
 }
 
-func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeStore) SetIssueStatus(_ context.Context, _ int64, _ core.IssueStatus) error {
 	return errors.New("unused")
 }
 
-func (f *fakeStore) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeStore) MintKey(_ context.Context, _ int64, _ string) (string, error) {
 	return "", errors.New("unused")
 }
 
-func (f *fakeStore) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeStore) LookupKey(_ context.Context, plaintext string) (int64, string, error) {
 	e, ok := f.keys[plaintext]
 	if !ok {
 		return 0, "", store.ErrNotFound
@@ -122,7 +122,7 @@ func TestProxy_ListToolsAndCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	tools, err := cs.ListTools(ctx, nil)
 	if err != nil {
@@ -151,8 +151,8 @@ func TestProxy_ListToolsAndCallTool(t *testing.T) {
 		t.Fatalf("want non-empty text content, got %#v", res.Content)
 	}
 
-	cs.Close()
-	clientW.Close()
+	_ = cs.Close()
+	_ = clientW.Close()
 	select {
 	case err := <-runErr:
 		if err != nil {
@@ -189,7 +189,7 @@ func TestProxy_ContextCancellation(t *testing.T) {
 
 	stdinR, stdinW := io.Pipe()
 	_, stdoutW := io.Pipe()
-	defer stdinW.Close()
+	defer func() { _ = stdinW.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -240,7 +240,7 @@ func TestProxy_RemoteErrorPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	defer cs.Close()
+	defer func() { _ = cs.Close() }()
 
 	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name:      "does_not_exist",
@@ -259,8 +259,8 @@ func TestProxy_RemoteErrorPropagates(t *testing.T) {
 		t.Fatalf("got %d tools after a remote error, want 8", len(tools.Tools))
 	}
 
-	cs.Close()
-	clientW.Close()
+	_ = cs.Close()
+	_ = clientW.Close()
 	select {
 	case err := <-runErr:
 		if err != nil {

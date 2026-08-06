@@ -48,7 +48,10 @@ func (db *DB) WriteBatch(ctx context.Context, entries []store.Entry) error {
 	if err != nil {
 		return fmt.Errorf("sqlite: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	// Rollback error is unactionable: after a successful Commit it is
+	// always sql.ErrTxDone, and on any earlier failure we already return
+	// the real error.
+	defer func() { _ = tx.Rollback() }()
 
 	for _, e := range entries {
 		attrsJSON, err := json.Marshal(e.Log.Attrs)
@@ -161,7 +164,7 @@ func (db *DB) LookupKey(ctx context.Context, plaintext string) (int64, string, e
 	if err != nil {
 		return 0, "", fmt.Errorf("sqlite: query keys: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type candidate struct {
 		projectID sql.NullInt64

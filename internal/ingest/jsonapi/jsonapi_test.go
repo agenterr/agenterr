@@ -42,17 +42,17 @@ type fakeAdmin struct {
 	}
 }
 
-func (f *fakeAdmin) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeAdmin) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	panic("unused")
 }
-func (f *fakeAdmin) Projects(ctx context.Context) ([]core.Project, error) { panic("unused") }
-func (f *fakeAdmin) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeAdmin) Projects(_ context.Context) ([]core.Project, error) { panic("unused") }
+func (f *fakeAdmin) SetIssueStatus(_ context.Context, _ int64, _ core.IssueStatus) error {
 	panic("unused")
 }
-func (f *fakeAdmin) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeAdmin) MintKey(_ context.Context, _ int64, _ string) (string, error) {
 	panic("unused")
 }
-func (f *fakeAdmin) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeAdmin) LookupKey(_ context.Context, plaintext string) (int64, string, error) {
 	e, ok := f.keys[plaintext]
 	if !ok {
 		return 0, "", store.ErrNotFound
@@ -64,6 +64,13 @@ const testProjectID int64 = 42
 const validKey = "agt_ingest_valid"
 
 func newTestServer(sink *fakeSink) *httptest.Server {
+	return newTestServerMaxBody(sink, 0)
+}
+
+// newTestServerMaxBody is newTestServer but with an explicit maxBody, so
+// tests can exercise the 413 path with a tiny limit rather than the real
+// (5MB) default.
+func newTestServerMaxBody(sink *fakeSink, maxBody int64) *httptest.Server {
 	admin := &fakeAdmin{keys: map[string]struct {
 		projectID int64
 		kind      string
@@ -73,7 +80,7 @@ func newTestServer(sink *fakeSink) *httptest.Server {
 	}}
 	a := auth.New(admin, []byte{})
 
-	h := New(sink)
+	h := New(sink, maxBody)
 	mux := http.NewServeMux()
 	h.Mount(mux, a)
 	return httptest.NewServer(mux)
@@ -104,7 +111,7 @@ func TestIngest_HappyPath(t *testing.T) {
 	before := time.Now().UTC()
 	body := `[{"severity":"error","message":"boom","attributes":{"k":"v"}}]`
 	resp := post(t, srv, validKey, []byte(body))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	after := time.Now().UTC()
 
 	if resp.StatusCode != http.StatusAccepted {
@@ -157,7 +164,7 @@ func TestIngest_FieldTolerance_MessageAliases(t *testing.T) {
 			defer srv.Close()
 
 			resp := post(t, srv, validKey, []byte(tt.body))
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusAccepted {
 				t.Fatalf("status = %d, want 202", resp.StatusCode)
 			}
@@ -179,7 +186,7 @@ func TestIngest_FieldTolerance_MessagePriority(t *testing.T) {
 
 	body := `[{"message":"from-message","msg":"from-msg","body":"from-body"}]`
 	resp := post(t, srv, validKey, []byte(body))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
 	}
@@ -215,7 +222,7 @@ func TestIngest_FieldTolerance_Timestamps(t *testing.T) {
 			defer srv.Close()
 
 			resp := post(t, srv, validKey, []byte(tt.body))
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusAccepted {
 				t.Fatalf("status = %d, want 202", resp.StatusCode)
 			}
@@ -232,7 +239,7 @@ func TestIngest_SingleObject_BecomesBatchOfOne(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, validKey, []byte(`{"message":"solo"}`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
 	}
@@ -250,7 +257,7 @@ func TestIngest_EmptyArray_NoOp(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, validKey, []byte(`[]`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
 	}
@@ -274,7 +281,7 @@ func TestIngest_SinkFull_Returns429(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, validKey, []byte(`[{"message":"m"}]`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", resp.StatusCode)
 	}
@@ -293,7 +300,30 @@ func TestIngest_OversizeBody_Returns413(t *testing.T) {
 	body := `[{"message":"` + huge + `"}]`
 
 	resp := post(t, srv, validKey, []byte(body))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+// TestIngest_ConfiguredMaxBody_Returns413 proves the maxBody constructor
+// parameter (wired from cfg.MaxBodyBytes in internal/app) is actually
+// enforced, not just accepted and ignored: a body a few bytes over a tiny
+// configured limit gets rejected even though it is nowhere near the
+// package's ingest.MaxBody default.
+func TestIngest_ConfiguredMaxBody_Returns413(t *testing.T) {
+	sink := &fakeSink{}
+	const tinyMaxBody = 20
+	srv := newTestServerMaxBody(sink, tinyMaxBody)
+	defer srv.Close()
+
+	body := `[{"message":"this is over twenty bytes"}]`
+	if len(body) <= tinyMaxBody {
+		t.Fatalf("test body (%d bytes) must exceed tinyMaxBody (%d bytes)", len(body), tinyMaxBody)
+	}
+
+	resp := post(t, srv, validKey, []byte(body))
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", resp.StatusCode)
 	}
@@ -305,7 +335,7 @@ func TestIngest_MalformedJSON_Returns400(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, validKey, []byte(`{"not":"valid`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -325,7 +355,7 @@ func TestIngest_WrongMethod_Returns405(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", resp.StatusCode)
@@ -338,7 +368,7 @@ func TestIngest_WrongKindKey_Returns401(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, "agt_api_valid", []byte(`[{"message":"m"}]`))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}

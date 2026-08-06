@@ -87,7 +87,7 @@ func TestAppStartsAndServes(t *testing.T) {
 		resp, err := http.Get(url)
 		if err == nil {
 			b, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if readErr == nil && resp.StatusCode == http.StatusOK {
 				body = b
 				break
@@ -130,7 +130,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	fn()
 
 	os.Stdout = orig
-	w.Close()
+	_ = w.Close()
 	out, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatalf("read captured stdout: %v", err)
@@ -234,7 +234,7 @@ func loginAs(addr, password string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusSeeOther {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("login status = %d, want 303 (body=%s)", resp.StatusCode, body)
@@ -267,7 +267,7 @@ func countAdminKeys(t *testing.T, path string) int {
 	if err != nil {
 		t.Fatalf("sql.Open(%s): %v", path, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	var n int
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM keys WHERE kind = 'admin'`).Scan(&n); err != nil {

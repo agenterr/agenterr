@@ -20,3 +20,20 @@ linters:
           deny:
             - pkg: "go.uber.org/fx"
               desc: "fx is contained to internal/app"
+  exclusions:
+    rules:
+      # Table-driven tests and multi-assertion test helpers routinely land
+      # above the gocyclo threshold without being hard to follow — the
+      # complexity is a flat list of cases/checks, not nested branching.
+      # Production code still gets refactored, not excluded (see internal/config
+      # and internal/ingest/otlp).
+      - path: "_test\\.go"
+        linters:
+          - gocyclo
+      # storetest/suite.go is shared test infrastructure (a conformance
+      # suite run against every store.Store backend) that can't use the
+      # _test.go suffix because it's imported as a package by real test
+      # files in other packages. Same reasoning as above.
+      - path: "internal/store/storetest/suite\\.go"
+        linters:
+          - gocyclo

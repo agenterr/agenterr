@@ -46,7 +46,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 
 // mustProject creates a project via the store's Admin interface and fails
 // the test immediately on error.
-func mustProject(t *testing.T, ctx context.Context, s store.Store) core.Project {
+func mustProject(ctx context.Context, t *testing.T, s store.Store) core.Project {
 	t.Helper()
 	p, err := s.CreateProject(ctx, "test-project", 30)
 	if err != nil {
@@ -89,7 +89,7 @@ func eventEntry(projectID int64, severity core.Severity, body, fingerprint, titl
 
 // findIssue looks up an issue by fingerprint via the Issues listing API and
 // fails the test if none matches.
-func findIssue(t *testing.T, ctx context.Context, s store.Store, projectID int64, fingerprint string) core.Issue {
+func findIssue(ctx context.Context, t *testing.T, s store.Store, projectID int64, fingerprint string) core.Issue {
 	t.Helper()
 	issues, err := s.Issues(ctx, store.IssueFilter{ProjectID: projectID})
 	if err != nil {
@@ -109,7 +109,7 @@ func findIssue(t *testing.T, ctx context.Context, s store.Store, projectID int64
 func testWriteBatchReadBack(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	e := entry(p.ID, core.SeverityWarn, "disk usage high", "web", baseTime)
 	e.Log.Release = "v1.2.3"
@@ -167,7 +167,7 @@ func testWriteBatchReadBack(t *testing.T, open func(t *testing.T) store.Store) {
 func testWriteBatchCreatesOpenIssue(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	e := eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)
 	if err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
@@ -205,7 +205,7 @@ func testWriteBatchCreatesOpenIssue(t *testing.T, open func(t *testing.T) store.
 func testWriteBatchIncrementsExisting(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	t1 := baseTime
 	t2 := baseTime.Add(time.Hour)
@@ -239,12 +239,12 @@ func testWriteBatchIncrementsExisting(t *testing.T, open func(t *testing.T) stor
 func testWriteBatchRegressionReopens(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	if err := s.WriteBatch(ctx, []store.Entry{eventEntry(p.ID, core.SeverityError, "boom", "f1", "boom", baseTime)}); err != nil {
 		t.Fatalf("WriteBatch #1: %v", err)
 	}
-	iss := findIssue(t, ctx, s, p.ID, "f1")
+	iss := findIssue(ctx, t, s, p.ID, "f1")
 
 	if err := s.SetIssueStatus(ctx, iss.ID, core.StatusResolved); err != nil {
 		t.Fatalf("SetIssueStatus resolved: %v", err)
@@ -276,7 +276,7 @@ func testWriteBatchRegressionReopens(t *testing.T, open func(t *testing.T) store
 func testWriteBatchEventSampleCap(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	const total = 60
 	for i := 0; i < total; i++ {
@@ -287,7 +287,7 @@ func testWriteBatchEventSampleCap(t *testing.T, open func(t *testing.T) store.St
 		}
 	}
 
-	iss := findIssue(t, ctx, s, p.ID, "f1")
+	iss := findIssue(ctx, t, s, p.ID, "f1")
 	if iss.Count != total {
 		t.Fatalf("Count = %d, want %d", iss.Count, total)
 	}
@@ -330,20 +330,20 @@ func testWriteBatchEventSampleCap(t *testing.T, open func(t *testing.T) store.St
 func testIssuesFilterByStatusEnvProject(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p1 := mustProject(t, ctx, s)
+	p1 := mustProject(ctx, t, s)
 	p2, err := s.CreateProject(ctx, "second-project", 30)
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
 	// p1, prod, open — the target match.
-	writeIssue(t, ctx, s, p1.ID, "prod", "f1", baseTime)
+	writeIssue(ctx, t, s, p1.ID, "prod", "f1", baseTime)
 	// p1, staging, open — wrong environment.
-	writeIssue(t, ctx, s, p1.ID, "staging", "f2", baseTime)
+	writeIssue(ctx, t, s, p1.ID, "staging", "f2", baseTime)
 	// p2, prod, open — wrong project.
-	writeIssue(t, ctx, s, p2.ID, "prod", "f3", baseTime)
+	writeIssue(ctx, t, s, p2.ID, "prod", "f3", baseTime)
 	// p1, prod, resolved — wrong status.
-	iss4 := writeIssue(t, ctx, s, p1.ID, "prod", "f4", baseTime)
+	iss4 := writeIssue(ctx, t, s, p1.ID, "prod", "f4", baseTime)
 	if err := s.SetIssueStatus(ctx, iss4.ID, core.StatusResolved); err != nil {
 		t.Fatalf("SetIssueStatus: %v", err)
 	}
@@ -361,24 +361,24 @@ func testIssuesFilterByStatusEnvProject(t *testing.T, open func(t *testing.T) st
 }
 
 // writeIssue writes a single event entry and returns the resulting issue.
-func writeIssue(t *testing.T, ctx context.Context, s store.Store, projectID int64, environment, fingerprint string, at time.Time) core.Issue {
+func writeIssue(ctx context.Context, t *testing.T, s store.Store, projectID int64, environment, fingerprint string, at time.Time) core.Issue {
 	t.Helper()
 	e := eventEntry(projectID, core.SeverityError, "boom "+fingerprint, fingerprint, "boom", at)
 	e.Log.Environment = environment
 	if err := s.WriteBatch(ctx, []store.Entry{e}); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
-	return findIssue(t, ctx, s, projectID, fingerprint)
+	return findIssue(ctx, t, s, projectID, fingerprint)
 }
 
 func testIssuesSortedByLastSeenDesc(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
-	writeIssue(t, ctx, s, p.ID, "prod", "f1", baseTime)
-	writeIssue(t, ctx, s, p.ID, "prod", "f2", baseTime.Add(2*time.Hour))
-	writeIssue(t, ctx, s, p.ID, "prod", "f3", baseTime.Add(time.Hour))
+	writeIssue(ctx, t, s, p.ID, "prod", "f1", baseTime)
+	writeIssue(ctx, t, s, p.ID, "prod", "f2", baseTime.Add(2*time.Hour))
+	writeIssue(ctx, t, s, p.ID, "prod", "f3", baseTime.Add(time.Hour))
 
 	issues, err := s.Issues(ctx, store.IssueFilter{ProjectID: p.ID})
 	if err != nil {
@@ -406,11 +406,11 @@ func fingerprints(issues []core.Issue) []string {
 func testIssuesLimitHonored(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
-	writeIssue(t, ctx, s, p.ID, "prod", "f1", baseTime)
-	writeIssue(t, ctx, s, p.ID, "prod", "f2", baseTime.Add(2*time.Hour))
-	writeIssue(t, ctx, s, p.ID, "prod", "f3", baseTime.Add(time.Hour))
+	writeIssue(ctx, t, s, p.ID, "prod", "f1", baseTime)
+	writeIssue(ctx, t, s, p.ID, "prod", "f2", baseTime.Add(2*time.Hour))
+	writeIssue(ctx, t, s, p.ID, "prod", "f3", baseTime.Add(time.Hour))
 
 	issues, err := s.Issues(ctx, store.IssueFilter{ProjectID: p.ID, Limit: 2})
 	if err != nil {
@@ -431,7 +431,7 @@ func testIssuesLimitHonored(t *testing.T, open func(t *testing.T) store.Store) {
 func testIssuesDefaultLimitFifty(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	const total = 55
 	for i := 0; i < total; i++ {
@@ -454,7 +454,7 @@ func testIssuesDefaultLimitFifty(t *testing.T, open func(t *testing.T) store.Sto
 func testIssueNotFound(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	_ = mustProject(t, ctx, s)
+	_ = mustProject(ctx, t, s)
 
 	_, _, err := s.Issue(ctx, 999999)
 	if !errors.Is(err, store.ErrNotFound) {
@@ -467,7 +467,7 @@ func testIssueNotFound(t *testing.T, open func(t *testing.T) store.Store) {
 func testSearchLogsFTSMatchesBody(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	entries := []store.Entry{
 		entry(p.ID, core.SeverityError, "connection refused", "svc", baseTime),
@@ -493,7 +493,7 @@ func testSearchLogsFTSMatchesBody(t *testing.T, open func(t *testing.T) store.St
 func testSearchLogsMinSeverityAndTimeRange(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	entries := []store.Entry{
 		entry(p.ID, core.SeverityInfo, "info at t0", "svc", baseTime),
@@ -543,7 +543,7 @@ func testSearchLogsMinSeverityAndTimeRange(t *testing.T, open func(t *testing.T)
 func testLogContextReturnsNeighborsSameProjectService(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	// Five same-service logs, 1 minute apart, plus a distractor on a
 	// different service sitting right in the middle of the timeline.
@@ -624,7 +624,7 @@ func timesOf(logs []core.Log) []time.Time {
 func testStatsCountsAndPerDay(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
 	day1 := baseTime
 	day2 := baseTime.Add(24 * time.Hour)
@@ -676,7 +676,7 @@ func testStatsCountsAndPerDay(t *testing.T, open func(t *testing.T) store.Store)
 func testPruneDeletesOnlyOlderAndOnlyProject(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p1 := mustProject(t, ctx, s)
+	p1 := mustProject(ctx, t, s)
 	p2, err := s.CreateProject(ctx, "second-project", 30)
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -703,8 +703,8 @@ func testPruneDeletesOnlyOlderAndOnlyProject(t *testing.T, open func(t *testing.
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
-	oldIssue := findIssue(t, ctx, s, p1.ID, "old-event")
-	newIssue := findIssue(t, ctx, s, p1.ID, "new-event")
+	oldIssue := findIssue(ctx, t, s, p1.ID, "old-event")
+	newIssue := findIssue(ctx, t, s, p1.ID, "new-event")
 
 	n, err := s.Prune(ctx, p1.ID, cutoff)
 	if err != nil {
@@ -865,9 +865,9 @@ func testAdminInstanceAdminKey(t *testing.T, open func(t *testing.T) store.Store
 func testSetIssueStatusTransitions(t *testing.T, open func(t *testing.T) store.Store) {
 	ctx := context.Background()
 	s := open(t)
-	p := mustProject(t, ctx, s)
+	p := mustProject(ctx, t, s)
 
-	iss := writeIssue(t, ctx, s, p.ID, "prod", "f1", baseTime)
+	iss := writeIssue(ctx, t, s, p.ID, "prod", "f1", baseTime)
 	if iss.Status != core.StatusOpen {
 		t.Fatalf("initial status = %q, want %q", iss.Status, core.StatusOpen)
 	}

@@ -26,7 +26,10 @@ func (db *DB) Prune(ctx context.Context, projectID int64, before time.Time) (int
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: prune begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	// Rollback error is unactionable: after a successful Commit it is always
+	// sql.ErrTxDone, and on any earlier failure path we're already
+	// returning the real error.
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, deleteEventsForOldLogs, projectID, cutoff); err != nil {
 		return 0, fmt.Errorf("sqlite: prune delete events: %w", err)

@@ -71,7 +71,7 @@ func (db *DB) Issues(ctx context.Context, f store.IssueFilter) ([]core.Issue, er
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: issues query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []core.Issue
 	for rows.Next() {
@@ -100,7 +100,7 @@ func (db *DB) Issue(ctx context.Context, id int64) (core.Issue, []core.Event, er
 	if err != nil {
 		return core.Issue{}, nil, fmt.Errorf("sqlite: issue events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var events []core.Event
 	for rows.Next() {
@@ -247,7 +247,7 @@ WHERE logs_fts MATCH ?`)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: search logs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []core.Log
 	for rows.Next() {
@@ -300,16 +300,16 @@ func (db *DB) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, e
 	for beforeRows.Next() {
 		l, err := scanLog(beforeRows)
 		if err != nil {
-			beforeRows.Close()
+			_ = beforeRows.Close()
 			return nil, err
 		}
 		before = append(before, l)
 	}
 	if err := beforeRows.Err(); err != nil {
-		beforeRows.Close()
+		_ = beforeRows.Close()
 		return nil, err
 	}
-	beforeRows.Close()
+	_ = beforeRows.Close()
 
 	afterRows, err := db.sql.QueryContext(ctx, selectContextAfter, projectID, service, ts, n)
 	if err != nil {
@@ -319,16 +319,16 @@ func (db *DB) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, e
 	for afterRows.Next() {
 		l, err := scanLog(afterRows)
 		if err != nil {
-			afterRows.Close()
+			_ = afterRows.Close()
 			return nil, err
 		}
 		after = append(after, l)
 	}
 	if err := afterRows.Err(); err != nil {
-		afterRows.Close()
+		_ = afterRows.Close()
 		return nil, err
 	}
-	afterRows.Close()
+	_ = afterRows.Close()
 
 	// before is DESC (target first, then older); reverse to ascending.
 	for i, j := 0, len(before)-1; i < j; i, j = i+1, j-1 {
@@ -373,7 +373,7 @@ func (db *DB) Stats(ctx context.Context, f store.StatsFilter) (store.Stats, erro
 	if err != nil {
 		return store.Stats{}, fmt.Errorf("sqlite: stats per day: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var d store.DayCount
 		if err := rows.Scan(&d.Day, &d.Logs, &d.Events); err != nil {

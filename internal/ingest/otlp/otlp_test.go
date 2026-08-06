@@ -20,8 +20,8 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeSink captures logs passed to Enqueue and can be configured to return
@@ -49,17 +49,17 @@ type fakeAdmin struct {
 	}
 }
 
-func (f *fakeAdmin) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeAdmin) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	panic("unused")
 }
-func (f *fakeAdmin) Projects(ctx context.Context) ([]core.Project, error) { panic("unused") }
-func (f *fakeAdmin) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeAdmin) Projects(_ context.Context) ([]core.Project, error) { panic("unused") }
+func (f *fakeAdmin) SetIssueStatus(_ context.Context, _ int64, _ core.IssueStatus) error {
 	panic("unused")
 }
-func (f *fakeAdmin) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeAdmin) MintKey(_ context.Context, _ int64, _ string) (string, error) {
 	panic("unused")
 }
-func (f *fakeAdmin) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeAdmin) LookupKey(_ context.Context, plaintext string) (int64, string, error) {
 	e, ok := f.keys[plaintext]
 	if !ok {
 		return 0, "", store.ErrNotFound
@@ -80,7 +80,7 @@ func newTestServer(sink *fakeSink) *httptest.Server {
 	}}
 	a := auth.New(admin, []byte{})
 
-	h := New(sink)
+	h := New(sink, 0)
 	mux := http.NewServeMux()
 	h.Mount(mux, a)
 	return httptest.NewServer(mux)
@@ -212,7 +212,7 @@ func TestServeLogs_JSON_HappyPath(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, validKey, "application/json", loadFixture(t))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
@@ -245,7 +245,7 @@ func TestServeLogs_Protobuf_HappyPath(t *testing.T) {
 	}
 
 	resp := post(t, srv, validKey, "application/x-protobuf", pbBytes)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
@@ -272,7 +272,7 @@ func TestServeLogs_WrongContentType_Returns415(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, validKey, "text/plain", []byte("hello"))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusUnsupportedMediaType {
 		t.Fatalf("status = %d, want 415", resp.StatusCode)
@@ -285,7 +285,7 @@ func TestServeLogs_SinkFull_Returns429(t *testing.T) {
 	defer srv.Close()
 
 	resp := post(t, srv, validKey, "application/json", loadFixture(t))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", resp.StatusCode)
@@ -302,7 +302,7 @@ func TestServeLogs_OversizeBody_Returns413(t *testing.T) {
 
 	huge := bytes.Repeat([]byte("a"), 6<<20)
 	resp := post(t, srv, validKey, "application/json", huge)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", resp.StatusCode)
@@ -323,7 +323,7 @@ func TestServeLogs_WrongMethod_Returns405(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", resp.StatusCode)
@@ -343,7 +343,7 @@ func TestServeLogs_GzipProtobuf_HappyPath(t *testing.T) {
 	gzipped := gzipBytes(t, pbBytes)
 
 	resp := postWithEncoding(t, srv, validKey, "application/x-protobuf", "gzip", gzipped)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
@@ -360,7 +360,7 @@ func TestServeLogs_GzipCaseInsensitive_HappyPath(t *testing.T) {
 	gzipped := gzipBytes(t, loadFixture(t))
 
 	resp := postWithEncoding(t, srv, validKey, "application/json", "GZIP", gzipped)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", resp.StatusCode)
@@ -380,7 +380,7 @@ func TestServeLogs_GzipDecompressedOversize_Returns413(t *testing.T) {
 	gzipped := gzipBytes(t, huge)
 
 	resp := postWithEncoding(t, srv, validKey, "application/json", "gzip", gzipped)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", resp.StatusCode)
@@ -396,7 +396,7 @@ func TestServeLogs_UnknownContentEncoding_Returns415(t *testing.T) {
 	defer srv.Close()
 
 	resp := postWithEncoding(t, srv, validKey, "application/json", "br", loadFixture(t))
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusUnsupportedMediaType {
 		t.Fatalf("status = %d, want 415", resp.StatusCode)

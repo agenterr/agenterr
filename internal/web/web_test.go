@@ -53,12 +53,12 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (f *fakeStore) Issues(ctx context.Context, filter store.IssueFilter) ([]core.Issue, error) {
+func (f *fakeStore) Issues(_ context.Context, filter store.IssueFilter) ([]core.Issue, error) {
 	f.lastIssueFilter = filter
 	return f.issueList, nil
 }
 
-func (f *fakeStore) Issue(ctx context.Context, id int64) (core.Issue, []core.Event, error) {
+func (f *fakeStore) Issue(_ context.Context, id int64) (core.Issue, []core.Event, error) {
 	iss, ok := f.issues[id]
 	if !ok {
 		return core.Issue{}, nil, store.ErrNotFound
@@ -66,27 +66,27 @@ func (f *fakeStore) Issue(ctx context.Context, id int64) (core.Issue, []core.Eve
 	return iss, f.issueEvents[id], nil
 }
 
-func (f *fakeStore) SearchLogs(ctx context.Context, filter store.LogFilter) ([]core.Log, error) {
+func (f *fakeStore) SearchLogs(_ context.Context, filter store.LogFilter) ([]core.Log, error) {
 	f.lastLogFilter = filter
 	return f.logList, nil
 }
 
-func (f *fakeStore) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, error) {
+func (f *fakeStore) LogContext(_ context.Context, _ int64, _ int) ([]core.Log, error) {
 	return f.logList, nil
 }
 
-func (f *fakeStore) Stats(ctx context.Context, filter store.StatsFilter) (store.Stats, error) {
+func (f *fakeStore) Stats(_ context.Context, _ store.StatsFilter) (store.Stats, error) {
 	return f.stats, nil
 }
 
-func (f *fakeStore) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeStore) CreateProject(_ context.Context, name string, retentionDays int) (core.Project, error) {
 	f.nextID++
 	p := core.Project{ID: f.nextID, Name: name, Slug: "slug-" + name, RetentionDays: retentionDays, CreatedAt: time.Now().UTC()}
 	f.projects[p.ID] = p
 	return p, nil
 }
 
-func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
+func (f *fakeStore) Projects(_ context.Context) ([]core.Project, error) {
 	out := make([]core.Project, 0, len(f.projects))
 	for _, p := range f.projects {
 		out = append(out, p)
@@ -94,7 +94,7 @@ func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
 	return out, nil
 }
 
-func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeStore) SetIssueStatus(_ context.Context, id int64, s core.IssueStatus) error {
 	iss, ok := f.issues[id]
 	if !ok {
 		return store.ErrNotFound
@@ -104,7 +104,7 @@ func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueSt
 	return nil
 }
 
-func (f *fakeStore) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeStore) MintKey(_ context.Context, projectID int64, kind string) (string, error) {
 	if _, ok := f.projects[projectID]; !ok {
 		return "", store.ErrNotFound
 	}
@@ -116,7 +116,7 @@ func (f *fakeStore) MintKey(ctx context.Context, projectID int64, kind string) (
 	return plaintext, nil
 }
 
-func (f *fakeStore) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeStore) LookupKey(_ context.Context, plaintext string) (int64, string, error) {
 	e, ok := f.keys[plaintext]
 	if !ok {
 		return 0, "", store.ErrNotFound
@@ -149,7 +149,7 @@ func loggedInClient(t *testing.T, srv *httptest.Server) *http.Client {
 	}
 	client := &http.Client{
 		Jar: jar,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
@@ -157,7 +157,7 @@ func loggedInClient(t *testing.T, srv *httptest.Server) *http.Client {
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("login status = %d, want 303", resp.StatusCode)
 	}
@@ -171,14 +171,14 @@ func TestUnauthenticated_RedirectsToLogin(t *testing.T) {
 	srv := newTestServer(t, fs)
 	defer srv.Close()
 
-	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
 	resp, err := client.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", resp.StatusCode)
 	}
@@ -197,7 +197,7 @@ func TestLogin_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -217,7 +217,7 @@ func TestIssuesList_RendersTitlesAndCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 
@@ -238,7 +238,7 @@ func TestIssuesList_StatusFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -265,7 +265,7 @@ func TestIssuesList_HXRequestRendersFragmentOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 	if strings.Contains(s, "<html") {
@@ -294,7 +294,7 @@ func TestIssueDetail_ShowsBodyAndResolveButton(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /issues/12: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 	if !strings.Contains(s, "panic: nil pointer dereference") {
@@ -319,7 +319,7 @@ func TestResolve_UpdatesStatusAndReturnsChip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST resolve: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -343,7 +343,7 @@ func TestResolve_GETNotAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET resolve: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", resp.StatusCode)
 	}
@@ -362,7 +362,7 @@ func TestSearch_RendersMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /search: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 	if !strings.Contains(s, "connection refused to db") {
@@ -384,7 +384,7 @@ func TestSettings_CreateProjectAndMintKey(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("create status = %d, want 200:\n%s", resp.StatusCode, body)
 	}
@@ -404,7 +404,7 @@ func TestSettings_CreateProjectAndMintKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint key: %v", err)
 	}
-	defer mintResp.Body.Close()
+	defer func() { _ = mintResp.Body.Close() }()
 	mintBody, _ := io.ReadAll(mintResp.Body)
 	if !strings.Contains(string(mintBody), "agt_minted_ingest") {
 		t.Errorf("response missing plaintext key:\n%s", mintBody)
@@ -421,7 +421,7 @@ func TestSettings_EmptyProjectListShowsCurlSnippet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /settings: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "curl") {
 		t.Errorf("empty state missing curl snippet:\n%s", body)

@@ -13,17 +13,17 @@ func TestLoad(t *testing.T) {
 		wantErr string // substring to check in error message
 	}{
 		{
-			name: "all defaults",
-			args: []string{},
+			name:   "all defaults",
+			args:   []string{},
 			getenv: func(string) string { return "" },
 			want: Config{
-				ListenAddr:   ":3617",
-				DBPath:       "./agenterr.db",
+				ListenAddr:    ":3617",
+				DBPath:        "./agenterr.db",
 				AdminPassword: "",
-				BufferSize:   10000,
-				FlushEveryMS: 200,
-				MaxBodyBytes: 5 << 20,
-				MaxDBBytes:   0,
+				BufferSize:    10000,
+				FlushEveryMS:  200,
+				MaxBodyBytes:  5 << 20,
+				MaxDBBytes:    0,
 			},
 		},
 		{
@@ -98,10 +98,10 @@ func TestLoad(t *testing.T) {
 				ListenAddr:    ":3617",
 				DBPath:        "./agenterr.db",
 				AdminPassword: "",
-				BufferSize:    300,      // flag overrides env
+				BufferSize:    300, // flag overrides env
 				FlushEveryMS:  200,
 				MaxBodyBytes:  5 << 20,
-				MaxDBBytes:    123,      // env overrides default
+				MaxDBBytes:    123, // env overrides default
 			},
 		},
 		{
@@ -193,8 +193,8 @@ func TestLoad(t *testing.T) {
 			wantErr: "max-db-bytes",
 		},
 		{
-			name: "empty admin password is ok",
-			args: []string{},
+			name:   "empty admin password is ok",
+			args:   []string{},
 			getenv: func(string) string { return "" },
 			want: Config{
 				ListenAddr:    ":3617",
@@ -207,8 +207,8 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			name: "max-db-bytes zero is valid (unlimited)",
-			args: []string{"--max-db-bytes", "0"},
+			name:   "max-db-bytes zero is valid (unlimited)",
+			args:   []string{"--max-db-bytes", "0"},
 			getenv: func(string) string { return "" },
 			want: Config{
 				ListenAddr:    ":3617",
@@ -221,8 +221,8 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			name: "positive max-db-bytes",
-			args: []string{"--max-db-bytes", "100000000"},
+			name:   "positive max-db-bytes",
+			args:   []string{"--max-db-bytes", "100000000"},
 			getenv: func(string) string { return "" },
 			want: Config{
 				ListenAddr:    ":3617",

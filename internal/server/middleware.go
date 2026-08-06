@@ -45,7 +45,9 @@ func recoverMiddleware(h http.Handler, logger *slog.Logger) http.Handler {
 				)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+				// Encode error is unactionable here: headers are already
+				// committed and we're already in the panic-recovery path.
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
 			}
 		}()
 		h.ServeHTTP(w, r)

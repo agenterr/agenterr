@@ -414,6 +414,6 @@ func TestPending_InitiallyZero(t *testing.T) {
 // Notifier — it has no other observable behavior, but a future change that
 // makes it dereference something on Entry must not silently panic in
 // production.
-func TestNopNotifier_IssueEvent(t *testing.T) {
+func TestNopNotifier_IssueEvent(_ *testing.T) {
 	NopNotifier{}.IssueEvent(store.Entry{})
 }

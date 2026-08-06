@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver used by Open
 
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/store"
@@ -59,7 +59,7 @@ func Open(path string) (*DB, error) {
 
 	db := &DB{sql: sqlDB}
 	if err := db.migrate(); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("sqlite: migrate: %w", err)
 	}
 	return db, nil
@@ -81,7 +81,10 @@ func (db *DB) CreateProject(ctx context.Context, name string, retentionDays int)
 	if err != nil {
 		return core.Project{}, fmt.Errorf("sqlite: create project begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	// Rollback error is unactionable: after a successful Commit it is
+	// always sql.ErrTxDone, and on any earlier failure we already return
+	// the real error.
+	defer func() { _ = tx.Rollback() }()
 
 	// The slug column has a UNIQUE constraint, so seed the insert with a
 	// UUID-free placeholder derived from name and rewrite it below once the
@@ -127,7 +130,7 @@ func (db *DB) Projects(ctx context.Context) ([]core.Project, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: projects: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []core.Project
 	for rows.Next() {
@@ -179,15 +182,16 @@ func (db *DB) migrate() error {
 	for rows.Next() {
 		var v string
 		if err := rows.Scan(&v); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("scan applied migration: %w", err)
 		}
 		applied[v] = true
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	entries, err := fs.ReadDir(migrationsFS, "migrations")
 	if err != nil {
@@ -213,11 +217,11 @@ func (db *DB) migrate() error {
 			return fmt.Errorf("begin tx for migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec(string(content)); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec(insertMigration, name); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
 		if err := tx.Commit(); err != nil {

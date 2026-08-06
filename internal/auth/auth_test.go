@@ -22,23 +22,23 @@ type fakeAdmin struct {
 	}
 }
 
-func (f *fakeAdmin) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeAdmin) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	panic("unused")
 }
 
-func (f *fakeAdmin) Projects(ctx context.Context) ([]core.Project, error) {
+func (f *fakeAdmin) Projects(_ context.Context) ([]core.Project, error) {
 	panic("unused")
 }
 
-func (f *fakeAdmin) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeAdmin) SetIssueStatus(_ context.Context, _ int64, _ core.IssueStatus) error {
 	panic("unused")
 }
 
-func (f *fakeAdmin) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeAdmin) MintKey(_ context.Context, _ int64, _ string) (string, error) {
 	panic("unused")
 }
 
-func (f *fakeAdmin) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeAdmin) LookupKey(_ context.Context, plaintext string) (int64, string, error) {
 	e, ok := f.keys[plaintext]
 	if !ok {
 		return 0, "", store.ErrNotFound
@@ -58,7 +58,7 @@ func newFakeAdmin() *fakeAdmin {
 }
 
 func okHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 }

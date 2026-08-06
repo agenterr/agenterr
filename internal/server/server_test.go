@@ -36,7 +36,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 	if err != nil {
 		t.Fatalf("sqlite.Open: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	hash, err := bcrypt.GenerateFromPassword([]byte("adminpass"), bcrypt.MinCost)
 	if err != nil {
@@ -50,7 +50,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
 		Cfg:       config.Config{ListenAddr: ":0"},
 		Store:     db,
 		Pipe:      pipe,
-		Ingesters: []ingest.Ingester{jsonapi.New(pipe), otlp.New(pipe)},
+		Ingesters: []ingest.Ingester{jsonapi.New(pipe, 0), otlp.New(pipe, 0)},
 		Auth:      a,
 		API:       api.New(db, db),
 		MCP:       mcp.New(db, db),
@@ -89,7 +89,7 @@ func TestHealthz_DBDown(t *testing.T) {
 	deps, db := newTestDeps(t)
 	srv := New(deps)
 
-	db.Close()
+	_ = db.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -116,7 +116,7 @@ func TestHealthz_DBDown(t *testing.T) {
 
 func TestPanicRecovery(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.Handle("/boom", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/boom", http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic("kaboom")
 	}))
 	h := withMiddleware(mux, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
@@ -164,7 +164,7 @@ func TestPanicRecovery(t *testing.T) {
 // connection to abort.
 func TestErrAbortHandlerPropagates(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.Handle("/abort", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/abort", http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic(http.ErrAbortHandler)
 	}))
 	var logBuf bytes.Buffer
@@ -175,7 +175,7 @@ func TestErrAbortHandlerPropagates(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/abort")
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("expected a connection error from the aborted handler, got a response (status %d)", resp.StatusCode)
 	}
 	if strings.Contains(err.Error(), "500") {
@@ -187,7 +187,7 @@ func TestErrAbortHandlerPropagates(t *testing.T) {
 	if err2 != nil {
 		t.Fatalf("server did not survive the aborted handler: %v", err2)
 	}
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (server still alive)", resp2.StatusCode)
 	}
@@ -244,9 +244,9 @@ func TestRequestLogMiddleware(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
 	mux := http.NewServeMux()
-	mux.Handle("/thing", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/thing", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
-		w.Write([]byte("hi"))
+		_, _ = w.Write([]byte("hi"))
 	}))
 	h := withMiddleware(mux, logger)
 
