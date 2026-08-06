@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -50,15 +53,17 @@ func startFakeDaemon(t *testing.T, handler http.Handler) *fakeDaemon {
 // writeFrame writes one Docker multiplex frame header+payload as separate
 // Write+Flush calls, so a frame boundary can be forced to land mid-header or
 // mid-payload from the client's point of view (the whole point of behavior 3).
-func writeFrame(w http.ResponseWriter, flusher http.Flusher, streamType byte, payload []byte) {
+// hdrSplit is the byte offset within the 8-byte header where the write is
+// torn in two.
+func writeFrame(w http.ResponseWriter, flusher http.Flusher, streamType byte, payload []byte, hdrSplit int) {
 	hdr := make([]byte, 8)
 	hdr[0] = streamType
 	binary.BigEndian.PutUint32(hdr[4:8], uint32(len(payload)))
 
 	// Split the header itself across two writes to exercise a torn header.
-	w.Write(hdr[:3]) //nolint:errcheck
+	w.Write(hdr[:hdrSplit]) //nolint:errcheck
 	flusher.Flush()
-	w.Write(hdr[3:]) //nolint:errcheck
+	w.Write(hdr[hdrSplit:]) //nolint:errcheck
 	flusher.Flush()
 
 	// Split the payload roughly in half across two writes to exercise a
@@ -269,9 +274,13 @@ func TestLogsDemuxAcrossChunkBoundaries(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		// Interleave stdout(1) and stderr(2) frames, each header and
 		// payload torn across separate writes+flushes.
-		writeFrame(w, flusher, 1, []byte(line1))
-		writeFrame(w, flusher, 2, []byte(line2))
-		writeFrame(w, flusher, 1, []byte(line3))
+		// line1's header is torn at offset 6 — inside the 4-byte
+		// big-endian length field (bytes 4-7) — rather than at the
+		// stream-type/reserved boundary; the others tear at the more
+		// obvious offset 3 for variety.
+		writeFrame(w, flusher, 1, []byte(line1), 6)
+		writeFrame(w, flusher, 2, []byte(line2), 3)
+		writeFrame(w, flusher, 1, []byte(line3), 3)
 		// End of stream: handler returns, connection closes -> client EOF.
 	})
 	d := startFakeDaemon(t, mux)
@@ -317,7 +326,7 @@ func TestLogsUnparsableTimestampPrefixKeptWholeAndCounted(t *testing.T) {
 	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
 		flusher := w.(http.Flusher)
 		w.WriteHeader(http.StatusOK)
-		writeFrame(w, flusher, 1, []byte(raw))
+		writeFrame(w, flusher, 1, []byte(raw), 3)
 	})
 	d := startFakeDaemon(t, mux)
 	c := NewClient(d.sockPath)
@@ -434,5 +443,159 @@ func TestLogsTTYRawStream(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("line %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// --- Finding 1 fix: watchCtxCancel exits on normal stream end (EOF)
+// without parking on ctx.Done() forever, and does close the body on an
+// actual ctx cancel. -------------------------------------------------------
+
+func TestWatchCtxCancel_ExitsOnDoneWithoutClosingBody(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // never fired before done closes below — proves EOF path, not cancel path
+
+	done := make(chan struct{})
+	var closed atomic.Bool
+	exited := watchCtxCancel(ctx, done, func() { closed.Store(true) })
+
+	close(done) // simulates the read loop finishing normally (EOF)
+
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher goroutine did not exit after done closed — leak on normal EOF")
+	}
+	if closed.Load() {
+		t.Error("closeFn must not be called when the stream ended on its own (done), not via ctx cancel")
+	}
+}
+
+func TestWatchCtxCancel_ClosesBodyOnCtxCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	defer close(done)
+
+	var closed atomic.Bool
+	exited := watchCtxCancel(ctx, done, func() { closed.Store(true) })
+
+	cancel()
+
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher goroutine did not exit after ctx cancel")
+	}
+	if !closed.Load() {
+		t.Error("closeFn must be called on ctx cancel")
+	}
+}
+
+// TestLogsEOFDoesNotLeakWatcherGoroutine is a behavioral regression test for
+// the same leak, driven through the real Logs path end to end: with a
+// long-lived ctx that is never cancelled, repeatedly streaming a container's
+// logs to completion (EOF) must not accumulate one parked watcher goroutine
+// per call.
+func TestLogsEOFDoesNotLeakWatcherGoroutine(t *testing.T) {
+	const cid = "cnt-leak"
+	ts := "2026-08-06T12:00:00.000000001Z"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"Config":{"Tty":false}}`)) //nolint:errcheck
+	})
+	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.WriteHeader(http.StatusOK)
+		writeFrame(w, flusher, 1, []byte(ts+" line\n"), 3)
+		// handler returns -> connection closes -> client sees EOF, not ctx-cancel
+	})
+	d := startFakeDaemon(t, mux)
+	c := NewClient(d.sockPath)
+
+	// Deliberately never cancelled: if the watcher only exits on
+	// ctx.Done(), it would stay parked for every one of these calls.
+	ctx := context.Background()
+	transport := c.httpc.Transport.(*http.Transport)
+
+	transport.CloseIdleConnections() // drop any pooled keep-alive conn goroutines before the baseline
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+
+	const iterations = 20
+	for i := 0; i < iterations; i++ {
+		ch, err := c.Logs(ctx, cid, time.Time{})
+		if err != nil {
+			t.Fatalf("Logs iteration %d: %v", i, err)
+		}
+		for range ch {
+			// drain to EOF close
+		}
+	}
+	transport.CloseIdleConnections() // same: keep-alive pooling is unrelated to the watcher fix under test
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runtime.GC()
+		cur := runtime.NumGoroutine()
+		if cur <= baseline+2 { // small slack for scheduler/runtime bookkeeping goroutines
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutine count %d after %d EOF'd Logs calls, baseline %d — watcher goroutines leaking",
+				cur, iterations, baseline)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// --- Finding 2: a line split across a frame boundary (including mid-way
+// through a multibyte UTF-8 rune) must reassemble correctly. -------------
+
+func TestLogsCrossFrameLineSplitMidUTF8Rune(t *testing.T) {
+	const cid = "cnt-splitline"
+	ts := "2026-08-06T12:00:00.000000001Z"
+	text := "hello 日本語 world" // contains 3-byte-encoded multibyte runes
+	full := []byte(ts + " " + text + "\n")
+
+	// Land the split one byte into the 3-byte UTF-8 encoding of '日', so
+	// frame A ends mid-rune and frame B continues it — the critical case:
+	// every other test's frames carry whole lines.
+	idx := strings.Index(string(full), "日")
+	if idx < 0 {
+		t.Fatal("test setup: expected rune not found in encoded line")
+	}
+	splitAt := idx + 1
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"Config":{"Tty":false}}`)) //nolint:errcheck
+	})
+	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.WriteHeader(http.StatusOK)
+		// Two separate Docker frames whose payloads split the SAME line
+		// (and a multibyte rune within it) — not just one frame torn
+		// across writes like the other tests.
+		writeFrame(w, flusher, 1, full[:splitAt], 3)
+		writeFrame(w, flusher, 1, full[splitAt:], 3)
+	})
+	d := startFakeDaemon(t, mux)
+	c := NewClient(d.sockPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ch, err := c.Logs(ctx, cid, time.Time{})
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	var got []string
+	for l := range ch {
+		got = append(got, l.Text)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d lines %v, want exactly 1 reassembled line", len(got), got)
+	}
+	if got[0] != text {
+		t.Errorf("reassembled line = %q, want %q", got[0], text)
 	}
 }

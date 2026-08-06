@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -187,11 +188,15 @@ func (c *Client) Events(ctx context.Context) (<-chan Event, error) {
 	}
 
 	out := make(chan Event)
-	closeOnCancel(ctx, resp.Body)
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeBody := func() { closeOnce.Do(func() { resp.Body.Close() }) }
+	watchCtxCancel(ctx, done, closeBody)
 
 	go func() {
 		defer close(out)
-		defer resp.Body.Close()
+		defer close(done) // tells the watcher the stream ended on its own (EOF), not via ctx-cancel
+		defer closeBody()
 
 		dec := json.NewDecoder(resp.Body)
 		for {
@@ -210,15 +215,31 @@ func (c *Client) Events(ctx context.Context) (<-chan Event, error) {
 	return out, nil
 }
 
-// closeOnCancel closes body as soon as ctx is done, unblocking whatever
-// goroutine is currently reading it. It leaks nothing: the watcher
-// goroutine itself exits once the read loop finishes, via the returned
-// stop func's channel — callers close `done` when their loop returns.
-func closeOnCancel(ctx context.Context, body io.Closer) {
+// watchCtxCancel starts a goroutine that calls closeFn (expected to close
+// the response body, unblocking whatever read is currently in flight) as
+// soon as ctx is done — but exits without calling closeFn if done closes
+// first, i.e. the stream ended on its own (EOF) rather than via
+// cancellation. Without the done case, this goroutine would park on
+// ctx.Done() until the caller's context is eventually cancelled (often not
+// until process shutdown), leaking one goroutine per Logs/Events call under
+// container churn — the whole reason done exists.
+//
+// closeFn must be idempotent (the read loop's own cleanup also calls it) —
+// callers wrap it in a sync.Once.
+//
+// The returned channel closes once this goroutine itself exits, letting
+// tests wait on it deterministically instead of polling goroutine counts.
+func watchCtxCancel(ctx context.Context, done <-chan struct{}, closeFn func()) <-chan struct{} {
+	exited := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		body.Close()
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			closeFn()
+		case <-done:
+		}
 	}()
+	return exited
 }
 
 // ServiceName derives the service name for a container per the ship

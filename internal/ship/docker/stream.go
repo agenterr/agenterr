@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/ship/process"
@@ -49,7 +50,10 @@ func (c *Client) Logs(ctx context.Context, containerID string, since time.Time) 
 	}
 
 	out := make(chan process.Line)
-	closeOnCancel(ctx, resp.Body)
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeBody := func() { closeOnce.Do(func() { resp.Body.Close() }) }
+	watchCtxCancel(ctx, done, closeBody)
 
 	var src io.Reader = resp.Body
 	if !tty {
@@ -58,7 +62,8 @@ func (c *Client) Logs(ctx context.Context, containerID string, since time.Time) 
 
 	go func() {
 		defer close(out)
-		defer resp.Body.Close()
+		defer close(done) // tells the watcher the stream ended on its own (EOF), not via ctx-cancel
+		defer closeBody()
 
 		br := bufio.NewReader(src)
 		for {
