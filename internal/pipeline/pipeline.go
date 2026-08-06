@@ -197,6 +197,16 @@ func (p *Pipeline) Drain(ctx context.Context) error {
 	}
 }
 
+// Pending reports the number of logs accepted by Enqueue but not yet
+// durably written or dropped by Run — i.e. the sum of what's sitting in
+// buf and whatever batch Run currently has in flight. Intended for
+// lightweight health/diagnostic reporting (see internal/server's healthz),
+// not for correctness decisions — Drain is the synchronization primitive
+// for that.
+func (p *Pipeline) Pending() int {
+	return int(atomic.LoadInt64(&p.unflushed))
+}
+
 // annotate runs event detection, fingerprinting, and titling for a single
 // log, producing the store.Entry the writer persists.
 func (p *Pipeline) annotate(l core.Log) store.Entry {
