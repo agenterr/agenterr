@@ -38,6 +38,7 @@ type fakeStore struct {
 	lastStatsFilter store.StatsFilter
 	lastContextID   int64
 	lastContextN    int
+	contextNotFound bool
 }
 
 func newFakeStore() *fakeStore {
@@ -73,6 +74,9 @@ func (f *fakeStore) SearchLogs(ctx context.Context, filter store.LogFilter) ([]c
 func (f *fakeStore) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, error) {
 	f.lastContextID = logID
 	f.lastContextN = n
+	if f.contextNotFound {
+		return nil, store.ErrNotFound
+	}
 	return f.logList, nil
 }
 
@@ -514,6 +518,19 @@ func TestLogs_Context_HappyPath(t *testing.T) {
 	}
 	if fs.lastContextN != 20 {
 		t.Errorf("lastContextN = %d, want 20", fs.lastContextN)
+	}
+}
+
+func TestLogs_Context_UnknownID_Returns404(t *testing.T) {
+	fs := newFakeStore()
+	fs.contextNotFound = true
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/logs/999/context", validAPIKey, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
 }
 

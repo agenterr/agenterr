@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -128,6 +129,10 @@ func (l *Logs) Context(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := l.Reader.LogContext(r.Context(), id, n)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondErr(w, http.StatusNotFound, "not found")
+			return
+		}
 		respondErr(w, http.StatusInternalServerError, "internal")
 		return
 	}
