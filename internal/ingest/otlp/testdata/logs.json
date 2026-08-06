@@ -1,0 +1,40 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "payment-api" } },
+          { "key": "service.version", "value": { "stringValue": "1.4.2" } },
+          { "key": "deployment.environment", "value": { "stringValue": "production" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "payment-api-logger" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1700000000000000000",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "body": { "stringValue": "failed to insert payment row" },
+              "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+              "attributes": [
+                { "key": "exception.type", "value": { "stringValue": "*pq.Error" } },
+                { "key": "exception.message", "value": { "stringValue": "duplicate key value violates unique constraint" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1700000001000000000",
+              "severityNumber": 9,
+              "body": { "stringValue": "payment processed" },
+              "attributes": [
+                { "key": "http.method", "value": { "stringValue": "POST" } },
+                { "key": "http.status_code", "value": { "intValue": "200" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
