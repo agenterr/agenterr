@@ -5,13 +5,15 @@ description: Use when the user asks to check production errors, wants to know wh
 
 # Agenterr debugging
 
-Agenterr is an error and log tracker reachable through thirteen MCP tools:
+Agenterr is an error and log tracker reachable through seventeen MCP tools:
 `list_projects`, `list_issues`, `get_issue`, `search_logs`, `get_log_context`,
 `resolve_issue`, `ignore_issue`, `get_stats`, `list_noise_rules`,
 `upsert_noise_rule`, `delete_noise_rule`, `get_noise_report`,
-`set_project_parse`. This skill is the workflow for using them to go from
-"something's wrong in prod" to a verified fix, and for tuning out the noise
-that gets in the way of that.
+`set_project_parse`, `list_alert_rules`, `upsert_alert_rule`,
+`delete_alert_rule`, `test_alert_rule`. This skill is the workflow for using
+them to go from "something's wrong in prod" to a verified fix, for tuning
+out the noise that gets in the way of that, and for setting up alerts so
+you hear about the next one without having to go looking.
 
 ## Workflow
 
@@ -203,6 +205,70 @@ never data. And no drop is invisible: every record a rule drops increments
 that rule's `dropped_count`, visible in both `list_noise_rules` and
 `get_noise_report`, so you can always account for what's been filtered out
 and undo a rule (`delete_noise_rule`) if it turns out to be too aggressive.
+
+## Alerting
+
+Instead of polling `list_issues`, set up a rule so Agenterr pushes a webhook
+when something worth knowing about happens. A rule that's accepted but never
+proven to actually deliver is worse than no rule — it looks like coverage
+but silently isn't. Use a create → test-fire → trust loop every time:
+
+1. **Create or update the rule with `upsert_alert_rule`.** Pick the kind
+   that fits: `new_issue` fires the first time a fingerprint is seen,
+   `regression` fires when a resolved issue reopens, `threshold` fires when
+   `n` matching events land within `window_minutes`. Scope it with `service`,
+   `environment`, and `min_severity` (all optional; omitted means "any").
+2. **Fire it for real with `test_alert_rule`.** This sends the rule's
+   webhook immediately with a sample issue and `"test":true` in the payload,
+   and reports back whether delivery succeeded — no need to wait for a
+   matching event or poll `last_error` on `list_alert_rules`.
+3. **Only trust the rule once step 2 reports delivered.** If it fails, the
+   error text names the problem (connection refused, a non-2xx status, a
+   timeout) — fix the `url` or `headers` with another `upsert_alert_rule`
+   call and test again.
+
+### Worked example: threshold alert on a spiking error
+
+Watch for `checkout-api` producing 10 or more `error`-or-worse events inside
+any 5-minute window, and notify a webhook:
+
+```
+upsert_alert_rule(project_id=1, name="checkout spike", kind="threshold", service="checkout-api", min_severity="error", n=10, window_minutes=5, url="https://hooks.example.com/agenterr")
+```
+
+```
+rule #6 "checkout spike" threshold service=checkout-api environment=any min_severity=error n=10 window_minutes=5 cooldown=900s url=https://hooks.example.com/agenterr enabled=true last_fired=never fired
+```
+
+Prove the webhook actually receives it before walking away:
+
+```
+test_alert_rule(id=6)
+```
+
+```
+alert rule #6 test-fired: delivered
+```
+
+If that had failed — wrong URL, receiver down, a required auth header
+missing — `test_alert_rule` would have reported the delivery error directly
+instead of a bare "ok", and the rule would still be sitting there looking
+configured but unable to actually notify anyone.
+
+### Cooldown and best-effort delivery
+
+Every rule has a `cooldown_seconds` (default 900): after a fire — successful
+or not, an attempt counts — the rule goes quiet for that long before it can
+fire again, so a sustained spike doesn't turn into a webhook flood. Pass
+`cooldown_seconds=0` on `upsert_alert_rule` if you genuinely want it to fire
+every single time.
+
+Delivery is best-effort and never blocks ingest: a webhook POST gets three
+attempts with backoff, and every outcome — success or failure — lands in
+the rule's `last_fired`/`last_error`, visible via `list_alert_rules`. If the
+delivery queue itself is ever full (a receiver wedged under heavy load), the
+fire is dropped rather than stalling log ingestion — alerting can lose a
+notification, but it will never lose a log.
 
 ## Connecting Agenterr
 

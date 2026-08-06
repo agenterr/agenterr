@@ -7,7 +7,7 @@
 Agenterr is a self-hosted error and log tracker in one Go binary: OTLP and
 JSON log ingest, error grouping, full-text search, a REST API, an MCP
 server, and a minimal web UI, backed by SQLite — no queues, no Postgres, no
-separate services to run. It's built for agents first: thirteen MCP tools and
+separate services to run. It's built for agents first: seventeen MCP tools and
 a shipped Claude Code skill are the primary interface, and the web UI
 exists for verification and light management.
 
@@ -158,11 +158,13 @@ and cut noise on its own:
 
 ## Agent setup
 
-Give an agent access to the thirteen MCP tools (`list_projects`,
+Give an agent access to the seventeen MCP tools (`list_projects`,
 `list_issues`, `get_issue`, `search_logs`, `get_log_context`,
 `resolve_issue`, `ignore_issue`, `get_stats`, `list_noise_rules`,
 `upsert_noise_rule`, `delete_noise_rule`, `get_noise_report`,
-`set_project_parse`) either directly over Streamable HTTP:
+`set_project_parse`, `list_alert_rules`, `upsert_alert_rule`,
+`delete_alert_rule`, `test_alert_rule`) either directly over Streamable
+HTTP:
 
 ```
 claude mcp add --transport http agenterr https://logs.example.com/mcp \

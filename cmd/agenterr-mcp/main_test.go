@@ -19,6 +19,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/core"
 	agmcp "github.com/agenterr/agenterr/internal/mcp"
@@ -108,6 +109,25 @@ func (f *fakeStore) SetProjectParseBodies(_ context.Context, _ int64, _ bool) er
 	return errors.New("unused")
 }
 
+// ---- store.AlertRules stubs: this proxy test exercises the stdio<->HTTP
+// plumbing, not alert-rule behavior, so these are unused no-ops.
+
+func (f *fakeStore) AlertRules(_ context.Context, _ int64) ([]store.AlertRuleRow, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) UpsertAlertRule(_ context.Context, _ core.AlertRule) (store.AlertRuleRow, error) {
+	return store.AlertRuleRow{}, errors.New("unused")
+}
+
+func (f *fakeStore) DeleteAlertRule(_ context.Context, _ int64) error {
+	return errors.New("unused")
+}
+
+func (f *fakeStore) RecordAlertResult(_ context.Context, _ int64, _ time.Time, _ string) error {
+	return errors.New("unused")
+}
+
 // newTestServer boots a real internal/mcp Server, wrapped in real key auth,
 // on an httptest server. Returns the server URL and a valid api key.
 func newTestServer(t *testing.T) (url string, apiKey string) {
@@ -123,7 +143,8 @@ func newTestServer(t *testing.T) (url string, apiKey string) {
 	}
 	a := auth.New(fs, []byte{})
 	engine := rules.New(fs, fs)
-	srv := agmcp.New(fs, fs, fs, engine)
+	alertsEngine := alerts.New(fs, nil)
+	srv := agmcp.New(fs, fs, fs, engine, fs, alertsEngine)
 	mux := http.NewServeMux()
 	srv.Mount(mux, a)
 	httpSrv := httptest.NewServer(mux)
@@ -157,12 +178,12 @@ func TestProxy_ListToolsAndCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 13 {
+	if len(tools.Tools) != 17 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 13: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 17: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -284,8 +305,8 @@ func TestProxy_RemoteErrorPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools after a remote error: %v", err)
 	}
-	if len(tools.Tools) != 13 {
-		t.Fatalf("got %d tools after a remote error, want 13", len(tools.Tools))
+	if len(tools.Tools) != 17 {
+		t.Fatalf("got %d tools after a remote error, want 17", len(tools.Tools))
 	}
 
 	_ = cs.Close()

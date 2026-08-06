@@ -1,8 +1,10 @@
-// Package mcp is Agenterr's MCP edge — thirteen token-frugal tools served
+// Package mcp is Agenterr's MCP edge — seventeen token-frugal tools served
 // over Streamable HTTP at /mcp. It reads via store.Reader and administers
-// via store.Admin (issue status transitions, project listing) and
-// store.NoiseRules (rule listing); noise-rule and parse-bodies mutations
-// go through rules.Engine. It never touches store.Writer.
+// via store.Admin (issue status transitions, project listing),
+// store.NoiseRules (rule listing), and store.AlertRules (rule listing);
+// noise-rule and parse-bodies mutations go through rules.Engine, alert-rule
+// mutations (and the synchronous test-fire) go through alerts.Engine. It
+// never touches store.Writer.
 //
 // Every tool renders compact plain text designed for agent consumption:
 // lists lead with a count line, rows are one line each, and long lists are
@@ -23,6 +25,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/auth"
 	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
@@ -43,11 +46,13 @@ const defaultContextN = 20
 
 // Server implements Agenterr's MCP edge.
 type Server struct {
-	reader store.Reader
-	admin  store.Admin
-	nr     store.NoiseRules
-	engine *rules.Engine
-	mcp    *mcpsdk.Server
+	reader       store.Reader
+	admin        store.Admin
+	nr           store.NoiseRules
+	engine       *rules.Engine
+	ar           store.AlertRules
+	alertsEngine *alerts.Engine
+	mcp          *mcpsdk.Server
 
 	// clock is swapped in tests for a fixed time so relative-time renders
 	// ("2m ago") are deterministic.
@@ -59,14 +64,18 @@ type Server struct {
 // list) but always mutated through engine — never nr's write methods
 // directly — so the pipeline's cached view of rules stays fresh the
 // moment a tool changes them (mirrors the REST edge's rule; see
-// internal/api/handlers/noiserules.go).
-func New(r store.Reader, a store.Admin, nr store.NoiseRules, engine *rules.Engine) *Server {
+// internal/api/handlers/noiserules.go). ar and alertsEngine are the
+// alert-rule analog (see internal/alerts.Engine), which additionally
+// backs the synchronous test-fire tool.
+func New(r store.Reader, a store.Admin, nr store.NoiseRules, engine *rules.Engine, ar store.AlertRules, alertsEngine *alerts.Engine) *Server {
 	s := &Server{
-		reader: r,
-		admin:  a,
-		nr:     nr,
-		engine: engine,
-		clock:  time.Now,
+		reader:       r,
+		admin:        a,
+		nr:           nr,
+		engine:       engine,
+		ar:           ar,
+		alertsEngine: alertsEngine,
+		clock:        time.Now,
 	}
 	s.mcp = mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "agenterr",
