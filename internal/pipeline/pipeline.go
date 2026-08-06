@@ -97,12 +97,20 @@ func (p *Pipeline) Enqueue(logs []core.Log) error {
 	if len(p.buf)+len(logs) > cap(p.buf) {
 		return ErrFull
 	}
+	// Increment before sending: Drain reads unflushed without taking mu,
+	// so if the count were bumped after the sends, a concurrent Drain
+	// could observe unflushed==0 (and report "done") while these logs are
+	// already visible in buf — or even already picked up and flushed by
+	// Run, whose decrement would then race ahead of this increment and
+	// briefly (and wrongly) suggest a deficit. Incrementing first, still
+	// under mu, guarantees unflushed accounts for a log before it can
+	// possibly become visible to Run.
+	atomic.AddInt64(&p.unflushed, int64(len(logs)))
 	// Space is reserved: no other Enqueue can race in (mu held) and Run
 	// only ever removes from buf, so these sends cannot block.
 	for _, l := range logs {
 		p.buf <- l
 	}
-	atomic.AddInt64(&p.unflushed, int64(len(logs)))
 	return nil
 }
 
@@ -148,6 +156,13 @@ func (p *Pipeline) Run(ctx context.Context) {
 			if len(pending) >= p.o.MaxBatch {
 				p.flush(pending)
 				pending = pending[:0]
+				// A MaxBatch-triggered flush just emptied pending, so an
+				// already in-flight FlushEvery tick would otherwise fire
+				// on a near-empty (or empty) batch shortly after. Reset
+				// the window so the timer only fires FlushEvery after
+				// this flush, not after whatever was left of the
+				// previous window.
+				ticker.Reset(p.o.FlushEvery)
 			}
 
 		case <-ticker.C:

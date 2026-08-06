@@ -298,3 +298,86 @@ func TestWriteErrorDropsButLoopContinues(t *testing.T) {
 	}
 }
 
+// TestDrainNoTOCTOUWithConcurrentEnqueue reproduces the Drain/Enqueue TOCTOU:
+// pre-fix, Enqueue pushed logs into buf and only incremented p.unflushed
+// afterward, so Drain — which reads p.unflushed without taking p.mu — could
+// observe unflushed==0 (and return "done") while a log had already been
+// pushed into buf (or handed to Run's pending batch) but not yet counted.
+//
+// A single large burst is enqueued while Run is actively flushing small
+// batches (MaxBatch well below the burst size), which widens the window
+// between "log visible to Run" and "log counted in unflushed" enough for
+// two concurrent watchers to have a realistic chance of catching it:
+//   - one watches p.unflushed for a negative reading, which can only happen
+//     if Run flushed (and decremented for) entries whose corresponding
+//     increment hadn't landed yet;
+//   - one repeatedly calls Drain and checks that it never reports "done"
+//     while entries are still sitting unconsumed in the channel.
+func TestDrainNoTOCTOUWithConcurrentEnqueue(t *testing.T) {
+	fw := &fakeWriter{}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 20000, FlushEvery: time.Hour, MaxBatch: 10})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	const n = 8000
+	logs := make([]core.Log, n)
+	for i := range logs {
+		logs[i] = testLog(i, core.SeverityInfo)
+	}
+
+	var minUnflushed int64 = 1 << 62
+	var mismatch int32
+	stop := make(chan struct{})
+	var watchers sync.WaitGroup
+
+	watchers.Add(1)
+	go func() {
+		defer watchers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if v := atomic.LoadInt64(&p.unflushed); v < minUnflushed {
+				minUnflushed = v
+			}
+		}
+	}()
+
+	watchers.Add(1)
+	go func() {
+		defer watchers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Millisecond)
+			err := p.Drain(dctx)
+			dcancel()
+			if err == nil && len(p.buf) > 0 {
+				atomic.StoreInt32(&mismatch, 1)
+			}
+		}
+	}()
+
+	if err := p.Enqueue(logs); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	eventually(t, 2*time.Second, func() bool { return fw.totalEntries() == n })
+	close(stop)
+	watchers.Wait()
+
+	if minUnflushed < 0 {
+		t.Fatalf("p.unflushed observed negative (%d): a flush decremented for entries whose Enqueue increment had not landed yet", minUnflushed)
+	}
+	if atomic.LoadInt32(&mismatch) != 0 {
+		t.Fatalf("Drain reported done while entries were still sitting unconsumed in the buffer")
+	}
+}
+
