@@ -1,0 +1,21 @@
+pq-duplicate	pq: duplicate key value violates unique constraint "users_email_key"
+pq-duplicate	pq: duplicate key value violates unique constraint "orders_id_key"
+pq-duplicate	pq: duplicate key value violates unique constraint "sessions_token_key"
+pq-conn-refused	dial tcp 10.0.3.7:5432: connect: connection refused
+pq-conn-refused	dial tcp 10.0.4.12:5432: connect: connection refused
+pq-conn-refused	dial tcp 192.168.1.5:5432: connect: connection refused
+net-timeout	read tcp 10.0.0.1:443->10.0.0.9:51422: i/o timeout
+net-timeout	read tcp 10.0.0.2:443->10.0.0.15:51423: i/o timeout
+net-timeout	read tcp 10.0.0.3:443->10.0.0.20:59999: i/o timeout
+panic-nil-ptr	goroutine 42 [running]: panic: runtime error: invalid memory address or nil pointer dereference
+panic-nil-ptr	goroutine 87 [running]: panic: runtime error: invalid memory address or nil pointer dereference
+panic-nil-ptr	goroutine 5 [running]: panic: runtime error: invalid memory address or nil pointer dereference
+http-502	GET /api/v1/orders/4812 502 Bad Gateway
+http-502	GET /api/v1/orders/9931 502 Bad Gateway
+http-502	GET /api/v1/orders/1002 502 Bad Gateway
+http-503	GET /health 503 Service Unavailable trace=a1b2c3d4e5f6a7b8
+http-503	GET /health 503 Service Unavailable trace=1234567890abcdef
+http-503	GET /health 503 Service Unavailable trace=fedcba0987654321
+file-not-found	open "/data/uploads/8f3a9b2c.png": no such file or directory
+file-not-found	open "/data/uploads/1a2b3c4d.png": no such file or directory
+file-not-found	open "/data/uploads/deadbeef01.png": no such file or directory
