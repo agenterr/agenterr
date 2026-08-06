@@ -76,6 +76,24 @@ OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:3617/v1/logs
 OTEL_EXPORTER_OTLP_LOGS_HEADERS=Authorization=Bearer%20agt_ingest_...
 ```
 
+Or point an OpenTelemetry Collector's `otlphttp` exporter at the same
+endpoint:
+
+```yaml
+# otel-collector-config.yaml
+exporters:
+  otlphttp/agenterr:
+    logs_endpoint: http://localhost:3617/v1/logs
+    headers:
+      Authorization: "Bearer agt_ingest_..."
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/agenterr]
+```
+
 ## Agent setup
 
 Give an agent access to the eight MCP tools (`list_projects`, `list_issues`,
