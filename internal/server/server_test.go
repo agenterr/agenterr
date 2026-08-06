@@ -182,9 +182,10 @@ func TestErrAbortHandlerPropagates(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Fatalf("expected a connection error from the aborted handler, got a response (status %d)", resp.StatusCode)
 	}
-	if strings.Contains(err.Error(), "500") {
-		t.Errorf("client error suggests a 500 response was sent, want silent abort: %v", err)
-	}
+	// No substring check on err here: if a 500 response had actually been
+	// written, err would be nil and the Fatalf above already catches it —
+	// and err.Error() contains the server's random port, which can itself
+	// contain "500" (e.g. :50055) and once made this test flake.
 
 	// process survives: the same server answers a normal request fine.
 	resp2, err2 := http.Get(ts.URL + "/healthz-not-mounted")
