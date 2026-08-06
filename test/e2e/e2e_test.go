@@ -1193,8 +1193,13 @@ func (h *harness) testGracefulShutdown(t *testing.T) {
 		if err != nil {
 			t.Fatalf("process did not exit 0 after SIGTERM: %v\nstdout:\n%s\nstderr:\n%s", err, h.stdout.String(), h.stderr.String())
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("process did not exit within 5s of SIGTERM\nstdout:\n%s\nstderr:\n%s", h.stdout.String(), h.stderr.String())
+	// The bound must exceed the server's own worst-case shutdown budget:
+	// OnStop gives srv.Shutdown up to shutdownServerBudget (7s, see
+	// internal/app/lifecycle.go) before moving on to drain — a lingering
+	// client connection (e.g. the MCP session's streamable transport) can
+	// legitimately consume that whole budget. 5s here used to flake.
+	case <-time.After(15 * time.Second):
+		t.Fatalf("process did not exit within 15s of SIGTERM\nstdout:\n%s\nstderr:\n%s", h.stdout.String(), h.stderr.String())
 	}
 
 	for _, panicMarker := range []string{"panic:", "goroutine "} {
