@@ -52,7 +52,7 @@ func (s *Server) registerAlertTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "upsert_alert_rule",
-		Description: "Create or update an alert rule (new_issue, regression, or threshold) that posts a webhook when matching events occur. Pass id to update an existing rule. A rule that's accepted but never test-fired can still be silently broken — always follow up with test_alert_rule to confirm the receiver actually gets it before trusting the rule to fire for real.",
+		Description: "Create or update an alert rule (new_issue, regression, or threshold) that posts a webhook when matching events occur. Pass id to update an existing rule. Rules evaluate only error/exception events (records that group into issues); min_severity narrows within that set. A rule that's accepted but never test-fired can still be silently broken — always follow up with test_alert_rule to confirm the receiver actually gets it before trusting the rule to fire for real.",
 	}, s.upsertAlertRule)
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{

@@ -218,6 +218,13 @@ but silently isn't. Use a create → test-fire → trust loop every time:
    `regression` fires when a resolved issue reopens, `threshold` fires when
    `n` matching events land within `window_minutes`. Scope it with `service`,
    `environment`, and `min_severity` (all optional; omitted means "any").
+   Alert rules only evaluate events that group into issues — records with
+   severity ≥ error or exception attributes; a rule's `min_severity`
+   narrows within that set, so a threshold rule aimed at info-level volume
+   will never fire. Note that `test_alert_rule` verifies delivery (webhook
+   reachability and payload structure), not that the rule's conditions can
+   actually match — don't let a successful test-fire imply the rule is
+   live-proven.
 2. **Fire it for real with `test_alert_rule`.** This sends the rule's
    webhook immediately with a sample issue and `"test":true` in the payload,
    and reports back whether delivery succeeded — no need to wait for a

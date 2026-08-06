@@ -194,13 +194,16 @@ The webhook body is the same shape for every kind, `event_count` and
     "id": 42,
     "title": "PoolExhaustedError: no connections available",
     "severity": "ERROR",
-    "count": 1,
+    "count": 0,
     "first_seen": "2026-08-06T15:44:39Z",
     "last_seen": "2026-08-06T15:44:39Z"
   },
   "fired_at": "2026-08-06T15:44:39Z"
 }
 ```
+
+`count` is populated only for threshold fires (the in-window event count); for new_issue and regression fires it is 0.
+`first_seen` and `last_seen` reflect the triggering event's timestamp, not the issue's historical first sighting — notably, on a regression fire they are the reopening event's time.
 
 `issue.severity` is always rendered UPPERCASE, regardless of the case used
 at ingest. Threshold windows are tracked in memory, not persisted — a
