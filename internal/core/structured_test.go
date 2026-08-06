@@ -170,30 +170,38 @@ func TestParseStructuredBody_JSON(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "attrs map not mutated on caller side",
-			in: Log{Time: arrival,
-				Attrs: map[string]string{"orig_key": "orig_val"},
-				Body: `{"msg":"m","new_key":"new_val"}`},
-			want: func(t *testing.T, got Log) {
-				if got.Attrs["orig_key"] != "orig_val" {
-					t.Errorf("original attr lost: %v", got.Attrs)
-				}
-				if got.Attrs["new_key"] != "new_val" {
-					t.Errorf("new attr not lifted: %v", got.Attrs)
-				}
-				// Verify the returned Log has both keys
-				if len(got.Attrs) != 2 {
-					t.Errorf("attrs count = %d, want 2", len(got.Attrs))
-				}
-			},
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.want(t, ParseStructuredBody(tt.in))
 		})
+	}
+}
+
+func TestParseStructuredBody_AttrsNotMutated(t *testing.T) {
+	arrival := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+
+	// Keep a reference to the original map to verify it's not mutated.
+	orig := map[string]string{"orig_key": "orig_val"}
+	in := Log{Time: arrival, Attrs: orig,
+		Body: `{"msg":"m","new_key":"new_val"}`}
+	got := ParseStructuredBody(in)
+
+	// Verify the returned Log has both keys.
+	if got.Attrs["orig_key"] != "orig_val" {
+		t.Errorf("original attr lost in got.Attrs: %v", got.Attrs)
+	}
+	if got.Attrs["new_key"] != "new_val" {
+		t.Errorf("new attr not lifted: %v", got.Attrs)
+	}
+	if len(got.Attrs) != 2 {
+		t.Errorf("got.Attrs count = %d, want 2", len(got.Attrs))
+	}
+
+	// Verify the caller's original map was NOT mutated.
+	if len(orig) != 1 || orig["orig_key"] != "orig_val" {
+		t.Errorf("caller's original Attrs map was mutated: %v", orig)
 	}
 }
 
