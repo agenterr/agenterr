@@ -90,11 +90,38 @@ type Admin interface {
 	LookupKey(ctx context.Context, plaintext string) (projectID int64, kind string, err error)
 }
 
+// NoiseRules manages per-project ingest filtering rules and their
+// drop accounting, and the per-project parse-bodies toggle.
+type NoiseRules interface {
+	// NoiseRules returns rules for a project (projectID 0 = all
+	// projects), ordered by ascending ID. DroppedCount reflects
+	// persisted drops only.
+	NoiseRules(ctx context.Context, projectID int64) ([]NoiseRuleRow, error)
+	// UpsertNoiseRule inserts (ID 0) or updates (ID set) and returns
+	// the stored row. Updating a missing ID returns ErrNotFound.
+	// Unknown kinds are rejected with an error.
+	UpsertNoiseRule(ctx context.Context, r core.NoiseRule) (NoiseRuleRow, error)
+	DeleteNoiseRule(ctx context.Context, id int64) error // missing → ErrNotFound
+	// AddNoiseDrops atomically adds the given per-rule drop counts.
+	// Unknown rule IDs are skipped (rule deleted since counting began).
+	AddNoiseDrops(ctx context.Context, counts map[int64]int64) error
+	// SetProjectParseBodies flips the per-project parse toggle.
+	SetProjectParseBodies(ctx context.Context, projectID int64, on bool) error
+}
+
+// NoiseRuleRow is a stored rule plus persistence-side fields.
+type NoiseRuleRow struct {
+	core.NoiseRule
+	DroppedCount int64
+	CreatedAt    time.Time
+}
+
 // Store is the full persistence surface a backend must implement.
 type Store interface {
 	Reader
 	Writer
 	Admin
+	NoiseRules
 	Close() error
 }
 

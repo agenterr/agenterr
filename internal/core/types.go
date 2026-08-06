@@ -94,6 +94,7 @@ type Project struct {
 	Slug          string
 	RetentionDays int
 	CreatedAt     time.Time
+	ParseBodies   bool // whether ingest parses structured fields out of log bodies
 }
 
 // Log represents a log entry.

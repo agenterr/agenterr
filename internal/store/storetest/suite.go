@@ -40,6 +40,17 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("Admin/ProjectCRUDAndKeys", func(t *testing.T) { testAdminProjectCRUDAndKeys(t, open) })
 	t.Run("Admin/InstanceAdminKey", func(t *testing.T) { testAdminInstanceAdminKey(t, open) })
 	t.Run("SetIssueStatus/Transitions", func(t *testing.T) { testSetIssueStatusTransitions(t, open) })
+	t.Run("NoiseRules/UpsertInsertReturnsIDAndDefaults", func(t *testing.T) { testNoiseRulesUpsertInsertReturnsIDAndDefaults(t, open) })
+	t.Run("NoiseRules/UpsertUpdateRoundTripsFields", func(t *testing.T) { testNoiseRulesUpsertUpdateRoundTripsFields(t, open) })
+	t.Run("NoiseRules/UpsertUpdateMissingIDNotFound", func(t *testing.T) { testNoiseRulesUpsertUpdateMissingIDNotFound(t, open) })
+	t.Run("NoiseRules/UpsertUnknownKindRejected", func(t *testing.T) { testNoiseRulesUpsertUnknownKindRejected(t, open) })
+	t.Run("NoiseRules/DeleteThenNotFound", func(t *testing.T) { testNoiseRulesDeleteThenNotFound(t, open) })
+	t.Run("NoiseRules/ListScopedByProjectAndOrdered", func(t *testing.T) { testNoiseRulesListScopedByProjectAndOrdered(t, open) })
+	t.Run("NoiseRules/ListAllProjects", func(t *testing.T) { testNoiseRulesListAllProjects(t, open) })
+	t.Run("NoiseRules/AddNoiseDropsAccumulatesAndSkipsUnknown", func(t *testing.T) { testNoiseRulesAddNoiseDropsAccumulatesAndSkipsUnknown(t, open) })
+	t.Run("NoiseRules/SetProjectParseBodies", func(t *testing.T) { testNoiseRulesSetProjectParseBodies(t, open) })
+	t.Run("NoiseRules/CreateProjectDefaultsParseBodiesTrue", func(t *testing.T) { testNoiseRulesCreateProjectDefaultsParseBodiesTrue(t, open) })
+	t.Run("NoiseRules/SeverityRoundTripsLowercase", func(t *testing.T) { testNoiseRulesSeverityRoundTripsLowercase(t, open) })
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -897,5 +908,330 @@ func testSetIssueStatusTransitions(t *testing.T, open func(t *testing.T) store.S
 	err = s.SetIssueStatus(ctx, 999999, core.StatusResolved)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("SetIssueStatus(unknown) err = %v, want ErrNotFound", err)
+	}
+}
+
+// --- NoiseRules ----------------------------------------------------------
+
+func testNoiseRulesUpsertInsertReturnsIDAndDefaults(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	row, err := s.UpsertNoiseRule(ctx, core.NoiseRule{
+		ProjectID: p.ID,
+		Kind:      core.NoiseDropMatch,
+		Service:   "traefik",
+		Pattern:   "healthcheck",
+		Enabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule: %v", err)
+	}
+	if row.ID == 0 {
+		t.Fatalf("expected non-zero ID")
+	}
+	if row.DroppedCount != 0 {
+		t.Errorf("DroppedCount = %d, want 0", row.DroppedCount)
+	}
+	if row.CreatedAt.IsZero() {
+		t.Errorf("expected non-zero CreatedAt")
+	}
+	if row.ProjectID != p.ID || row.Kind != core.NoiseDropMatch || row.Service != "traefik" || row.Pattern != "healthcheck" || !row.Enabled {
+		t.Errorf("row = %+v, unexpected values", row)
+	}
+}
+
+func testNoiseRulesUpsertUpdateRoundTripsFields(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	inserted, err := s.UpsertNoiseRule(ctx, core.NoiseRule{
+		ProjectID: p.ID,
+		Kind:      core.NoiseSample,
+		Service:   "web",
+		Severity:  core.SeverityInfo,
+		N:         5,
+		Enabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule insert: %v", err)
+	}
+
+	updated, err := s.UpsertNoiseRule(ctx, core.NoiseRule{
+		ID:        inserted.ID,
+		ProjectID: p.ID,
+		Kind:      core.NoiseSeverityFloor,
+		Service:   "api",
+		Severity:  core.SeverityWarn,
+		Pattern:   "",
+		N:         0,
+		Enabled:   false,
+	})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule update: %v", err)
+	}
+	if updated.ID != inserted.ID {
+		t.Errorf("ID = %d, want %d (update must not change ID)", updated.ID, inserted.ID)
+	}
+	if updated.Kind != core.NoiseSeverityFloor {
+		t.Errorf("Kind = %q, want %q", updated.Kind, core.NoiseSeverityFloor)
+	}
+	if updated.Service != "api" {
+		t.Errorf("Service = %q, want %q", updated.Service, "api")
+	}
+	if updated.Severity != core.SeverityWarn {
+		t.Errorf("Severity = %v, want %v", updated.Severity, core.SeverityWarn)
+	}
+	if updated.Enabled {
+		t.Errorf("Enabled = true, want false")
+	}
+
+	rows, err := s.NoiseRules(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("NoiseRules: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rows))
+	}
+	if rows[0].Kind != core.NoiseSeverityFloor || rows[0].Service != "api" || rows[0].Severity != core.SeverityWarn || rows[0].Enabled {
+		t.Errorf("persisted row = %+v, want updated values", rows[0])
+	}
+}
+
+func testNoiseRulesUpsertUpdateMissingIDNotFound(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	_, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ID: 999999, ProjectID: p.ID, Kind: core.NoiseDropMatch, Pattern: "x"})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("UpsertNoiseRule(missing ID) err = %v, want ErrNotFound", err)
+	}
+}
+
+func testNoiseRulesUpsertUnknownKindRejected(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	_, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p.ID, Kind: core.NoiseRuleKind("bogus")})
+	if err == nil {
+		t.Fatalf("UpsertNoiseRule(unknown kind) err = nil, want error")
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("UpsertNoiseRule(unknown kind) err = ErrNotFound, want a validation error")
+	}
+}
+
+func testNoiseRulesDeleteThenNotFound(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	row, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p.ID, Kind: core.NoiseDropMatch, Pattern: "x"})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule: %v", err)
+	}
+
+	if err := s.DeleteNoiseRule(ctx, row.ID); err != nil {
+		t.Fatalf("DeleteNoiseRule: %v", err)
+	}
+
+	rows, err := s.NoiseRules(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("NoiseRules: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 rules after delete, got %d", len(rows))
+	}
+
+	err = s.DeleteNoiseRule(ctx, row.ID)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("DeleteNoiseRule(already deleted) err = %v, want ErrNotFound", err)
+	}
+}
+
+func testNoiseRulesListScopedByProjectAndOrdered(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p1 := mustProject(ctx, t, s)
+	p2, err := s.CreateProject(ctx, "second-project", 30)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	r1, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p1.ID, Kind: core.NoiseDropMatch, Pattern: "a"})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule #1: %v", err)
+	}
+	r2, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p1.ID, Kind: core.NoiseDropMatch, Pattern: "b"})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule #2: %v", err)
+	}
+	if _, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p2.ID, Kind: core.NoiseDropMatch, Pattern: "c"}); err != nil {
+		t.Fatalf("UpsertNoiseRule #3: %v", err)
+	}
+
+	rows, err := s.NoiseRules(ctx, p1.ID)
+	if err != nil {
+		t.Fatalf("NoiseRules: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rules for p1, got %d", len(rows))
+	}
+	if rows[0].ID != r1.ID || rows[1].ID != r2.ID {
+		t.Errorf("rows not ordered ascending by ID: got IDs %d, %d, want %d, %d", rows[0].ID, rows[1].ID, r1.ID, r2.ID)
+	}
+}
+
+func testNoiseRulesListAllProjects(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p1 := mustProject(ctx, t, s)
+	p2, err := s.CreateProject(ctx, "second-project", 30)
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	if _, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p1.ID, Kind: core.NoiseDropMatch, Pattern: "a"}); err != nil {
+		t.Fatalf("UpsertNoiseRule #1: %v", err)
+	}
+	if _, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p2.ID, Kind: core.NoiseDropMatch, Pattern: "b"}); err != nil {
+		t.Fatalf("UpsertNoiseRule #2: %v", err)
+	}
+
+	rows, err := s.NoiseRules(ctx, 0)
+	if err != nil {
+		t.Fatalf("NoiseRules(0): %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rules across all projects, got %d", len(rows))
+	}
+}
+
+func testNoiseRulesAddNoiseDropsAccumulatesAndSkipsUnknown(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	r1, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p.ID, Kind: core.NoiseDropMatch, Pattern: "a"})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule #1: %v", err)
+	}
+	r2, err := s.UpsertNoiseRule(ctx, core.NoiseRule{ProjectID: p.ID, Kind: core.NoiseDropMatch, Pattern: "b"})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule #2: %v", err)
+	}
+
+	if err := s.AddNoiseDrops(ctx, map[int64]int64{r1.ID: 3, r2.ID: 1, 999999: 42}); err != nil {
+		t.Fatalf("AddNoiseDrops #1: %v", err)
+	}
+	if err := s.AddNoiseDrops(ctx, map[int64]int64{r1.ID: 2}); err != nil {
+		t.Fatalf("AddNoiseDrops #2: %v", err)
+	}
+
+	rows, err := s.NoiseRules(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("NoiseRules: %v", err)
+	}
+	byID := map[int64]store.NoiseRuleRow{}
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	if byID[r1.ID].DroppedCount != 5 {
+		t.Errorf("r1 DroppedCount = %d, want 5", byID[r1.ID].DroppedCount)
+	}
+	if byID[r2.ID].DroppedCount != 1 {
+		t.Errorf("r2 DroppedCount = %d, want 1", byID[r2.ID].DroppedCount)
+	}
+}
+
+func testNoiseRulesSetProjectParseBodies(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	if err := s.SetProjectParseBodies(ctx, p.ID, false); err != nil {
+		t.Fatalf("SetProjectParseBodies(false): %v", err)
+	}
+
+	projects, err := s.Projects(ctx)
+	if err != nil {
+		t.Fatalf("Projects: %v", err)
+	}
+	found := false
+	for _, pr := range projects {
+		if pr.ID == p.ID {
+			found = true
+			if pr.ParseBodies {
+				t.Errorf("ParseBodies = true after SetProjectParseBodies(false)")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("project %d not found in Projects()", p.ID)
+	}
+
+	if err := s.SetProjectParseBodies(ctx, p.ID, true); err != nil {
+		t.Fatalf("SetProjectParseBodies(true): %v", err)
+	}
+	projects, err = s.Projects(ctx)
+	if err != nil {
+		t.Fatalf("Projects: %v", err)
+	}
+	for _, pr := range projects {
+		if pr.ID == p.ID && !pr.ParseBodies {
+			t.Errorf("ParseBodies = false after SetProjectParseBodies(true)")
+		}
+	}
+}
+
+func testNoiseRulesCreateProjectDefaultsParseBodiesTrue(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	if !p.ParseBodies {
+		t.Errorf("CreateProject: ParseBodies = false, want true by default")
+	}
+
+	projects, err := s.Projects(ctx)
+	if err != nil {
+		t.Fatalf("Projects: %v", err)
+	}
+	for _, pr := range projects {
+		if pr.ID == p.ID && !pr.ParseBodies {
+			t.Errorf("Projects(): ParseBodies = false, want true by default")
+		}
+	}
+}
+
+func testNoiseRulesSeverityRoundTripsLowercase(t *testing.T, open func(t *testing.T) store.Store) {
+	ctx := context.Background()
+	s := open(t)
+	p := mustProject(ctx, t, s)
+
+	row, err := s.UpsertNoiseRule(ctx, core.NoiseRule{
+		ProjectID: p.ID,
+		Kind:      core.NoiseSeverityFloor,
+		Service:   "traefik",
+		Severity:  core.SeverityWarn,
+		Enabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertNoiseRule: %v", err)
+	}
+	if row.Severity != core.SeverityWarn {
+		t.Errorf("returned row Severity = %v, want %v", row.Severity, core.SeverityWarn)
+	}
+
+	rows, err := s.NoiseRules(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("NoiseRules: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Severity != core.SeverityWarn {
+		t.Fatalf("rows = %+v, want single row with Severity=%v", rows, core.SeverityWarn)
 	}
 }

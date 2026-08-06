@@ -30,7 +30,7 @@ const selectAppliedMigrations = `SELECT version FROM schema_migrations`
 const insertProject = `
 INSERT INTO projects (name, slug, retention_days, created_at) VALUES (?, ?, ?, ?)`
 
-const selectProjects = `SELECT id, name, slug, retention_days, created_at FROM projects ORDER BY id`
+const selectProjects = `SELECT id, name, slug, retention_days, created_at, parse_bodies FROM projects ORDER BY id`
 
 const updateIssueStatus = `UPDATE issues SET status = ? WHERE id = ?`
 
@@ -112,6 +112,7 @@ func (db *DB) CreateProject(ctx context.Context, name string, retentionDays int)
 		Slug:          slug,
 		RetentionDays: retentionDays,
 		CreatedAt:     createdAt,
+		ParseBodies:   true, // matches the parse_bodies column default
 	}, nil
 }
 
@@ -136,7 +137,8 @@ func (db *DB) Projects(ctx context.Context) ([]core.Project, error) {
 	for rows.Next() {
 		var p core.Project
 		var createdAt string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.RetentionDays, &createdAt); err != nil {
+		var parseBodies int
+		if err := rows.Scan(&p.ID, &p.Name, &p.Slug, &p.RetentionDays, &createdAt, &parseBodies); err != nil {
 			return nil, fmt.Errorf("sqlite: scan project: %w", err)
 		}
 		ts, err := time.Parse(time.RFC3339Nano, createdAt)
@@ -144,6 +146,7 @@ func (db *DB) Projects(ctx context.Context) ([]core.Project, error) {
 			return nil, fmt.Errorf("sqlite: parse project created_at: %w", err)
 		}
 		p.CreatedAt = ts
+		p.ParseBodies = parseBodies != 0
 		out = append(out, p)
 	}
 	return out, rows.Err()
