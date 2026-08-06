@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agenterr/agenterr/internal/ship"
 	"github.com/agenterr/agenterr/internal/ship/process"
+	"github.com/agenterr/agenterr/internal/ship/shared"
 )
 
 // scanInterval and pollInterval are the glob-rescan and growth-poll periods.
@@ -32,12 +32,12 @@ var (
 const readChunk = 64 * 1024
 
 // Tail watches glob for matching files and tails each one, sending every
-// complete line as a ship.Sourced (tagged with service) on out. It blocks
+// complete line as a shared.Sourced (tagged with service) on out. It blocks
 // until ctx is cancelled, at which point it returns nil once every per-file
 // goroutine it started has exited. glob is rescanned every scanInterval so
 // files created after Tail starts are picked up; only regular files are
 // tailed (directories matched by the glob are skipped).
-func Tail(ctx context.Context, glob, service string, out chan<- ship.Sourced) error {
+func Tail(ctx context.Context, glob, service string, out chan<- shared.Sourced) error {
 	started := make(map[string]bool)
 	var wg sync.WaitGroup
 	defer wg.Wait() // no leaked per-file goroutines: wait for them to observe ctx.Done and exit
@@ -83,7 +83,7 @@ func Tail(ctx context.Context, glob, service string, out chan<- ship.Sourced) er
 // rename+recreate) and reopens from the start when detected. An unreadable
 // file is WARN-logged once (not once per retry) and polled until it
 // becomes readable or ctx is cancelled.
-func tailFile(ctx context.Context, path, service string, out chan<- ship.Sourced) {
+func tailFile(ctx context.Context, path, service string, out chan<- shared.Sourced) {
 	var (
 		f          *os.File
 		openedInfo os.FileInfo // identity snapshot from the currently-open handle, for os.SameFile
@@ -195,10 +195,10 @@ func tailFile(ctx context.Context, path, service string, out chan<- ship.Sourced
 }
 
 // emitLines splits buf on '\n', sending each complete line as a
-// ship.Sourced with a read-time timestamp, and returns the trailing
+// shared.Sourced with a read-time timestamp, and returns the trailing
 // incomplete line (if any) unsent — a partial line at EOF waits for its
 // newline rather than being emitted early.
-func emitLines(ctx context.Context, buf []byte, service string, out chan<- ship.Sourced) []byte {
+func emitLines(ctx context.Context, buf []byte, service string, out chan<- shared.Sourced) []byte {
 	for {
 		idx := bytes.IndexByte(buf, '\n')
 		if idx < 0 {
@@ -207,7 +207,7 @@ func emitLines(ctx context.Context, buf []byte, service string, out chan<- ship.
 		text := string(buf[:idx])
 		buf = buf[idx+1:]
 		select {
-		case out <- ship.Sourced{Service: service, Line: process.Line{Text: text, Time: time.Now()}}:
+		case out <- shared.Sourced{Service: service, Line: process.Line{Text: text, Time: time.Now()}}:
 		case <-ctx.Done():
 			return buf
 		}

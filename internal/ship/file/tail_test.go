@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/agenterr/agenterr/internal/ship"
+	"github.com/agenterr/agenterr/internal/ship/shared"
 )
 
 // TestMain shrinks the scan/poll intervals for the whole package so tests
@@ -25,10 +25,10 @@ const (
 	noEventWait = 150 * time.Millisecond // > pollInterval, used to assert "nothing arrived yet"
 )
 
-func startTail(t *testing.T, glob, service string) (chan ship.Sourced, context.CancelFunc) {
+func startTail(t *testing.T, glob, service string) (chan shared.Sourced, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	out := make(chan ship.Sourced, 64)
+	out := make(chan shared.Sourced, 64)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -47,18 +47,18 @@ func startTail(t *testing.T, glob, service string) (chan ship.Sourced, context.C
 	return out, cancel
 }
 
-func recv(t *testing.T, out <-chan ship.Sourced) ship.Sourced {
+func recv(t *testing.T, out <-chan shared.Sourced) shared.Sourced {
 	t.Helper()
 	select {
 	case s := <-out:
 		return s
 	case <-time.After(recvTimeout):
 		t.Fatal("timed out waiting for a line")
-		return ship.Sourced{}
+		return shared.Sourced{}
 	}
 }
 
-func expectNone(t *testing.T, out <-chan ship.Sourced) {
+func expectNone(t *testing.T, out <-chan shared.Sourced) {
 	t.Helper()
 	select {
 	case s := <-out:
