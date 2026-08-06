@@ -205,6 +205,88 @@ func TestParseStructuredBody_AttrsNotMutated(t *testing.T) {
 	}
 }
 
+func TestParseStructuredBody_Logfmt(t *testing.T) {
+	arrival := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		in   Log
+		want func(t *testing.T, got Log)
+	}{
+		{
+			name: "logfmt error line lifts level msg and attrs",
+			in: Log{Time: arrival, Severity: SeverityInfo,
+				Body: `level=error msg="write failed" request_id=req-9 retries=2`},
+			want: func(t *testing.T, got Log) {
+				if got.Severity != SeverityError {
+					t.Errorf("severity = %v, want ERROR", got.Severity)
+				}
+				if got.Body != "write failed" {
+					t.Errorf("body = %q, want %q", got.Body, "write failed")
+				}
+				if got.Attrs["request_id"] != "req-9" || got.Attrs["retries"] != "2" {
+					t.Errorf("attrs = %v", got.Attrs)
+				}
+			},
+		},
+		{
+			name: "prose containing equals sign untouched",
+			in:   Log{Time: arrival, Body: `retry count=3 exceeded for host db-1`},
+			want: func(t *testing.T, got Log) {
+				if got.Body != `retry count=3 exceeded for host db-1` || got.Attrs != nil {
+					t.Errorf("prose was lifted: %+v", got)
+				}
+			},
+		},
+		{
+			name: "single pair untouched (needs at least two)",
+			in:   Log{Time: arrival, Body: `level=info`},
+			want: func(t *testing.T, got Log) {
+				if got.Attrs != nil {
+					t.Errorf("single-pair line was lifted: %+v", got)
+				}
+			},
+		},
+		{
+			name: "pairs without message or level key untouched",
+			in:   Log{Time: arrival, Body: `foo=bar baz=qux`},
+			want: func(t *testing.T, got Log) {
+				if got.Body != `foo=bar baz=qux` || got.Attrs != nil {
+					t.Errorf("keyless logfmt was lifted: %+v", got)
+				}
+			},
+		},
+		{
+			name: "multiline body untouched",
+			in:   Log{Time: arrival, Body: "level=error msg=a\nlevel=error msg=b"},
+			want: func(t *testing.T, got Log) {
+				if got.Attrs != nil {
+					t.Errorf("multiline was lifted: %+v", got)
+				}
+			},
+		},
+		{
+			name: "quoted value with escaped quote",
+			in: Log{Time: arrival,
+				Body: `level=warn msg="disk \"a\" slow" dev=sda`},
+			want: func(t *testing.T, got Log) {
+				if got.Body != `disk "a" slow` {
+					t.Errorf("body = %q", got.Body)
+				}
+				if got.Attrs["dev"] != "sda" {
+					t.Errorf("dev = %q", got.Attrs["dev"])
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.want(t, ParseStructuredBody(tt.in))
+		})
+	}
+}
+
 // bigJSONBody builds {"msg":"m","k00":"vvv...","k01":...} with n extra keys
 // whose values are valueLen bytes long.
 func bigJSONBody(n, valueLen int) string {

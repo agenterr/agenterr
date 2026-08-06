@@ -36,6 +36,9 @@ func ParseStructuredBody(l Log) Log {
 			return liftFields(l, m)
 		}
 	}
+	if m, ok := parseLogfmtLine(trimmed); ok && hasLiftKeys(m) {
+		return liftFields(l, m)
+	}
 	return l
 }
 
@@ -49,6 +52,82 @@ func decodeJSONObject(body string) (map[string]any, bool) {
 		return nil, false
 	}
 	return m, true
+}
+
+// parseLogfmtLine scans a single line of strictly key=value tokens
+// (values optionally double-quoted with backslash escapes). Any token
+// that is not a pair — prose, a bare word, a second line — rejects the
+// whole body: logfmt detection has no partial credit, which is what keeps
+// ordinary sentences containing "=" out.
+func parseLogfmtLine(body string) (map[string]any, bool) {
+	if strings.ContainsAny(body, "\n\r") {
+		return nil, false
+	}
+	m := make(map[string]any)
+	i := 0
+	for i < len(body) {
+		for i < len(body) && body[i] == ' ' {
+			i++
+		}
+		if i >= len(body) {
+			break
+		}
+		eq := strings.IndexByte(body[i:], '=')
+		if eq <= 0 {
+			return nil, false
+		}
+		key := body[i : i+eq]
+		if strings.ContainsAny(key, " \"") {
+			return nil, false
+		}
+		i += eq + 1
+		var val string
+		if i < len(body) && body[i] == '"' {
+			s, next, ok := scanQuoted(body, i)
+			if !ok {
+				return nil, false
+			}
+			val, i = s, next
+		} else {
+			end := strings.IndexByte(body[i:], ' ')
+			if end < 0 {
+				end = len(body) - i
+			}
+			val, i = body[i:i+end], i+end
+		}
+		if i < len(body) && body[i] != ' ' {
+			return nil, false
+		}
+		m[key] = val
+	}
+	if len(m) < 2 {
+		return nil, false
+	}
+	return m, true
+}
+
+// scanQuoted reads a double-quoted value starting at body[start] == '"',
+// honoring backslash escapes; returns the unquoted value and the index
+// just past the closing quote.
+func scanQuoted(body string, start int) (string, int, bool) {
+	var b strings.Builder
+	i := start + 1
+	for i < len(body) {
+		switch body[i] {
+		case '\\':
+			if i+1 >= len(body) {
+				return "", 0, false
+			}
+			b.WriteByte(body[i+1])
+			i += 2
+		case '"':
+			return b.String(), i + 1, true
+		default:
+			b.WriteByte(body[i])
+			i++
+		}
+	}
+	return "", 0, false
 }
 
 // hasLiftKeys reports whether m carries at least one message or level key —
