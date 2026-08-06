@@ -381,3 +381,38 @@ func TestDrainNoTOCTOUWithConcurrentEnqueue(t *testing.T) {
 	}
 }
 
+// TestNew_Defaults exercises the zero-value fallback branches in New: every
+// other test in this file passes explicit Options, so without this test
+// the "field <= 0 -> default" path for BufferSize/FlushEvery/MaxBatch is
+// never actually run.
+func TestNew_Defaults(t *testing.T) {
+	fw := &fakeWriter{}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{})
+
+	if cap(p.buf) != defaultBufferSize {
+		t.Errorf("BufferSize default = %d, want %d", cap(p.buf), defaultBufferSize)
+	}
+	if p.o.FlushEvery != defaultFlushEvery {
+		t.Errorf("FlushEvery default = %v, want %v", p.o.FlushEvery, defaultFlushEvery)
+	}
+	if p.o.MaxBatch != defaultMaxBatch {
+		t.Errorf("MaxBatch default = %d, want %d", p.o.MaxBatch, defaultMaxBatch)
+	}
+}
+
+// TestPending_InitiallyZero covers Pending(), which every other test in
+// this file only ever exercises indirectly via Drain's polling loop.
+func TestPending_InitiallyZero(t *testing.T) {
+	fw := &fakeWriter{}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{BufferSize: 10, FlushEvery: time.Hour, MaxBatch: 5})
+	if got := p.Pending(); got != 0 {
+		t.Errorf("Pending() on a fresh pipeline = %d, want 0", got)
+	}
+}
+
+// TestNopNotifier_IssueEvent just asserts the v1 no-op Notifier doesn't
+// panic when called — it has no other observable behavior.
+func TestNopNotifier_IssueEvent(t *testing.T) {
+	NopNotifier{}.IssueEvent(store.Entry{})
+}
+
