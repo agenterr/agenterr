@@ -417,3 +417,84 @@ func TestPending_InitiallyZero(t *testing.T) {
 func TestNopNotifier_IssueEvent(_ *testing.T) {
 	NopNotifier{}.IssueEvent(store.Entry{})
 }
+
+// TestRun_ParsesStructuredBodies confirms annotate lifts a structured body
+// before event detection runs: the lifted level=error must be what triggers
+// IsEvent, not something already true of the raw record.
+func TestRun_ParsesStructuredBodies(t *testing.T) {
+	fw := &fakeWriter{}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Run(ctx)
+
+	// Severity is explicitly Info (the value every real ingest path assigns
+	// to a record with no severity of its own, per core.ParseSeverity's own
+	// zero-value behavior) so the body-derived level is eligible to lift,
+	// matching how logs actually arrive at the pipeline in production.
+	err := p.Enqueue([]core.Log{{
+		Time:     time.Now(),
+		Severity: core.SeverityInfo,
+		Body:     `{"level":"error","msg":"payment declined","request_id":"r1"}`,
+	}})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	drainCtx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if err := p.Drain(drainCtx); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	cancel()
+
+	batches := fw.snapshot()
+	if len(batches) != 1 || len(batches[0]) != 1 {
+		t.Fatalf("got %v batches, want 1 batch of 1 entry", batches)
+	}
+	e := batches[0][0]
+	if !e.IsEvent {
+		t.Fatal("lifted ERROR severity did not trigger event detection")
+	}
+	if e.Log.Body != "payment declined" {
+		t.Errorf("body = %q, want lifted msg", e.Log.Body)
+	}
+	if e.Log.Attrs["request_id"] != "r1" {
+		t.Errorf("request_id = %q, want r1", e.Log.Attrs["request_id"])
+	}
+}
+
+// TestRun_DisableBodyParse confirms the escape hatch: with DisableBodyParse
+// set, annotate must leave the raw body and severity untouched, so a
+// structured body carrying level=error does not trigger event detection.
+func TestRun_DisableBodyParse(t *testing.T) {
+	fw := &fakeWriter{}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, Options{DisableBodyParse: true})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Run(ctx)
+
+	if err := p.Enqueue([]core.Log{{
+		Time: time.Now(),
+		Body: `{"level":"error","msg":"payment declined"}`,
+	}}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	drainCtx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if err := p.Drain(drainCtx); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	cancel()
+
+	batches := fw.snapshot()
+	if len(batches) != 1 || len(batches[0]) != 1 {
+		t.Fatalf("got %v batches, want 1 batch of 1 entry", batches)
+	}
+	e := batches[0][0]
+	if e.IsEvent {
+		t.Error("parsing disabled but body was still lifted into an event")
+	}
+	if e.Log.Body == "payment declined" {
+		t.Error("parsing disabled but msg was lifted")
+	}
+}

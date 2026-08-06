@@ -22,6 +22,11 @@ type Options struct {
 	BufferSize int           // capacity of the internal log buffer; default 10_000
 	FlushEvery time.Duration // max time pending entries wait before a flush; default 200ms
 	MaxBatch   int           // batch size that triggers an immediate flush; default 500
+
+	// DisableBodyParse turns off structured-body lifting in annotate.
+	// The zero value keeps it on: parsing is the default behavior, and
+	// the flag exists as an escape hatch.
+	DisableBodyParse bool
 }
 
 const (
@@ -210,6 +215,9 @@ func (p *Pipeline) Pending() int {
 // annotate runs event detection, fingerprinting, and titling for a single
 // log, producing the store.Entry the writer persists.
 func (p *Pipeline) annotate(l core.Log) store.Entry {
+	if !p.o.DisableBodyParse {
+		l = core.ParseStructuredBody(l)
+	}
 	e := store.Entry{Log: l}
 	if core.IsEvent(l) {
 		e.IsEvent = true
