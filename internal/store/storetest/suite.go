@@ -685,29 +685,45 @@ func testPruneDeletesOnlyOlderAndOnlyProject(t *testing.T, open func(t *testing.
 	oldTime := baseTime
 	newTime := baseTime.Add(48 * time.Hour)
 
+	// Include event-linked logs (not just plain logs) on both sides of the
+	// cutoff: events.log_id has a foreign key to logs(id), so pruning a log
+	// that produced an event must also clean up its event row in the same
+	// operation, or the delete fails under foreign_keys=on. This is the
+	// retention system's primary real-world case (most retained logs are
+	// events), so it must be covered here, not just with plain logs.
 	entries := []store.Entry{
 		entry(p1.ID, core.SeverityInfo, "p1 old", "svc", oldTime),
 		entry(p1.ID, core.SeverityInfo, "p1 new", "svc", newTime),
 		entry(p2.ID, core.SeverityInfo, "p2 old", "svc", oldTime),
+		eventEntry(p1.ID, core.SeverityError, "p1 old event", "old-event", "old event", oldTime),
+		eventEntry(p1.ID, core.SeverityError, "p1 new event", "new-event", "new event", newTime),
 	}
 	if err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
 
+	oldIssue := findIssue(t, ctx, s, p1.ID, "old-event")
+	newIssue := findIssue(t, ctx, s, p1.ID, "new-event")
+
 	n, err := s.Prune(ctx, p1.ID, cutoff)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("Prune returned %d, want 1", n)
+	if n != 2 {
+		t.Fatalf("Prune returned %d, want 2 (p1 old plain log + p1 old event log)", n)
 	}
 
 	p1Logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p1.ID})
 	if err != nil {
 		t.Fatalf("SearchLogs p1: %v", err)
 	}
-	if len(p1Logs) != 1 || p1Logs[0].Body != "p1 new" {
-		t.Errorf("p1 logs after prune = %+v, want only %q", p1Logs, "p1 new")
+	if len(p1Logs) != 2 {
+		t.Fatalf("p1 logs after prune = %+v, want 2 (p1 new + p1 new event)", p1Logs)
+	}
+	for _, l := range p1Logs {
+		if l.Body == "p1 old" || l.Body == "p1 old event" {
+			t.Errorf("prune left an old p1 log behind: %q", l.Body)
+		}
 	}
 
 	p2Logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p2.ID})
@@ -716,6 +732,31 @@ func testPruneDeletesOnlyOlderAndOnlyProject(t *testing.T, open func(t *testing.
 	}
 	if len(p2Logs) != 1 || p2Logs[0].Body != "p2 old" {
 		t.Errorf("p2 logs after prune = %+v, want untouched %q", p2Logs, "p2 old")
+	}
+
+	// The issue row itself survives pruning — only its old event log/sample
+	// goes. Both issues (old and new) must still be resolvable, with their
+	// counts untouched by prune.
+	gotOld, oldEvents, err := s.Issue(ctx, oldIssue.ID)
+	if err != nil {
+		t.Fatalf("Issue(old) after prune: %v", err)
+	}
+	if gotOld.Count != 1 {
+		t.Errorf("old issue Count after prune = %d, want 1 (prune doesn't touch issue counts)", gotOld.Count)
+	}
+	if len(oldEvents) != 0 {
+		t.Errorf("old issue events after prune = %d, want 0 (its only event log was pruned)", len(oldEvents))
+	}
+
+	gotNew, newEvents, err := s.Issue(ctx, newIssue.ID)
+	if err != nil {
+		t.Fatalf("Issue(new) after prune: %v", err)
+	}
+	if gotNew.Count != 1 {
+		t.Errorf("new issue Count after prune = %d, want 1", gotNew.Count)
+	}
+	if len(newEvents) != 1 {
+		t.Errorf("new issue events after prune = %d, want 1 (its event log survives)", len(newEvents))
 	}
 }
 

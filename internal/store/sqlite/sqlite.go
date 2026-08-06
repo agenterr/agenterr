@@ -42,19 +42,20 @@ type DB struct {
 // Open opens (creating if necessary) the SQLite database at path, applies
 // any pending migrations, and returns a ready-to-use *DB.
 //
-// Connections are capped at 1 (db.SetMaxOpenConns(1)): SQLite serializes
-// writers regardless, WriteBatch already runs inside a single transaction
-// per call, and a single connection avoids "database is locked" errors
-// from modernc's driver under concurrent access without adding a
-// self-managed mutex. Reads and writes share the same small pool, which is
-// fine at MVP scale (single-process, local file).
+// The default connection pool (no SetMaxOpenConns cap) is used deliberately:
+// WAL mode lets readers proceed without blocking on a writer, and
+// busy_timeout(5000) has any writer-vs-writer contention wait instead of
+// failing outright. Capping MaxOpenConns(1) would serialize reads behind
+// writes and defeat the point of WAL. The single-process pipeline design
+// means there is at most one concurrent writer in practice (WriteBatch),
+// so this relies on WAL + busy_timeout for correctness, not a
+// self-managed mutex.
 func Open(path string) (*DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open: %w", err)
 	}
-	sqlDB.SetMaxOpenConns(1)
 
 	db := &DB{sql: sqlDB}
 	if err := db.migrate(); err != nil {
