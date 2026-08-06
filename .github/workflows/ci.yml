@@ -18,7 +18,11 @@ jobs:
           fi
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.1
+          version: v2.1.6
+          # goinstall builds the linter with this workflow's Go toolchain;
+          # the prebuilt v2.1.6 binary is compiled with go1.24 and refuses
+          # repos targeting go 1.25.
+          install-mode: goinstall
       - run: go test -race ./...
       - run: go test -tags e2e ./test/e2e -v
       - name: coverage gate (internal/core, internal/pipeline >= 90%)
