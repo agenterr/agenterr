@@ -104,9 +104,13 @@ func (p *Projects) MintKey(w http.ResponseWriter, r *http.Request) {
 
 // Update handles PATCH /api/v1/projects/{id}. parse_bodies is the only
 // mutable field for now; unknown fields are rejected rather than
-// silently ignored.
+// silently ignored. Scoping mirrors the noise-rule list/create handlers:
+// an admin key's path id is honored as given, but a project-bound key's
+// own project is authoritative — the path id is ignored/overridden
+// rather than trusted, so an agent-minted api key can flip its own
+// project's toggle without needing admin.
 func (p *Projects) Update(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	pathID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		respondErr(w, http.StatusBadRequest, "id: invalid")
 		return
@@ -124,6 +128,12 @@ func (p *Projects) Update(w http.ResponseWriter, r *http.Request) {
 	if body.ParseBodies == nil {
 		respondErr(w, http.StatusBadRequest, "parse_bodies: required")
 		return
+	}
+
+	callerProjectID, isAdmin := callerScope(r)
+	id := pathID
+	if !isAdmin {
+		id = callerProjectID
 	}
 
 	projects, err := p.Admin.Projects(r.Context())

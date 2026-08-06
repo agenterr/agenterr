@@ -54,7 +54,11 @@ func (a *API) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
 	mux.Handle("POST /api/v1/projects", admin(a.projects.Create))
 	mux.Handle("GET /api/v1/projects", admin(a.projects.List))
 	mux.Handle("POST /api/v1/projects/{id}/keys", admin(a.projects.MintKey))
-	mux.Handle("PATCH /api/v1/projects/{id}", admin(a.projects.Update))
+	// Update (parse_bodies toggle) is an "api"-tier route, not admin-only:
+	// a project-scoped key can flip its own project's toggle, mirroring
+	// the noise-rule list/create scope-override pattern (see
+	// handlers.Projects.Update).
+	mux.Handle("PATCH /api/v1/projects/{id}", wrap(a.projects.Update))
 
 	mux.Handle("GET /api/v1/issues", wrap(a.issues.List))
 	mux.Handle("GET /api/v1/issues/{id}", wrap(a.issues.Get))

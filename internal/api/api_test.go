@@ -1186,6 +1186,60 @@ func TestProjects_Patch_ParseBodiesToggle_VisibleInList(t *testing.T) {
 	}
 }
 
+func TestProjects_Patch_APIKey_OwnProject_Succeeds(t *testing.T) {
+	fs := newFakeStore()
+	fs.projects[1] = core.Project{ID: 1, Name: "acme", Slug: "acme", RetentionDays: 14, ParseBodies: true}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	// validAPIKey belongs to project 1.
+	resp := doReq(t, srv, http.MethodPatch, "/api/v1/projects/1", validAPIKey, []byte(`{"parse_bodies":false}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if fs.projects[1].ParseBodies {
+		t.Errorf("project 1 ParseBodies = true, want false")
+	}
+}
+
+func TestProjects_Patch_APIKey_OtherPathID_ScopeOverridesToOwnProject(t *testing.T) {
+	fs := newFakeStore()
+	fs.projects[1] = core.Project{ID: 1, Name: "acme", Slug: "acme", RetentionDays: 14, ParseBodies: true}
+	fs.projects[2] = core.Project{ID: 2, Name: "other", Slug: "other", RetentionDays: 14, ParseBodies: true}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	// validAPIKey belongs to project 1; path says project 2. Scope-override
+	// (consistent with noise-rule list/create) means this must affect only
+	// the caller's own project (1), never project 2.
+	resp := doReq(t, srv, http.MethodPatch, "/api/v1/projects/2", validAPIKey, []byte(`{"parse_bodies":false}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+
+	listResp := doReq(t, srv, http.MethodGet, "/api/v1/projects", adminKey, nil)
+	defer func() { _ = listResp.Body.Close() }()
+	var got []struct {
+		ID          int64 `json:"id"`
+		ParseBodies bool  `json:"parse_bodies"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byID := map[int64]bool{}
+	for _, p := range got {
+		byID[p.ID] = p.ParseBodies
+	}
+	if byID[1] {
+		t.Errorf("project 1 (caller's own) ParseBodies = true, want false")
+	}
+	if !byID[2] {
+		t.Errorf("project 2 (path id, not caller's own) ParseBodies = false, want unchanged (true) — must not leak cross-project write")
+	}
+}
+
 func TestProjects_Patch_UnknownField_Returns400(t *testing.T) {
 	fs := newFakeStore()
 	fs.projects[1] = core.Project{ID: 1, Name: "acme"}
