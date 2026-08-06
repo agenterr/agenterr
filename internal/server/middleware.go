@@ -26,6 +26,17 @@ func recoverMiddleware(h http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					// http.ErrAbortHandler is the stdlib's sentinel for
+					// "abort this connection silently" (net/http's own
+					// server loop checks for it and skips its panic log).
+					// Streaming handlers use it deliberately when a client
+					// goes away mid-stream. Swallowing it here would turn
+					// an intentional silent abort into a 500 JSON body —
+					// re-panic so net/http's connection-level recovery
+					// handles it the way callers expect.
+					panic(rec)
+				}
 				logger.Error("panic recovered",
 					"error", rec,
 					"stack", string(debug.Stack()),
@@ -50,14 +61,23 @@ func requestLogMiddleware(h http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		// Deferred so a panicking handler (recovered further up the chain,
+		// or an http.ErrAbortHandler re-panic passing through) still
+		// produces an access-log line with method/path/duration. In the
+		// panic case sw.status reads the pre-set http.StatusOK default
+		// (WriteHeader never ran) rather than the eventual 500 — acceptable
+		// for an access log; the panic itself is logged separately, with
+		// its own status, by recoverMiddleware.
+		defer func() {
+			logger.Info("request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", sw.status,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"bytes", sw.bytes,
+			)
+		}()
 		h.ServeHTTP(sw, r)
-		logger.Info("request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", sw.status,
-			"duration_ms", time.Since(start).Milliseconds(),
-			"bytes", sw.bytes,
-		)
 	})
 }
 

@@ -154,6 +154,49 @@ func TestPanicRecovery(t *testing.T) {
 	}
 }
 
+// TestErrAbortHandlerPropagates proves recoverMiddleware re-panics
+// http.ErrAbortHandler rather than turning it into a 500 JSON body: it must
+// reach net/http's own connection-level recovery (which silently aborts
+// the connection, per the stdlib's documented contract for streaming
+// handlers) instead of being swallowed here. Exercised over a real
+// httptest.Server, since http.ErrAbortHandler's behavior is a property of
+// net/http's connection handling — an httptest.ResponseRecorder has no
+// connection to abort.
+func TestErrAbortHandlerPropagates(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("/abort", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	var logBuf bytes.Buffer
+	h := withMiddleware(mux, slog.New(slog.NewTextHandler(&logBuf, nil)))
+
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/abort")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("expected a connection error from the aborted handler, got a response (status %d)", resp.StatusCode)
+	}
+	if strings.Contains(err.Error(), "500") {
+		t.Errorf("client error suggests a 500 response was sent, want silent abort: %v", err)
+	}
+
+	// process survives: the same server answers a normal request fine.
+	resp2, err2 := http.Get(ts.URL + "/healthz-not-mounted")
+	if err2 != nil {
+		t.Fatalf("server did not survive the aborted handler: %v", err2)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (server still alive)", resp2.StatusCode)
+	}
+
+	if strings.Contains(logBuf.String(), `"error"`) && strings.Contains(logBuf.String(), "500") {
+		t.Errorf("recover logged the abort as a normal panic: %s", logBuf.String())
+	}
+}
+
 func TestIngestMountedRequiresAuth(t *testing.T) {
 	deps, _ := newTestDeps(t)
 	srv := New(deps)
