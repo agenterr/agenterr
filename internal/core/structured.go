@@ -36,8 +36,11 @@ func ParseStructuredBody(l Log) Log {
 			return liftFields(l, m)
 		}
 	}
-	if m, ok := parseLogfmtLine(trimmed); ok && hasLiftKeys(m) {
-		return liftFields(l, m)
+	// A braced body is JSON or garbage — never logfmt; skip the logfmt branch.
+	if !strings.HasPrefix(trimmed, "{") {
+		if m, ok := parseLogfmtLine(trimmed); ok && hasLiftKeys(m) {
+			return liftFields(l, m)
+		}
 	}
 	return l
 }
@@ -294,7 +297,8 @@ func takeFirstScalar(m map[string]any, keys []string) (string, bool) {
 }
 
 // takeFirstTime accepts RFC3339(Nano) strings and epoch numbers
-// (>= 1e12 means milliseconds, else seconds).
+// (>= 1e12 means milliseconds, else seconds). All-digit strings are
+// parsed as epoch times using the same threshold.
 func takeFirstTime(m map[string]any, keys []string) (time.Time, bool) {
 	for _, k := range keys {
 		v, ok := m[k]
@@ -310,6 +314,15 @@ func takeFirstTime(m map[string]any, keys []string) (time.Time, bool) {
 			if t, err := time.Parse(time.RFC3339, x); err == nil {
 				return t, true
 			}
+			// If all-digit string, parse as epoch time.
+			if len(x) > 0 && isAllDigits(x) {
+				if f, err := strconv.ParseFloat(x, 64); err == nil {
+					if f >= 1e12 {
+						return time.UnixMilli(int64(f)).UTC(), true
+					}
+					return time.Unix(int64(f), 0).UTC(), true
+				}
+			}
 		case json.Number:
 			if f, err := x.Float64(); err == nil {
 				if f >= 1e12 {
@@ -321,4 +334,14 @@ func takeFirstTime(m map[string]any, keys []string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Time{}, false
+}
+
+// isAllDigits reports whether s contains only ASCII digit bytes '0'..'9'.
+func isAllDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

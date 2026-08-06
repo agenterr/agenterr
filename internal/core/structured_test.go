@@ -294,6 +294,26 @@ func TestParseStructuredBody_Logfmt(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "brace-wrapped malformed JSON never reaches logfmt scan",
+			in:   Log{Time: arrival, Body: `{level=error msg=x}`},
+			want: func(t *testing.T, got Log) {
+				if got.Body != `{level=error msg=x}` || got.Attrs != nil || got.Severity != 0 {
+					t.Errorf("malformed braced body was lifted: %+v", got)
+				}
+			},
+		},
+		{
+			name: "logfmt epoch millis string lifts time",
+			in: Log{Time: arrival, Severity: SeverityInfo,
+				Body: `level=error msg=late ts=1786017570000`},
+			want: func(t *testing.T, got Log) {
+				want := time.Date(2026, 8, 6, 11, 59, 30, 0, time.UTC)
+				if !got.Time.Equal(want) {
+					t.Errorf("time = %v, want %v (epoch millis string)", got.Time, want)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
