@@ -13,9 +13,10 @@
     <span class="muted">last seen {{fmtTime .Issue.LastSeen}}</span>
   </div>
   {{if .Sparkline}}
-  <svg class="sparkline" viewBox="0 0 100 20" preserveAspectRatio="none">
+  <svg class="sparkline" viewBox="0 0 100 20" preserveAspectRatio="none" title="Project-wide occurrences per day — per-issue trend coming later">
     <polyline points="{{.Sparkline}}" fill="none" stroke="var(--sev-error)" stroke-width="1.4"></polyline>
   </svg>
+  <p class="sparkline-caption muted">project trend (7d)</p>
   {{end}}
   <div class="actions">
     <button class="btn-primary" hx-post="/issues/{{.Issue.ID}}/resolve" hx-target="#status-chip" hx-swap="outerHTML">resolve</button>

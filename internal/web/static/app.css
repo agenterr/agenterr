@@ -81,7 +81,6 @@ h2 { font-size: 14px; }
   font-weight: 700;
   font-size: 15px;
 }
-.wordmark .accent, .wordmark .accent + * { color: var(--accent-text); }
 .wordmark .accent { color: var(--accent-text); }
 
 .topnav { display: flex; gap: 16px; flex: 1; }
@@ -244,7 +243,8 @@ input:focus, select:focus {
 
 /* ---------- issue detail ---------- */
 .meta { display: flex; gap: 14px; align-items: center; margin-bottom: 12px; }
-.sparkline { width: 100%; max-width: 320px; height: 24px; display: block; margin-bottom: 12px; }
+.sparkline { width: 100%; max-width: 320px; height: 24px; display: block; margin-bottom: 2px; }
+.sparkline-caption { font-size: 11px; margin: 0 0 12px; }
 .actions { display: flex; gap: 8px; }
 .log-body {
   background: var(--bg-inset);

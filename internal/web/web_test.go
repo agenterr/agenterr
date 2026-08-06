@@ -282,6 +282,10 @@ func TestIssueDetail_ShowsBodyAndResolveButton(t *testing.T) {
 	fs.issueEvents[12] = []core.Event{
 		{LogID: 100, IssueID: 12, Time: time.Now(), Log: core.Log{ID: 100, Body: "panic: nil pointer dereference\ngoroutine 1 [running]:\nmain.boom()"}},
 	}
+	fs.stats = store.Stats{PerDay: []store.DayCount{
+		{Day: "2026-08-01", Events: 1},
+		{Day: "2026-08-02", Events: 3},
+	}}
 	srv := newTestServer(t, fs)
 	defer srv.Close()
 	client := loggedInClient(t, srv)
@@ -298,6 +302,9 @@ func TestIssueDetail_ShowsBodyAndResolveButton(t *testing.T) {
 	}
 	if !strings.Contains(s, `hx-post="/issues/12/resolve"`) {
 		t.Errorf("body missing resolve button hx-post:\n%s", s)
+	}
+	if !strings.Contains(s, "project trend (7d)") {
+		t.Errorf("body missing sparkline caption:\n%s", s)
 	}
 }
 
@@ -410,9 +417,9 @@ func TestSettings_EmptyProjectListShowsCurlSnippet(t *testing.T) {
 	defer srv.Close()
 	client := loggedInClient(t, srv)
 
-	resp, err := client.Get(srv.URL + "/")
+	resp, err := client.Get(srv.URL + "/settings")
 	if err != nil {
-		t.Fatalf("GET /: %v", err)
+		t.Fatalf("GET /settings: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
