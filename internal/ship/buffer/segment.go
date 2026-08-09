@@ -92,7 +92,7 @@ func countRecordsFrom(path string, from int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.Seek(from, io.SeekStart); err != nil {
 		return 0, err
 	}
@@ -121,14 +121,14 @@ func truncateTornTail(path string, from int64) (newSize int64, recordsFromOffset
 	if err != nil {
 		return 0, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.Seek(from, io.SeekStart); err != nil {
 		return 0, 0, err
 	}
 	r := bufio.NewReader(f)
 	pos := from
-	var lastGoodEnd int64 = from
+	lastGoodEnd := from
 	var count int64
 	for {
 		line, rerr := r.ReadBytes('\n')
@@ -151,24 +151,25 @@ func truncateTornTail(path string, from int64) (newSize int64, recordsFromOffset
 	}
 }
 
-// readRecords reads up to max complete (newline-terminated) records from
-// path starting at byte offset from. It returns the records (without their
-// trailing newline), the byte offset just past the last record returned,
-// and whether the segment is exhausted (no more complete records available
-// past the returned offset — either true EOF or a trailing partial line).
-func readRecords(path string, from int64, max int) (records [][]byte, newOffset int64, err error) {
+// readRecords reads up to maxRecords complete (newline-terminated) records
+// from path starting at byte offset from. It returns the records (without
+// their trailing newline), the byte offset just past the last record
+// returned, and whether the segment is exhausted (no more complete records
+// available past the returned offset — either true EOF or a trailing
+// partial line).
+func readRecords(path string, from int64, maxRecords int) (records [][]byte, newOffset int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, from, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := f.Seek(from, io.SeekStart); err != nil {
 		return nil, from, err
 	}
 	r := bufio.NewReader(f)
 	pos := from
-	for len(records) < max {
+	for len(records) < maxRecords {
 		line, rerr := r.ReadBytes('\n')
 		if rerr == nil {
 			pos += int64(len(line))

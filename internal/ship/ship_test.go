@@ -82,7 +82,7 @@ func openTestSpool(t *testing.T) *buffer.Spool {
 	if err != nil {
 		t.Fatalf("buffer.Open: %v", err)
 	}
-	t.Cleanup(func() { sp.Close() })
+	t.Cleanup(func() { _ = sp.Close() })
 	return sp
 }
 
@@ -148,7 +148,7 @@ func TestOrchestratorDockerLinesJoinedAndSetSinceAdvances(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
-	go func() { run(ctx, cfg, sp, snd, dc); close(runDone) }()
+	go func() { _ = run(ctx, cfg, sp, snd, dc); close(runDone) }()
 
 	<-snd.runCalled // pipeline is up
 
@@ -200,7 +200,7 @@ func TestOrchestratorDockerMultilineJoinedIntoOneRecord(t *testing.T) {
 	snd := newStubSender()
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
-	go func() { run(ctx, cfg, sp, snd, dc); close(runDone) }()
+	go func() { _ = run(ctx, cfg, sp, snd, dc); close(runDone) }()
 	<-snd.runCalled
 
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -236,7 +236,7 @@ func TestOrchestratorDockerStartEventAddsTailer(t *testing.T) {
 	snd := newStubSender()
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
-	go func() { run(ctx, cfg, sp, snd, dc); close(runDone) }()
+	go func() { _ = run(ctx, cfg, sp, snd, dc); close(runDone) }()
 	<-snd.runCalled
 
 	lines := make(chan process.Line, 4)
@@ -273,7 +273,7 @@ func TestOrchestratorExcludedContainerNotTailed(t *testing.T) {
 	snd := newStubSender()
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
-	go func() { run(ctx, cfg, sp, snd, dc); close(runDone) }()
+	go func() { _ = run(ctx, cfg, sp, snd, dc); close(runDone) }()
 	<-snd.runCalled
 
 	sent := make(chan bool, 1)
@@ -334,7 +334,7 @@ func TestOrchestratorFileSourceEndToEndThroughRealSender(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
-	go func() { run(ctx, cfg, sp, snd, nil); close(runDone) }()
+	go func() { _ = run(ctx, cfg, sp, snd, nil); close(runDone) }()
 
 	waitFor(t, 5*time.Second, func() bool {
 		mu.Lock()
@@ -370,7 +370,7 @@ func TestOrchestratorShutdownFlushesPendingRecordBeforeReturning(t *testing.T) {
 	snd := newStubSender()
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
-	go func() { run(ctx, cfg, sp, snd, dc); close(runDone) }()
+	go func() { _ = run(ctx, cfg, sp, snd, dc); close(runDone) }()
 	<-snd.runCalled
 
 	lines <- process.Line{Text: "still pending", Time: time.Now()}

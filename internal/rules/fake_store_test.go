@@ -46,7 +46,7 @@ func (f *fakeStore) seedRule(r core.NoiseRule) store.NoiseRuleRow {
 	return row
 }
 
-func (f *fakeStore) NoiseRules(ctx context.Context, projectID int64) ([]store.NoiseRuleRow, error) {
+func (f *fakeStore) NoiseRules(_ context.Context, projectID int64) ([]store.NoiseRuleRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ids := make([]int64, 0, len(f.rules))
@@ -64,7 +64,7 @@ func (f *fakeStore) NoiseRules(ctx context.Context, projectID int64) ([]store.No
 	return out, nil
 }
 
-func (f *fakeStore) UpsertNoiseRule(ctx context.Context, r core.NoiseRule) (store.NoiseRuleRow, error) {
+func (f *fakeStore) UpsertNoiseRule(_ context.Context, r core.NoiseRule) (store.NoiseRuleRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r.ID == 0 {
@@ -82,7 +82,7 @@ func (f *fakeStore) UpsertNoiseRule(ctx context.Context, r core.NoiseRule) (stor
 	return row, nil
 }
 
-func (f *fakeStore) DeleteNoiseRule(ctx context.Context, id int64) error {
+func (f *fakeStore) DeleteNoiseRule(_ context.Context, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.rules[id]; !ok {
@@ -92,7 +92,7 @@ func (f *fakeStore) DeleteNoiseRule(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (f *fakeStore) AddNoiseDrops(ctx context.Context, counts map[int64]int64) error {
+func (f *fakeStore) AddNoiseDrops(_ context.Context, counts map[int64]int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cp := make(map[int64]int64, len(counts))
@@ -107,7 +107,7 @@ func (f *fakeStore) AddNoiseDrops(ctx context.Context, counts map[int64]int64) e
 	return nil
 }
 
-func (f *fakeStore) SetProjectParseBodies(ctx context.Context, projectID int64, on bool) error {
+func (f *fakeStore) SetProjectParseBodies(_ context.Context, projectID int64, on bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.projects[projectID]
@@ -121,7 +121,7 @@ func (f *fakeStore) SetProjectParseBodies(ctx context.Context, projectID int64, 
 
 // Admin methods beyond Projects are unused by the engine; stubs keep
 // fakeStore satisfying store.Admin.
-func (f *fakeStore) CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error) {
+func (f *fakeStore) CreateProject(_ context.Context, name string, retentionDays int) (core.Project, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextProjID++
@@ -130,7 +130,7 @@ func (f *fakeStore) CreateProject(ctx context.Context, name string, retentionDay
 	return p, nil
 }
 
-func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
+func (f *fakeStore) Projects(_ context.Context) ([]core.Project, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]core.Project, 0, len(f.projects))
@@ -140,14 +140,14 @@ func (f *fakeStore) Projects(ctx context.Context) ([]core.Project, error) {
 	return out, nil
 }
 
-func (f *fakeStore) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) error {
+func (f *fakeStore) SetIssueStatus(_ context.Context, _ int64, _ core.IssueStatus) error {
 	return nil
 }
 
-func (f *fakeStore) MintKey(ctx context.Context, projectID int64, kind string) (string, error) {
+func (f *fakeStore) MintKey(_ context.Context, _ int64, _ string) (string, error) {
 	return "", nil
 }
 
-func (f *fakeStore) LookupKey(ctx context.Context, plaintext string) (int64, string, error) {
+func (f *fakeStore) LookupKey(_ context.Context, _ string) (int64, string, error) {
 	return 0, "", nil
 }

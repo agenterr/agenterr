@@ -83,114 +83,135 @@ func Tail(ctx context.Context, glob, service string, out chan<- shared.Sourced) 
 // rename+recreate) and reopens from the start when detected. An unreadable
 // file is WARN-logged once (not once per retry) and polled until it
 // becomes readable or ctx is cancelled.
+//
+// The open/drain/rotation-check logic lives on fileTailer's methods (see
+// below) rather than inline closures here, so it doesn't all count against
+// this function's own cyclomatic complexity.
 func tailFile(ctx context.Context, path, service string, out chan<- shared.Sourced) {
-	var (
-		f          *os.File
-		openedInfo os.FileInfo // identity snapshot from the currently-open handle, for os.SameFile
-		readBytes  int64       // bytes consumed from the current handle, for shrink detection
-		pending    []byte      // partial (no trailing \n yet) line bytes held across polls
-		warned     bool
-	)
-	defer func() {
-		if f != nil {
-			f.Close()
-		}
-	}()
+	t := &fileTailer{ctx: ctx, path: path, service: service, out: out}
+	defer t.close()
 
-	openFresh := func() bool {
-		nf, err := os.Open(path)
-		if err != nil {
-			if !warned {
-				log.Printf("file: WARN cannot open %s: %v", path, err)
-				warned = true
-			}
-			return false
-		}
-		fi, err := nf.Stat()
-		if err != nil {
-			nf.Close()
-			if !warned {
-				log.Printf("file: WARN cannot stat %s: %v", path, err)
-				warned = true
-			}
-			return false
-		}
-		if f != nil {
-			f.Close()
-		}
-		f, openedInfo, readBytes, pending = nf, fi, 0, nil
-		return true
-	}
-
-	// drain reads the currently-open file to EOF, emitting complete lines
-	// and holding back any trailing partial line in pending. An
-	// un-terminated tail line in pending grows unbounded by design — this
-	// layer assumes writers eventually newline; the downstream joiner's
-	// byte cap is what governs record size, not this buffer.
-	drain := func() {
-		buf := make([]byte, readChunk)
-		for {
-			n, err := f.Read(buf)
-			if n > 0 {
-				readBytes += int64(n)
-				pending = append(pending, buf[:n]...)
-				pending = emitLines(ctx, pending, service, out)
-			}
-			if err != nil {
-				return // EOF (normal — wait for the next poll) or a read error
-			}
-		}
-	}
-
-	// checkRotation reopens from the start if the file at path is no longer
-	// the one we have open (rename+recreate, different identity) or has
-	// shrunk below what we've already read (truncate-in-place).
-	checkRotation := func() {
-		if f == nil {
-			return
-		}
-		fi, err := os.Stat(path)
-		if err != nil {
-			return // path missing right now; keep the current handle, retry next poll
-		}
-		if !os.SameFile(openedInfo, fi) {
-			// Rename+recreate: the old fd still refers to the renamed-away
-			// file and is fully readable, so any lines written to it
-			// between the last drain() and the rename are still sitting
-			// there unread. Drain them through the normal path one last
-			// time before swapping to the new file, or they're lost the
-			// moment openFresh() closes this fd.
-			drain()
-			openFresh()
-			return
-		}
-		if fi.Size() < readBytes {
-			// Truncate-in-place (copytruncate): the old and new content
-			// share the same fd/inode, so there is no separate "old fd" to
-			// drain first — whatever was truncated away is simply gone at
-			// the OS level. This loss is inherent to copytruncate, not a
-			// gap in our detection.
-			openFresh()
-		}
-	}
-
-	if f == nil {
-		openFresh()
+	if t.f == nil {
+		t.openFresh()
 	}
 
 	for {
-		if f != nil {
-			drain()
+		if t.f != nil {
+			t.drain()
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(pollInterval):
-			checkRotation()
-			if f == nil {
-				openFresh()
+			t.checkRotation()
+			if t.f == nil {
+				t.openFresh()
 			}
 		}
+	}
+}
+
+// fileTailer holds the per-file state tailFile threads through open/drain/
+// rotation-check: the currently-open handle, its identity snapshot (for
+// os.SameFile), how many bytes have been consumed from it (for shrink
+// detection), and any partial trailing line held across polls.
+type fileTailer struct {
+	ctx     context.Context
+	path    string
+	service string
+	out     chan<- shared.Sourced
+
+	f          *os.File
+	openedInfo os.FileInfo // identity snapshot from the currently-open handle, for os.SameFile
+	readBytes  int64       // bytes consumed from the current handle, for shrink detection
+	pending    []byte      // partial (no trailing \n yet) line bytes held across polls
+	warned     bool
+}
+
+// close releases the currently-open handle, if any. The Close error is
+// unactionable here: we're abandoning a read-only handle at shutdown or on
+// reopen, with nothing left to do about a failure.
+func (t *fileTailer) close() {
+	if t.f != nil {
+		_ = t.f.Close()
+	}
+}
+
+// openFresh opens t.path from scratch, replacing any currently-open handle.
+// It returns false (and WARN-logs once) if the file can't be opened or
+// stat'd right now.
+func (t *fileTailer) openFresh() bool {
+	nf, err := os.Open(t.path)
+	if err != nil {
+		if !t.warned {
+			log.Printf("file: WARN cannot open %s: %v", t.path, err)
+			t.warned = true
+		}
+		return false
+	}
+	fi, err := nf.Stat()
+	if err != nil {
+		_ = nf.Close()
+		if !t.warned {
+			log.Printf("file: WARN cannot stat %s: %v", t.path, err)
+			t.warned = true
+		}
+		return false
+	}
+	t.close()
+	t.f, t.openedInfo, t.readBytes, t.pending = nf, fi, 0, nil
+	return true
+}
+
+// drain reads the currently-open file to EOF, emitting complete lines and
+// holding back any trailing partial line in pending. An un-terminated tail
+// line in pending grows unbounded by design — this layer assumes writers
+// eventually newline; the downstream joiner's byte cap is what governs
+// record size, not this buffer.
+func (t *fileTailer) drain() {
+	buf := make([]byte, readChunk)
+	for {
+		n, err := t.f.Read(buf)
+		if n > 0 {
+			t.readBytes += int64(n)
+			t.pending = append(t.pending, buf[:n]...)
+			t.pending = emitLines(t.ctx, t.pending, t.service, t.out)
+		}
+		if err != nil {
+			return // EOF (normal — wait for the next poll) or a read error
+		}
+	}
+}
+
+// checkRotation reopens from the start if the file at path is no longer
+// the one we have open (rename+recreate, different identity) or has
+// shrunk below what we've already read (truncate-in-place).
+func (t *fileTailer) checkRotation() {
+	if t.f == nil {
+		return
+	}
+	fi, err := os.Stat(t.path)
+	if err != nil {
+		return // path missing right now; keep the current handle, retry next poll
+	}
+	if !os.SameFile(t.openedInfo, fi) {
+		// Rename+recreate: the old fd still refers to the renamed-away
+		// file and is fully readable, so any lines written to it
+		// between the last drain() and the rename are still sitting
+		// there unread. Drain them through the normal path one last
+		// time before swapping to the new file, or they're lost the
+		// moment openFresh() closes this fd.
+		t.drain()
+		t.openFresh()
+		return
+	}
+	if fi.Size() < t.readBytes {
+		// Truncate-in-place (copytruncate): the old and new content
+		// share the same fd/inode, so there is no separate "old fd" to
+		// drain first — whatever was truncated away is simply gone at
+		// the OS level. This loss is inherent to copytruncate, not a
+		// gap in our detection.
+		t.openFresh()
 	}
 }
 

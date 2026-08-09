@@ -214,7 +214,7 @@ func TestIssueEvent_FanOutTwoRulesBothFire(t *testing.T) {
 	}
 	// Determinism: rules evaluate in ascending-ID order, so the first
 	// enqueued job must be the lower-ID rule.
-	if !(first.rule.ID < second.rule.ID) {
+	if first.rule.ID >= second.rule.ID {
 		t.Errorf("enqueue order = [%d, %d], want ascending-ID order [%d, %d]", first.rule.ID, second.rule.ID, r1.ID, r2.ID)
 	}
 }
@@ -228,7 +228,7 @@ func TestIssueEvent_FanOutTwoRulesBothFire(t *testing.T) {
 // IssueEvent-calling goroutine has finished.
 func TestConcurrency_NoRacesNoLostOrDuplicateFires(t *testing.T) {
 	var delivered atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		delivered.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))

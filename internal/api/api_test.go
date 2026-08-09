@@ -1762,7 +1762,7 @@ func TestAlertRules_List_APIKey_IgnoresPathProject(t *testing.T) {
 }
 
 func TestAlertRules_Test_HappyPath_Returns200Delivered(t *testing.T) {
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer receiver.Close()
@@ -1793,7 +1793,7 @@ func TestAlertRules_Test_HappyPath_Returns200Delivered(t *testing.T) {
 }
 
 func TestAlertRules_Test_DeliveryFails_Returns502(t *testing.T) {
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer receiver.Close()

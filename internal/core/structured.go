@@ -76,29 +76,11 @@ func parseLogfmtLine(body string) (map[string]any, bool) {
 		if i >= len(body) {
 			break
 		}
-		eq := strings.IndexByte(body[i:], '=')
-		if eq <= 0 {
+		key, val, next, ok := parseLogfmtPair(body, i)
+		if !ok {
 			return nil, false
 		}
-		key := body[i : i+eq]
-		if strings.ContainsAny(key, " \t\"") {
-			return nil, false
-		}
-		i += eq + 1
-		var val string
-		if i < len(body) && body[i] == '"' {
-			s, next, ok := scanQuoted(body, i)
-			if !ok {
-				return nil, false
-			}
-			val, i = s, next
-		} else {
-			end := strings.IndexAny(body[i:], " \t")
-			if end < 0 {
-				end = len(body) - i
-			}
-			val, i = body[i:i+end], i+end
-		}
+		i = next
 		if i < len(body) && body[i] != ' ' && body[i] != '\t' {
 			return nil, false
 		}
@@ -108,6 +90,35 @@ func parseLogfmtLine(body string) (map[string]any, bool) {
 		return nil, false
 	}
 	return m, true
+}
+
+// parseLogfmtPair reads a single key=value token starting at body[i] (past
+// any leading whitespace) and returns the key, the decoded value, and the
+// index just past the token. ok is false for anything that isn't a clean
+// key=value pair (no '=', an empty/quoted-looking key, or an unterminated
+// quoted value) — the caller treats that as a hard rejection of the body.
+func parseLogfmtPair(body string, i int) (key, val string, next int, ok bool) {
+	eq := strings.IndexByte(body[i:], '=')
+	if eq <= 0 {
+		return "", "", 0, false
+	}
+	key = body[i : i+eq]
+	if strings.ContainsAny(key, " \t\"") {
+		return "", "", 0, false
+	}
+	i += eq + 1
+	if i < len(body) && body[i] == '"' {
+		s, n, ok := scanQuoted(body, i)
+		if !ok {
+			return "", "", 0, false
+		}
+		return key, s, n, true
+	}
+	end := strings.IndexAny(body[i:], " \t")
+	if end < 0 {
+		end = len(body) - i
+	}
+	return key, body[i : i+end], i + end, true
 }
 
 // scanQuoted reads a double-quoted value starting at body[start] == '"',

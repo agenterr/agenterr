@@ -45,14 +45,14 @@ func (c *Client) Logs(ctx context.Context, containerID string, since time.Time) 
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, fmt.Errorf("docker: GET %s: %s", path, resp.Status)
 	}
 
 	out := make(chan process.Line)
 	done := make(chan struct{})
 	var closeOnce sync.Once
-	closeBody := func() { closeOnce.Do(func() { resp.Body.Close() }) }
+	closeBody := func() { closeOnce.Do(func() { _ = resp.Body.Close() }) }
 	watchCtxCancel(ctx, done, closeBody)
 
 	var src io.Reader = resp.Body

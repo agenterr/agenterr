@@ -1,5 +1,10 @@
 // Alert rules contract tests. Mirrors the NoiseRules section in suite.go —
 // kept in its own file because suite.go is already long.
+//
+// The package comment lives on suite.go; this file's leading comment above
+// is deliberately separated from the package clause (blank line) so it
+// isn't mistaken for a second, malformed package comment.
+
 package storetest
 
 import (
@@ -43,7 +48,7 @@ func testAlertRulesUpsertInsertReturnsIDAndDefaults(t *testing.T, open func(t *t
 	if row.ProjectID != p.ID || row.Name != "new issues" || row.Kind != core.AlertNewIssue || row.Service != "web" || row.URL != "https://example.com/hook" || !row.Enabled {
 		t.Errorf("row = %+v, unexpected values", row)
 	}
-	if row.Headers != nil && len(row.Headers) != 0 {
+	if len(row.Headers) != 0 {
 		t.Errorf("Headers = %v, want nil or empty for unset input", row.Headers)
 	}
 }

@@ -81,7 +81,7 @@ func (c *Client) get(ctx context.Context, path string) (*http.Response, error) {
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("docker: GET %s: %s: %s", path, resp.Status, string(body))
 	}
@@ -94,7 +94,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
@@ -113,7 +113,7 @@ func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var raws []rawContainer
 	if err := json.NewDecoder(resp.Body).Decode(&raws); err != nil {
@@ -146,7 +146,7 @@ func (c *Client) inspectTTY(ctx context.Context, containerID string) (bool, erro
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var ri rawInspect
 	if err := json.NewDecoder(resp.Body).Decode(&ri); err != nil {
@@ -183,14 +183,14 @@ func (c *Client) Events(ctx context.Context) (<-chan Event, error) {
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, fmt.Errorf("docker: GET /events: %s", resp.Status)
 	}
 
 	out := make(chan Event)
 	done := make(chan struct{})
 	var closeOnce sync.Once
-	closeBody := func() { closeOnce.Do(func() { resp.Body.Close() }) }
+	closeBody := func() { closeOnce.Do(func() { _ = resp.Body.Close() }) }
 	watchCtxCancel(ctx, done, closeBody)
 
 	go func() {

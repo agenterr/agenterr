@@ -56,7 +56,7 @@ func (f *fakeStore) seedRuleWithLastFired(r core.AlertRule, lastFired time.Time)
 	return row
 }
 
-func (f *fakeStore) AlertRules(ctx context.Context, projectID int64) ([]store.AlertRuleRow, error) {
+func (f *fakeStore) AlertRules(_ context.Context, projectID int64) ([]store.AlertRuleRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ids := make([]int64, 0, len(f.rules))
@@ -74,7 +74,7 @@ func (f *fakeStore) AlertRules(ctx context.Context, projectID int64) ([]store.Al
 	return out, nil
 }
 
-func (f *fakeStore) UpsertAlertRule(ctx context.Context, r core.AlertRule) (store.AlertRuleRow, error) {
+func (f *fakeStore) UpsertAlertRule(_ context.Context, r core.AlertRule) (store.AlertRuleRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r.Kind != core.AlertNewIssue && r.Kind != core.AlertRegression && r.Kind != core.AlertThreshold {
@@ -96,7 +96,7 @@ func (f *fakeStore) UpsertAlertRule(ctx context.Context, r core.AlertRule) (stor
 	return row, nil
 }
 
-func (f *fakeStore) DeleteAlertRule(ctx context.Context, id int64) error {
+func (f *fakeStore) DeleteAlertRule(_ context.Context, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.rules[id]; !ok {
@@ -106,7 +106,7 @@ func (f *fakeStore) DeleteAlertRule(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (f *fakeStore) RecordAlertResult(ctx context.Context, id int64, firedAt time.Time, lastError string) error {
+func (f *fakeStore) RecordAlertResult(_ context.Context, id int64, firedAt time.Time, lastError string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recordCalls = append(f.recordCalls, recordCall{id: id, firedAt: firedAt, lastErr: lastError})

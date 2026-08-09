@@ -98,7 +98,7 @@ func (e *Engine) Decide(l core.Log) (drop bool, ruleID int64) {
 	}
 
 	for _, r := range rules {
-		if !r.NoiseRule.Matches(l) {
+		if !r.Matches(l) {
 			continue
 		}
 		if r.Kind == core.NoiseSample {

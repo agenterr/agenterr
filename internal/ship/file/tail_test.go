@@ -88,7 +88,7 @@ func TestAppendDetection(t *testing.T) {
 	if _, err := f.WriteString("second\n"); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	s = recv(t, out)
 	if s.Line.Text != "second" {
@@ -120,7 +120,7 @@ func TestRotationViaTruncate(t *testing.T) {
 	if _, err := f.WriteString("after\n"); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	s = recv(t, out)
 	if s.Line.Text != "after" {
@@ -183,7 +183,7 @@ func TestRotationViaRenameRecreateDrainsPreRotationBurst(t *testing.T) {
 	if _, err := f.WriteString("pre-rotation-burst\n"); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	if err := os.Rename(path, filepath.Join(dir, "app.log.1")); err != nil {
 		t.Fatal(err)
@@ -260,7 +260,7 @@ func TestPartialLineHeldUntilNewline(t *testing.T) {
 	if _, err := f.WriteString(" now complete\n"); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	s := recv(t, out)
 	if s.Line.Text != "no newline yet now complete" {

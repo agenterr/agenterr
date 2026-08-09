@@ -27,7 +27,7 @@ import (
 // it returns.
 func TestStopWaitsForAlertDelivery(t *testing.T) {
 	var delivered atomic.Bool
-	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		delivered.Store(true)
 		w.WriteHeader(http.StatusOK)
 	}))

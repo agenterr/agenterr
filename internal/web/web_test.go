@@ -267,13 +267,13 @@ func TestLogin_RateLimited429(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	resp, err := client.PostForm(srv.URL+"/login", url.Values{"password": {"wrong"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", resp.StatusCode)
 	}
@@ -552,7 +552,7 @@ func TestAlertsPage_EmptyState(t *testing.T) {
 }
 
 func TestAlertsTest_HappyPath_RendersDelivered(t *testing.T) {
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer receiver.Close()
@@ -581,7 +581,7 @@ func TestAlertsTest_HappyPath_RendersDelivered(t *testing.T) {
 }
 
 func TestAlertsTest_DeliveryFails_RendersFailed(t *testing.T) {
-	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer receiver.Close()

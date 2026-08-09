@@ -46,7 +46,7 @@ func openSpool(t *testing.T) *buffer.Spool {
 	if err != nil {
 		t.Fatalf("buffer.Open: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -75,7 +75,7 @@ func decodeBatch(t *testing.T, r *http.Request) []map[string]any {
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	body, err := io.ReadAll(gz)
 	if err != nil {
 		t.Fatalf("read gunzipped body: %v", err)
@@ -244,7 +244,7 @@ func TestSenderRetriesOn5xxThenSucceeds(t *testing.T) {
 }
 
 func TestSenderRetriesForeverOnPersistentFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -455,7 +455,7 @@ func TestPreflightSuccessOn2xxAnd400(t *testing.T) {
 func TestPreflightFatalOn401And403(t *testing.T) {
 	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(fmt.Sprintf("status_%d", code), func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(code)
 			}))
 			defer srv.Close()

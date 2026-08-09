@@ -92,48 +92,68 @@ func applyEnvOverrides(cfg *Config, getenv func(string) string) error {
 	if val := getenv("AGENTERR_ADMIN_PASSWORD"); val != "" {
 		cfg.AdminPassword = val
 	}
-	if val := getenv("AGENTERR_BUFFER_SIZE"); val != "" {
-		bufSize, err := strconv.Atoi(val)
-		if err != nil {
-			return fmt.Errorf("AGENTERR_BUFFER_SIZE: invalid value %q: %w", val, err)
-		}
-		cfg.BufferSize = bufSize
+	if err := applyEnvInt(getenv, "AGENTERR_BUFFER_SIZE", &cfg.BufferSize); err != nil {
+		return err
 	}
-	if val := getenv("AGENTERR_FLUSH_EVERY_MS"); val != "" {
-		flushEvery, err := strconv.Atoi(val)
-		if err != nil {
-			return fmt.Errorf("AGENTERR_FLUSH_EVERY_MS: invalid value %q: %w", val, err)
-		}
-		cfg.FlushEveryMS = flushEvery
+	if err := applyEnvInt(getenv, "AGENTERR_FLUSH_EVERY_MS", &cfg.FlushEveryMS); err != nil {
+		return err
 	}
-	if val := getenv("AGENTERR_MAX_BODY_BYTES"); val != "" {
-		maxBody, err := strconv.ParseInt(val, 10, 64)
-		if err != nil {
-			return fmt.Errorf("AGENTERR_MAX_BODY_BYTES: invalid value %q: %w", val, err)
-		}
-		cfg.MaxBodyBytes = maxBody
+	if err := applyEnvInt64(getenv, "AGENTERR_MAX_BODY_BYTES", &cfg.MaxBodyBytes); err != nil {
+		return err
 	}
-	if val := getenv("AGENTERR_MAX_DB_BYTES"); val != "" {
-		maxDB, err := strconv.ParseInt(val, 10, 64)
-		if err != nil {
-			return fmt.Errorf("AGENTERR_MAX_DB_BYTES: invalid value %q: %w", val, err)
-		}
-		cfg.MaxDBBytes = maxDB
+	if err := applyEnvInt64(getenv, "AGENTERR_MAX_DB_BYTES", &cfg.MaxDBBytes); err != nil {
+		return err
 	}
-	if val := getenv("AGENTERR_PARSE_BODIES"); val != "" {
-		parse, err := strconv.ParseBool(val)
-		if err != nil {
-			return fmt.Errorf("AGENTERR_PARSE_BODIES: invalid value %q: %w", val, err)
-		}
-		cfg.ParseBodies = parse
+	if err := applyEnvBool(getenv, "AGENTERR_PARSE_BODIES", &cfg.ParseBodies); err != nil {
+		return err
 	}
-	if val := getenv("AGENTERR_NOISE_FLUSH_MS"); val != "" {
-		noiseFlush, err := strconv.Atoi(val)
-		if err != nil {
-			return fmt.Errorf("AGENTERR_NOISE_FLUSH_MS: invalid value %q: %w", val, err)
-		}
-		cfg.NoiseFlushMS = noiseFlush
+	if err := applyEnvInt(getenv, "AGENTERR_NOISE_FLUSH_MS", &cfg.NoiseFlushMS); err != nil {
+		return err
 	}
+	return nil
+}
+
+// applyEnvInt applies the named env var to *dst as an int, leaving dst
+// untouched when the var is unset. Errors carry the var name so a bad
+// value is easy to trace back to its source.
+func applyEnvInt(getenv func(string) string, name string, dst *int) error {
+	val := getenv(name)
+	if val == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return fmt.Errorf("%s: invalid value %q: %w", name, val, err)
+	}
+	*dst = n
+	return nil
+}
+
+// applyEnvInt64 is applyEnvInt for int64-valued env vars.
+func applyEnvInt64(getenv func(string) string, name string, dst *int64) error {
+	val := getenv(name)
+	if val == "" {
+		return nil
+	}
+	n, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s: invalid value %q: %w", name, val, err)
+	}
+	*dst = n
+	return nil
+}
+
+// applyEnvBool is applyEnvInt for bool-valued env vars.
+func applyEnvBool(getenv func(string) string, name string, dst *bool) error {
+	val := getenv(name)
+	if val == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(val)
+	if err != nil {
+		return fmt.Errorf("%s: invalid value %q: %w", name, val, err)
+	}
+	*dst = b
 	return nil
 }
 

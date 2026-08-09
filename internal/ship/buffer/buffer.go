@@ -76,51 +76,17 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("buffer: create initial segment: %w", err)
 		}
-		f.Close()
+		// Immediately reopened below via os.OpenFile before any write, so a
+		// Close failure here is unactionable — nothing has been written yet.
+		_ = f.Close()
 	}
 
 	last := segs[len(segs)-1]
 
-	// A checkpoint can point past the last segment's real on-disk size:
-	// saveCheckpoint fsyncs+renames checkpoint.json, but segment appends
-	// are NOT fsynced per record (see the package doc), so on a power loss
-	// the checkpoint can survive with an offset the segment itself never
-	// physically reached. Scanning the torn-tail repair from that
-	// too-high offset would find nothing to truncate (a Seek past EOF
-	// plus a zero-length EOF read looks identical to "nothing torn
-	// here"), and leaving ackedOffset there would strand every future
-	// append behind a cursor no data will ever reach (readRecords would
-	// just seek past EOF forever). Clamp both the scan start and the
-	// checkpoint itself to the segment's real size (as read by
-	// scanSegments, before any repair) before doing anything else.
-	clampedOffset := cp.Offset
-	if cp.Seq == last.seq && clampedOffset > last.size {
-		log.Printf("buffer: WARN checkpoint offset %d exceeds segment %s's on-disk size %d (power loss?); clamping to %d",
-			clampedOffset, last.path, last.size, last.size)
-		clampedOffset = last.size
-	}
-
-	// Repair a torn tail on the last segment only: earlier segments are
-	// immutable and complete by construction (they were rolled, meaning a
-	// clean close happened before the next segment started).
-	tornFrom := int64(0)
-	if cp.Seq == last.seq {
-		tornFrom = clampedOffset
-	}
-	newSize, _, err := truncateTornTail(last.path, tornFrom)
+	clampedOffset, tornRecordsLost, err := repairLastSegment(cp, last)
 	if err != nil {
-		return nil, fmt.Errorf("buffer: repair torn tail: %w", err)
+		return nil, err
 	}
-	// A torn tail is always a trailing incomplete line (no newline): never
-	// a full record, so it never adds to the dropped count (see Dropped's
-	// doc comment) — but it's still folded through the same accounting
-	// path and logged, so a torn tail is never silent.
-	var tornRecordsLost int64
-	if newSize != last.size {
-		log.Printf("buffer: WARN torn tail truncated in %s: %d -> %d bytes (%d complete records lost)",
-			last.path, last.size, newSize, tornRecordsLost)
-	}
-	last.size = newSize
 
 	f, err := os.OpenFile(last.path, os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -162,6 +128,53 @@ func Open(dir string, maxBytes int64) (*Spool, error) {
 		}
 	}
 	return s, nil
+}
+
+// repairLastSegment clamps a checkpoint offset that points past last's real
+// on-disk size and truncates any torn tail on last, per Open's doc comment.
+// It returns the clamped ack offset (unchanged from cp.Offset unless a clamp
+// was needed) and the number of complete records lost to a torn-tail
+// truncation (always 0 — a torn tail is by definition a trailing incomplete
+// line, never a full record — but folded through the same accounting path
+// as any other data loss so it's never silent).
+func repairLastSegment(cp checkpointFile, last *segMeta) (clampedOffset int64, tornRecordsLost int64, err error) {
+	// A checkpoint can point past the last segment's real on-disk size:
+	// saveCheckpoint fsyncs+renames checkpoint.json, but segment appends
+	// are NOT fsynced per record (see the package doc), so on a power loss
+	// the checkpoint can survive with an offset the segment itself never
+	// physically reached. Scanning the torn-tail repair from that
+	// too-high offset would find nothing to truncate (a Seek past EOF
+	// plus a zero-length EOF read looks identical to "nothing torn
+	// here"), and leaving ackedOffset there would strand every future
+	// append behind a cursor no data will ever reach (readRecords would
+	// just seek past EOF forever). Clamp both the scan start and the
+	// checkpoint itself to the segment's real size (as read by
+	// scanSegments, before any repair) before doing anything else.
+	clampedOffset = cp.Offset
+	if cp.Seq == last.seq && clampedOffset > last.size {
+		log.Printf("buffer: WARN checkpoint offset %d exceeds segment %s's on-disk size %d (power loss?); clamping to %d",
+			clampedOffset, last.path, last.size, last.size)
+		clampedOffset = last.size
+	}
+
+	// Repair a torn tail on the last segment only: earlier segments are
+	// immutable and complete by construction (they were rolled, meaning a
+	// clean close happened before the next segment started).
+	tornFrom := int64(0)
+	if cp.Seq == last.seq {
+		tornFrom = clampedOffset
+	}
+	newSize, _, err := truncateTornTail(last.path, tornFrom)
+	if err != nil {
+		return 0, 0, fmt.Errorf("buffer: repair torn tail: %w", err)
+	}
+	if newSize != last.size {
+		log.Printf("buffer: WARN torn tail truncated in %s: %d -> %d bytes (%d complete records lost)",
+			last.path, last.size, newSize, tornRecordsLost)
+	}
+	last.size = newSize
+
+	return clampedOffset, tornRecordsLost, nil
 }
 
 // Append writes one JSON record (no embedded newlines) to the spool,
@@ -297,10 +310,10 @@ func (s *Spool) segIndexLocked(seq int64) int {
 	return -1
 }
 
-// Next returns up to max unacked records starting from the ack checkpoint,
-// plus the Cursor positioned just past the last record returned. An empty
-// slice means the reader is caught up with the writer.
-func (s *Spool) Next(max int) ([][]byte, Cursor, error) {
+// Next returns up to maxRecords unacked records starting from the ack
+// checkpoint, plus the Cursor positioned just past the last record
+// returned. An empty slice means the reader is caught up with the writer.
+func (s *Spool) Next(maxRecords int) ([][]byte, Cursor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -309,16 +322,16 @@ func (s *Spool) Next(max int) ([][]byte, Cursor, error) {
 
 	var out [][]byte
 	idx := s.segIndexLocked(seq)
-	for idx >= 0 && idx < len(s.segments) && len(out) < max {
+	for idx >= 0 && idx < len(s.segments) && len(out) < maxRecords {
 		seg := s.segments[idx]
-		recs, newOffset, err := readRecords(seg.path, offset, max-len(out))
+		recs, newOffset, err := readRecords(seg.path, offset, maxRecords-len(out))
 		if err != nil {
 			return out, Cursor{Seq: seq, Offset: offset}, fmt.Errorf("buffer: read segment %d: %w", seg.seq, err)
 		}
 		out = append(out, recs...)
 		seq, offset = seg.seq, newOffset
 
-		if len(out) >= max {
+		if len(out) >= maxRecords {
 			break
 		}
 		// This segment is drained. Move on to the next one, if any — but

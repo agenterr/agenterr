@@ -58,7 +58,7 @@ func TestDispatchTarget(t *testing.T) {
 			if cmd != tt.wantCmd {
 				t.Errorf("cmd = %q, want %q", cmd, tt.wantCmd)
 			}
-			if !reflect.DeepEqual(rest, tt.wantRest) && !(len(rest) == 0 && len(tt.wantRest) == 0) {
+			if !reflect.DeepEqual(rest, tt.wantRest) && (len(rest) != 0 || len(tt.wantRest) != 0) {
 				t.Errorf("rest = %v, want %v", rest, tt.wantRest)
 			}
 		})

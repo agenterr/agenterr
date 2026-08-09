@@ -58,7 +58,7 @@ func TestAppendNextAckRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Open: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	got2, cur2, err := s2.Next(100)
 	if err != nil {
@@ -96,7 +96,7 @@ func TestSegmentRollAndAckedSegmentsDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// Each record ~1KB; write enough to roll past 4MB into a second segment.
 	payload := make([]byte, 1000)
@@ -163,12 +163,12 @@ func TestCapEviction(t *testing.T) {
 
 	// Cap small enough that writing several MB forces eviction of the
 	// oldest of several ~4MB segments.
-	const cap = 5 * 1024 * 1024
-	s, err := Open(dir, cap)
+	const capBytes = 5 * 1024 * 1024
+	s, err := Open(dir, capBytes)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	const n = 9000 // ~9MB, should roll into 3 segments and evict at least 1
 	for i := 0; i < n; i++ {
@@ -190,12 +190,6 @@ func TestCapEviction(t *testing.T) {
 	}
 	if len(got) == 0 {
 		t.Fatal("Next after eviction returned nothing; reader should still see surviving data")
-	}
-	var first int
-	if err := json.Unmarshal(got[0], &struct {
-		N *int `json:"n"`
-	}{N: &first}); err != nil {
-		// fall back to manual decode
 	}
 	var decoded struct {
 		N int `json:"n"`
@@ -225,8 +219,8 @@ func TestDroppedSurvivesRestart(t *testing.T) {
 		return b
 	}
 
-	const cap = 5 * 1024 * 1024
-	s, err := Open(dir, cap)
+	const capBytes = 5 * 1024 * 1024
+	s, err := Open(dir, capBytes)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -247,11 +241,11 @@ func TestDroppedSurvivesRestart(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	s2, err := Open(dir, cap)
+	s2, err := Open(dir, capBytes)
 	if err != nil {
 		t.Fatalf("re-Open: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	if got := s2.Dropped(); got != firstDropped {
 		t.Fatalf("Dropped() after restart = %d, want %d (the pre-restart value)", got, firstDropped)
@@ -303,7 +297,7 @@ func TestTornTailTruncatedOnOpen(t *testing.T) {
 	if _, err := f.Write([]byte(`{"n":5,"garbage`)); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	// Reopen: torn tail should be truncated away, leaving exactly the
 	// original 5 complete records readable.
@@ -311,7 +305,7 @@ func TestTornTailTruncatedOnOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Open with torn tail: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	got, _, err := s2.Next(100)
 	if err != nil {
@@ -376,13 +370,13 @@ func TestTornTailDoesNotDoubleCountDropped(t *testing.T) {
 	if _, err := f.Write([]byte(`{"n":1,"garbage`)); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	s2, err := Open(dir, bigCap)
 	if err != nil {
 		t.Fatalf("re-Open with torn tail: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	if got := s2.Dropped(); got != 0 {
 		t.Fatalf("Dropped() after torn-tail repair = %d, want 0 (an incomplete fragment was never a persisted record)", got)
@@ -425,7 +419,7 @@ func TestSinceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Open: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	got, ok := s2.Since("web")
 	if !ok {
@@ -449,7 +443,7 @@ func TestSetSinceDoesNotPersistPerCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	cpPath := checkpointPath(dir)
 	if _, err := os.Stat(cpPath); !os.IsNotExist(err) {
@@ -508,7 +502,7 @@ func TestSinceSurvivesRestartViaAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Open: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	got, ok := s2.Since("web")
 	if !ok || !got.Equal(ts) {
 		t.Fatalf("Since(\"web\") after restart = %v, %v; want %v, true", got, ok, ts)
@@ -562,7 +556,7 @@ func TestOpenClampsCheckpointOffsetPastSegmentSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with checkpoint-ahead-of-segment state: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	onDisk, err := loadCheckpoint(dir)
 	if err != nil {
@@ -603,7 +597,7 @@ func TestConcurrentAppendAckConservation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	const nAppends = 20000
 	var appended int64
@@ -703,12 +697,12 @@ func TestEvictionConservationWithPartialAck(t *testing.T) {
 		return b
 	}
 
-	const cap = 5 * 1024 * 1024
-	s, err := Open(dir, cap)
+	const capBytes = 5 * 1024 * 1024
+	s, err := Open(dir, capBytes)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	var appended, acked int64
 

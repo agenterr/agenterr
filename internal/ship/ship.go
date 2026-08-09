@@ -53,7 +53,9 @@ func Run(ctx context.Context, cfg Config) error {
 
 	snd := sender.New(sender.Config{URL: cfg.URL, Key: cfg.Key})
 	if err := snd.Preflight(ctx); err != nil {
-		spool.Close()
+		// Startup is aborting outright; a Close failure on the way out
+		// wouldn't change the returned error or leave anything running.
+		_ = spool.Close()
 		return err
 	}
 
@@ -61,7 +63,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Docker {
 		dc = docker.NewClient(cfg.DockerSock)
 		if err := dc.Ping(ctx); err != nil {
-			spool.Close()
+			_ = spool.Close()
 			return fmt.Errorf("ship: docker unavailable at %s: %w", cfg.DockerSock, err)
 		}
 	}
@@ -79,7 +81,13 @@ type senderRunner interface {
 // run is Run's testable core: it assumes preflight/docker-ping already
 // happened (or were skipped) and just wires the pipeline.
 func run(ctx context.Context, cfg Config, spool *buffer.Spool, snd senderRunner, dc dockerSurface) error {
-	defer spool.Close()
+	// Shutdown-time Close failure is logged, not propagated: run's return
+	// value is already committed to whatever the pipeline itself produced.
+	defer func() {
+		if err := spool.Close(); err != nil {
+			log.Printf("ship: WARN close spool: %v", err)
+		}
+	}()
 
 	evCh := make(chan sourceEvent, 1024)
 	joinWindow := time.Duration(cfg.JoinWindowMS) * time.Millisecond
@@ -262,11 +270,11 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
-// nextBackoff doubles d, capped at max.
-func nextBackoff(d, max time.Duration) time.Duration {
+// nextBackoff doubles d, capped at maxD.
+func nextBackoff(d, maxD time.Duration) time.Duration {
 	d *= 2
-	if d > max {
-		return max
+	if d > maxD {
+		return maxD
 	}
 	return d
 }

@@ -37,3 +37,10 @@ linters:
       - path: "internal/store/storetest/suite\\.go"
         linters:
           - gocyclo
+      # alertrules.go is the same kind of shared conformance-test
+      # infrastructure as suite.go above (contract tests run against every
+      # store.Store backend) — split into its own file only because suite.go
+      # was already long, not because it's a different kind of code.
+      - path: "internal/store/storetest/alertrules\\.go"
+        linters:
+          - gocyclo

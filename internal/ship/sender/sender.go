@@ -365,5 +365,5 @@ func drain(resp *http.Response) {
 		return
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }

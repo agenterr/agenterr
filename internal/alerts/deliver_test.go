@@ -87,7 +87,7 @@ func TestDeliver_SuccessPayloadShapeAndHeaders(t *testing.T) {
 // backoff path runs without ever sleeping real seconds.
 func TestDeliver_RetriesThenRecordsError(t *testing.T) {
 	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -156,7 +156,7 @@ func TestTestFire_DeliversSampleSynchronouslyAndRecords(t *testing.T) {
 // TestFire on a failing webhook returns the delivery error (nil only on
 // 2xx) and still records the failure.
 func TestTestFire_FailureReturnsErrorAndRecords(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -181,7 +181,7 @@ func TestTestFire_FailureReturnsErrorAndRecords(t *testing.T) {
 // delivered (and recorded) after ctx is canceled.
 func TestRun_DrainsQueueOnShutdown(t *testing.T) {
 	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.WriteHeader(http.StatusOK)
 	}))

@@ -59,11 +59,11 @@ func saveCheckpoint(dir string, cp checkpointFile) error {
 		return err
 	}
 	if _, err := f.Write(b); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {

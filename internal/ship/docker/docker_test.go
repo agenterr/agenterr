@@ -34,7 +34,7 @@ func startFakeDaemon(t *testing.T, handler http.Handler) *fakeDaemon {
 	if err != nil {
 		t.Fatalf("mkdir temp: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sockPath := filepath.Join(dir, "d.sock")
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -44,7 +44,7 @@ func startFakeDaemon(t *testing.T, handler http.Handler) *fakeDaemon {
 	go srv.Serve(ln) //nolint:errcheck
 
 	t.Cleanup(func() {
-		srv.Close()
+		_ = srv.Close()
 	})
 
 	return &fakeDaemon{sockPath: sockPath, srv: srv}
@@ -81,15 +81,19 @@ func writeFrame(w http.ResponseWriter, flusher http.Flusher, streamType byte, pa
 
 func TestPingAndContainers(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/_ping", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/_ping", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/containers/json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`[
+		// Built as a variable (rather than an inline multi-line literal)
+		// so the nolint directive below lands on the same physical line as
+		// the Write call it's suppressing errcheck for.
+		body := []byte(`[
 			{"Id":"abc123","Names":["/web-1"],"Labels":{"com.docker.compose.service":"web"}},
 			{"Id":"def456","Names":["/standalone"],"Labels":{}}
-		]`)) //nolint:errcheck
+		]`)
+		w.Write(body) //nolint:errcheck
 	})
 	d := startFakeDaemon(t, mux)
 	c := NewClient(d.sockPath)
@@ -265,11 +269,11 @@ func TestLogsDemuxAcrossChunkBoundaries(t *testing.T) {
 	line3 := fmt.Sprintf("%s stdout line three\n", "2026-08-06T12:00:00.000000003Z")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"Config":{"Tty":false}}`)) //nolint:errcheck
 	})
-	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, _ *http.Request) {
 		flusher := w.(http.Flusher)
 		w.WriteHeader(http.StatusOK)
 		// Interleave stdout(1) and stderr(2) frames, each header and
@@ -320,10 +324,10 @@ func TestLogsUnparsableTimestampPrefixKeptWholeAndCounted(t *testing.T) {
 	raw := "not-a-timestamp still one line\n"
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"Config":{"Tty":false}}`)) //nolint:errcheck
 	})
-	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, _ *http.Request) {
 		flusher := w.(http.Flusher)
 		w.WriteHeader(http.StatusOK)
 		writeFrame(w, flusher, 1, []byte(raw), 3)
@@ -408,10 +412,10 @@ func TestLogsTTYRawStream(t *testing.T) {
 		"2026-08-06T12:00:00.000000002Z tty line two\n"
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"Config":{"Tty":true}}`)) //nolint:errcheck
 	})
-	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, _ *http.Request) {
 		flusher := w.(http.Flusher)
 		w.WriteHeader(http.StatusOK)
 		// Raw stream: no 8-byte frame headers at all, just split mid-line
@@ -500,10 +504,10 @@ func TestLogsEOFDoesNotLeakWatcherGoroutine(t *testing.T) {
 	ts := "2026-08-06T12:00:00.000000001Z"
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"Config":{"Tty":false}}`)) //nolint:errcheck
 	})
-	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, _ *http.Request) {
 		flusher := w.(http.Flusher)
 		w.WriteHeader(http.StatusOK)
 		writeFrame(w, flusher, 1, []byte(ts+" line\n"), 3)
@@ -527,8 +531,8 @@ func TestLogsEOFDoesNotLeakWatcherGoroutine(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Logs iteration %d: %v", i, err)
 		}
-		for range ch {
-			// drain to EOF close
+		for v := range ch {
+			_ = v // drain to EOF close
 		}
 	}
 	transport.CloseIdleConnections() // same: keep-alive pooling is unrelated to the watcher fix under test
@@ -567,10 +571,10 @@ func TestLogsCrossFrameLineSplitMidUTF8Rune(t *testing.T) {
 	splitAt := idx + 1
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"Config":{"Tty":false}}`)) //nolint:errcheck
 	})
-	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/containers/"+cid+"/logs", func(w http.ResponseWriter, _ *http.Request) {
 		flusher := w.(http.Flusher)
 		w.WriteHeader(http.StatusOK)
 		// Two separate Docker frames whose payloads split the SAME line

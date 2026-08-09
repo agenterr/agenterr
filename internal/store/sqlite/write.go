@@ -61,75 +61,89 @@ func (db *DB) WriteBatch(ctx context.Context, entries []store.Entry) ([]store.Is
 	var outcomes []store.IssueOutcome
 
 	for _, e := range entries {
-		attrsJSON, err := json.Marshal(e.Log.Attrs)
+		outcome, err := writeEntry(ctx, tx, e)
 		if err != nil {
-			return nil, fmt.Errorf("sqlite: marshal attrs: %w", err)
+			return nil, err
 		}
-		ts := e.Log.Time.UTC().Format(time.RFC3339Nano)
-
-		res, err := tx.ExecContext(ctx, insertLog,
-			e.Log.ProjectID, ts, int(e.Log.Severity), e.Log.Body,
-			e.Log.Service, e.Log.Environment, e.Log.Release, e.Log.TraceID, string(attrsJSON))
-		if err != nil {
-			return nil, fmt.Errorf("sqlite: insert log: %w", err)
+		if outcome != nil {
+			outcomes = append(outcomes, *outcome)
 		}
-		logID, err := res.LastInsertId()
-		if err != nil {
-			return nil, fmt.Errorf("sqlite: log last insert id: %w", err)
-		}
-
-		if !e.IsEvent {
-			continue
-		}
-
-		// Read the issue's status before the upsert, inside this same
-		// transaction: that's the only way to tell "first sight" (no row)
-		// apart from "was resolved" (row, status='resolved') apart from
-		// "already open/ignored" (row, other status) — the upsert itself
-		// only tells us insert-vs-update, not what the prior status was.
-		var prevStatus string
-		err = tx.QueryRowContext(ctx, selectIssueStatusByFingerprint, e.Log.ProjectID, e.Fingerprint).Scan(&prevStatus)
-		existed := true
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			existed = false
-		case err != nil:
-			return nil, fmt.Errorf("sqlite: select issue status: %w", err)
-		}
-
-		if _, err := tx.ExecContext(ctx, upsertIssue,
-			e.Log.ProjectID, e.Fingerprint, e.Title, int(e.Log.Severity), ts, ts); err != nil {
-			return nil, fmt.Errorf("sqlite: upsert issue: %w", err)
-		}
-
-		var issueID int64
-		if err := tx.QueryRowContext(ctx, selectIssueIDByFingerprint, e.Log.ProjectID, e.Fingerprint).Scan(&issueID); err != nil {
-			return nil, fmt.Errorf("sqlite: select issue id: %w", err)
-		}
-
-		if _, err := tx.ExecContext(ctx, setLogIssueID, issueID, logID); err != nil {
-			return nil, fmt.Errorf("sqlite: set log issue id: %w", err)
-		}
-
-		if _, err := tx.ExecContext(ctx, insertEvent, issueID, logID, ts); err != nil {
-			return nil, fmt.Errorf("sqlite: insert event: %w", err)
-		}
-
-		if _, err := tx.ExecContext(ctx, trimEvents, issueID, issueID); err != nil {
-			return nil, fmt.Errorf("sqlite: trim events: %w", err)
-		}
-
-		outcomes = append(outcomes, store.IssueOutcome{
-			IssueID:  issueID,
-			New:      !existed,
-			Reopened: existed && prevStatus == string(core.StatusResolved),
-		})
 	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("sqlite: commit: %w", err)
 	}
 	return outcomes, nil
+}
+
+// writeEntry inserts one log row within tx and, if e.IsEvent, upserts its
+// issue and returns the resulting IssueOutcome. Non-event entries return
+// (nil, nil) — WriteBatch only appends to outcomes when the result is
+// non-nil.
+func writeEntry(ctx context.Context, tx *sql.Tx, e store.Entry) (*store.IssueOutcome, error) {
+	attrsJSON, err := json.Marshal(e.Log.Attrs)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: marshal attrs: %w", err)
+	}
+	ts := e.Log.Time.UTC().Format(time.RFC3339Nano)
+
+	res, err := tx.ExecContext(ctx, insertLog,
+		e.Log.ProjectID, ts, int(e.Log.Severity), e.Log.Body,
+		e.Log.Service, e.Log.Environment, e.Log.Release, e.Log.TraceID, string(attrsJSON))
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: insert log: %w", err)
+	}
+	logID, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: log last insert id: %w", err)
+	}
+
+	if !e.IsEvent {
+		return nil, nil
+	}
+
+	// Read the issue's status before the upsert, inside this same
+	// transaction: that's the only way to tell "first sight" (no row)
+	// apart from "was resolved" (row, status='resolved') apart from
+	// "already open/ignored" (row, other status) — the upsert itself
+	// only tells us insert-vs-update, not what the prior status was.
+	var prevStatus string
+	err = tx.QueryRowContext(ctx, selectIssueStatusByFingerprint, e.Log.ProjectID, e.Fingerprint).Scan(&prevStatus)
+	existed := true
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		existed = false
+	case err != nil:
+		return nil, fmt.Errorf("sqlite: select issue status: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, upsertIssue,
+		e.Log.ProjectID, e.Fingerprint, e.Title, int(e.Log.Severity), ts, ts); err != nil {
+		return nil, fmt.Errorf("sqlite: upsert issue: %w", err)
+	}
+
+	var issueID int64
+	if err := tx.QueryRowContext(ctx, selectIssueIDByFingerprint, e.Log.ProjectID, e.Fingerprint).Scan(&issueID); err != nil {
+		return nil, fmt.Errorf("sqlite: select issue id: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, setLogIssueID, issueID, logID); err != nil {
+		return nil, fmt.Errorf("sqlite: set log issue id: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, insertEvent, issueID, logID, ts); err != nil {
+		return nil, fmt.Errorf("sqlite: insert event: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, trimEvents, issueID, issueID); err != nil {
+		return nil, fmt.Errorf("sqlite: trim events: %w", err)
+	}
+
+	return &store.IssueOutcome{
+		IssueID:  issueID,
+		New:      !existed,
+		Reopened: existed && prevStatus == string(core.StatusResolved),
+	}, nil
 }
 
 // MintKey generates a new high-entropy API key of the form
