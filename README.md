@@ -364,6 +364,7 @@ Flags override env vars, which override the defaults above.
 
 ## Self-hosting notes
 
+- **Full deployment guide** — compose file, reverse-proxy TLS examples, systemd, backup, upgrades: [docs/self-hosting.md](docs/self-hosting.md).
 - **Backup is one file.** Everything lives in the SQLite database at
   `AGENTERR_DB` (WAL mode, so also copy the `-wal`/`-shm` files if you're
   doing a raw filesystem copy while the process is running). For continuous
