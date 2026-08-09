@@ -782,6 +782,33 @@ func TestPerProjectParseBodiesFalse(t *testing.T) {
 	}
 }
 
+// TestProcess_PanicBodyBecomesEvent confirms panic-prefix severity
+// detection runs even with body-parse disabled: it must not be gated by
+// the structured-parsing toggles, since ParseStructuredBody handles JSON/
+// logfmt bodies while a raw panic dump is neither.
+func TestProcess_PanicBodyBecomesEvent(t *testing.T) {
+	fw := &fakeWriter{}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{DisableBodyParse: true})
+
+	entry, keep := p.process(core.Log{
+		ProjectID: 1,
+		Severity:  core.SeverityInfo,
+		Body:      "panic: runtime error: invalid memory address\n\ngoroutine 1 [running]:\nmain.main()",
+	})
+	if !keep {
+		t.Fatal("record dropped")
+	}
+	if !entry.IsEvent {
+		t.Fatal("panic record should be an event")
+	}
+	if entry.Fingerprint == "" || entry.Title == "" {
+		t.Errorf("event not annotated: fingerprint=%q title=%q", entry.Fingerprint, entry.Title)
+	}
+	if entry.Log.Severity != core.SeverityFatal {
+		t.Errorf("severity = %v, want fatal", entry.Log.Severity)
+	}
+}
+
 // TestNopDropper_PreservesPlan1Behavior pins that NopDropper never drops
 // and always parses — every pre-noise-controls pipeline test uses it via
 // New's call sites above, so this is a direct, explicit pin of the

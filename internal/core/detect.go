@@ -58,3 +58,20 @@ func Title(l Log) string {
 
 	return firstLine
 }
+
+// DetectPanicSeverity raises a log whose body starts with a Go runtime
+// crash prefix ("panic:" or "fatal error:") to FATAL, so plain-text
+// panic dumps shipped without a severity become grouped, alertable
+// issues. Mirrors ParseSeverity's mapping of "panic"/"fatal" names.
+// Like structured-body lifting, it only overrides the parser-default
+// INFO — an explicitly set severity always wins.
+func DetectPanicSeverity(l Log) Log {
+	if l.Severity != SeverityInfo {
+		return l
+	}
+	body := strings.TrimLeft(l.Body, " \t")
+	if strings.HasPrefix(body, "panic:") || strings.HasPrefix(body, "fatal error:") {
+		l.Severity = SeverityFatal
+	}
+	return l
+}

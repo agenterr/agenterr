@@ -99,3 +99,25 @@ func TestTitle(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectPanicSeverity(t *testing.T) {
+	cases := []struct {
+		name string
+		log  Log
+		want Severity
+	}{
+		{"panic prefix", Log{Severity: SeverityInfo, Body: "panic: runtime error: index out of range [3]\n\ngoroutine 1 [running]:"}, SeverityFatal},
+		{"fatal error prefix", Log{Severity: SeverityInfo, Body: "fatal error: concurrent map writes"}, SeverityFatal},
+		{"leading whitespace tolerated", Log{Severity: SeverityInfo, Body: "  panic: boom"}, SeverityFatal},
+		{"explicit error not overridden", Log{Severity: SeverityError, Body: "panic: boom"}, SeverityError},
+		{"explicit warn not raised", Log{Severity: SeverityWarn, Body: "panic: boom"}, SeverityWarn},
+		{"panic mid-body ignored", Log{Severity: SeverityInfo, Body: "recovered from panic: boom"}, SeverityInfo},
+		{"plain info unchanged", Log{Severity: SeverityInfo, Body: "listening on :3617"}, SeverityInfo},
+		{"empty body", Log{Severity: SeverityInfo, Body: ""}, SeverityInfo},
+	}
+	for _, c := range cases {
+		if got := DetectPanicSeverity(c.log).Severity; got != c.want {
+			t.Errorf("%s: severity = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

@@ -289,12 +289,11 @@ and `--file` can both be set at once.
   fatal at startup (bad key, wrong instance) but only logged and retried at
   runtime (so a key rotated out from under a running shipper recovers on its
   own once fixed).
-- **Severity.** Ship never derives or sends a severity — the server's
-  structured-body parsing (see "Structured log bodies" above) is what lifts
-  one, from a JSON or logfmt body. A plain-text panic dump therefore still
-  arrives intact as a single joined record, but stays at the default
-  severity unless the process producing it already logs in a structured
-  shape with a level field.
+- **Severity.** Ship never derives or sends a severity — the server owns
+  that. Structured (JSON/logfmt) bodies get their level lifted at ingest,
+  and plain-text Go crash dumps (`panic:` / `fatal error:` prefixes) are
+  detected server-side and recorded as FATAL — so a shipped panic arrives
+  as one joined record *and* becomes a grouped, alertable issue.
 
 | Env var | Flag | Default | Meaning |
 |---|---|---|---|

@@ -122,18 +122,8 @@ func TestShipE2E(t *testing.T) {
 
 	// ---- 3: assert via REST ----
 
-	// The panic body is asserted via log search, not issue grouping: per the
-	// ship semantics doc, ship never sends a severity, and the server only
-	// derives one from a structured (JSON/logfmt) body — see
-	// internal/core/structured.go's ParseStructuredBody and
-	// internal/core/detect.go's IsEvent. A raw, uncaught Go panic dump is
-	// neither JSON nor logfmt (it's exactly the free-text shape panic-mode
-	// joining exists to keep intact), so it lands at the default INFO
-	// severity and never becomes a grouped issue on its own — that's a real,
-	// current product boundary, not a gap in this test. What ship's
-	// panic-mode join is actually responsible for, and what this proves end
-	// to end, is that the whole dump — blank line and non-indented frames
-	// included — arrives as ONE stored record instead of fragmenting.
+	// Panic-prefix severity detection is server-side: the joined dump must
+	// surface as a FATAL grouped issue — see core.DetectPanicSeverity.
 	t.Run("panic joined into one record", func(t *testing.T) {
 		deadline := time.Now().Add(10 * time.Second)
 		var logs []logDTO
@@ -171,6 +161,22 @@ func TestShipE2E(t *testing.T) {
 		}
 		if strings.Contains(body, "\x1b") {
 			t.Errorf("panic body unexpectedly contains a raw ESC byte: %q", body)
+		}
+
+		// Server-side panic detection (core.DetectPanicSeverity) must raise
+		// the joined dump to FATAL, which in turn makes it a grouped,
+		// alertable issue — not just a stored log record.
+		var issues []issueDTO
+		h.doJSON(t, "GET", "/api/v1/issues", h.adminKey, nil, 200, &issues)
+		found := false
+		for _, iss := range issues {
+			if strings.HasPrefix(iss.Title, "panic:") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected an issue with a title starting with %q, got issues: %+v", "panic:", issues)
 		}
 	})
 

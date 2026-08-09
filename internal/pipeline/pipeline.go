@@ -235,6 +235,7 @@ func (p *Pipeline) process(l core.Log) (store.Entry, bool) {
 	if !p.o.DisableBodyParse && p.d.ParseBodies(l.ProjectID) {
 		l = core.ParseStructuredBody(l)
 	}
+	l = core.DetectPanicSeverity(l)
 	if drop, _ := p.d.Decide(l); drop {
 		atomic.AddInt64(&p.unflushed, -1)
 		return store.Entry{}, false
