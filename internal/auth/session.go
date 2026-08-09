@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/agenterr/agenterr/internal/httpx"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -20,7 +21,7 @@ const (
 // cookie on w. On mismatch it returns an error and sets no cookie — the
 // caller is responsible for rendering the failure (e.g. re-showing the
 // login form).
-func (a *Auth) Login(w http.ResponseWriter, password string) error {
+func (a *Auth) Login(w http.ResponseWriter, r *http.Request, password string) error {
 	if err := bcrypt.CompareHashAndPassword(a.adminPasswordHash, []byte(password)); err != nil {
 		return errors.New("invalid password")
 	}
@@ -36,19 +37,16 @@ func (a *Auth) Login(w http.ResponseWriter, password string) error {
 	a.sessions[token] = expiry
 	a.mu.Unlock()
 
-	// Not marked Secure: the MVP self-host quickstart runs plain HTTP on
-	// localhost or a VPS-internal address, and a Secure cookie would
-	// silently break login there. Deployments that terminate TLS in
-	// front of the UI should keep it behind that TLS boundary regardless
-	// (reverse proxy, VPN, etc). Tracked follow-up: revisit once hosted
-	// deployments (which do terminate TLS) exist, and make Secure
-	// conditional on that.
+	// Secure tracks how the request arrived (direct TLS or a proxy's
+	// X-Forwarded-Proto) so plain-HTTP localhost quickstarts still work
+	// while TLS deployments get a Secure cookie automatically.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/",
 		Expires:  expiry,
 		HttpOnly: true,
+		Secure:   httpx.IsHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
@@ -84,6 +82,7 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   httpx.IsHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }

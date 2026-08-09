@@ -31,7 +31,7 @@ func (h *Login) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	password := r.FormValue("password")
-	if err := h.Auth.Login(w, password); err != nil {
+	if err := h.Auth.Login(w, r, password); err != nil {
 		renderFullStatus(w, h.Tpl, http.StatusUnauthorized, map[string]any{"Error": "Wrong password."})
 		return
 	}

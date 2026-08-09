@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/agenterr/agenterr/internal/core"
+	"github.com/agenterr/agenterr/internal/httpx"
 )
 
 // FuncMap is shared by every page template set.
@@ -56,7 +57,7 @@ func renderFragment(w http.ResponseWriter, tpl *template.Template, name string, 
 // point back at this instance.
 func baseURL(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil {
+	if httpx.IsHTTPS(r) {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -172,10 +173,14 @@ func newTestAuth(t *testing.T) *Auth {
 	return New(newFakeAdmin(), hash)
 }
 
+func plainReq() *http.Request {
+	return httptest.NewRequest("POST", "/login", nil)
+}
+
 func TestLogin_WrongPassword(t *testing.T) {
 	a := newTestAuth(t)
 	rw := httptest.NewRecorder()
-	err := a.Login(rw, "not the password")
+	err := a.Login(rw, plainReq(), "not the password")
 	if err == nil {
 		t.Fatal("expected error for wrong password")
 	}
@@ -187,7 +192,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 func TestLogin_RightPassword(t *testing.T) {
 	a := newTestAuth(t)
 	rw := httptest.NewRecorder()
-	if err := a.Login(rw, testPassword); err != nil {
+	if err := a.Login(rw, plainReq(), testPassword); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	cookies := rw.Result().Cookies()
@@ -210,12 +215,41 @@ func TestLogin_RightPassword(t *testing.T) {
 	if c.Path != "/" {
 		t.Errorf("Path = %q, want /", c.Path)
 	}
+	if c.Secure {
+		t.Error("cookie over plain http must not be Secure — would break self-host quickstart")
+	}
+}
+
+func TestLogin_SecureCookieOverTLS(t *testing.T) {
+	a := newTestAuth(t)
+	r := plainReq()
+	r.TLS = &tls.ConnectionState{}
+	rw := httptest.NewRecorder()
+	if err := a.Login(rw, r, testPassword); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if c := rw.Result().Cookies()[0]; !c.Secure {
+		t.Error("cookie over TLS should be Secure")
+	}
+}
+
+func TestLogin_SecureCookieBehindProxy(t *testing.T) {
+	a := newTestAuth(t)
+	r := plainReq()
+	r.Header.Set("X-Forwarded-Proto", "https")
+	rw := httptest.NewRecorder()
+	if err := a.Login(rw, r, testPassword); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if c := rw.Result().Cookies()[0]; !c.Secure {
+		t.Error("cookie behind TLS proxy should be Secure")
+	}
 }
 
 func TestRequireSession(t *testing.T) {
 	a := newTestAuth(t)
 	loginRW := httptest.NewRecorder()
-	if err := a.Login(loginRW, testPassword); err != nil {
+	if err := a.Login(loginRW, plainReq(), testPassword); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	sessionCookie := loginRW.Result().Cookies()[0]
@@ -272,7 +306,7 @@ func TestRequireSession(t *testing.T) {
 	t.Run("expired session", func(t *testing.T) {
 		a2 := newTestAuth(t)
 		expiredRW := httptest.NewRecorder()
-		if err := a2.Login(expiredRW, testPassword); err != nil {
+		if err := a2.Login(expiredRW, plainReq(), testPassword); err != nil {
 			t.Fatalf("Login: %v", err)
 		}
 		expiredCookie := expiredRW.Result().Cookies()[0]
@@ -290,7 +324,7 @@ func TestRequireSession(t *testing.T) {
 	t.Run("expired session is purged from the map on read", func(t *testing.T) {
 		a3 := newTestAuth(t)
 		loginRW := httptest.NewRecorder()
-		if err := a3.Login(loginRW, testPassword); err != nil {
+		if err := a3.Login(loginRW, plainReq(), testPassword); err != nil {
 			t.Fatalf("Login: %v", err)
 		}
 		expiredCookie := loginRW.Result().Cookies()[0]
@@ -331,13 +365,16 @@ func (a *Auth) hasSession(token string) bool {
 
 func TestLogout_ExpiresCookie(t *testing.T) {
 	a := newTestAuth(t)
+	loginReq := plainReq()
+	loginReq.Header.Set("X-Forwarded-Proto", "https")
 	loginRW := httptest.NewRecorder()
-	if err := a.Login(loginRW, testPassword); err != nil {
+	if err := a.Login(loginRW, loginReq, testPassword); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	sessionCookie := loginRW.Result().Cookies()[0]
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
 	req.AddCookie(sessionCookie)
 	rw := httptest.NewRecorder()
 	a.Logout(rw, req)
@@ -348,5 +385,8 @@ func TestLogout_ExpiresCookie(t *testing.T) {
 	}
 	if !cookies[0].Expires.Before(time.Now()) {
 		t.Errorf("expected cookie to be expired")
+	}
+	if !cookies[0].Secure {
+		t.Error("clearing cookie behind TLS proxy should be Secure (attribute match)")
 	}
 }

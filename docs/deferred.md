@@ -5,10 +5,6 @@ ruled acceptable to ship; none blocks self-hosted use. Ordered by weight.
 
 ## Before any hosted / HTTPS-only deployment
 
-- **Session cookie lacks `Secure`.** Deliberate for plain-HTTP self-host
-  quickstart (documented in `internal/auth/session.go`). Add a config flag
-  or `r.TLS` conditional before the cloud control plane or any public
-  HTTPS deployment goes live.
 - **No login rate limiting.** bcrypt cost is the only throttle. Fine
   behind a VPN/private VPS; add lockout/backoff if admin UIs become
   internet-facing.

@@ -30,9 +30,10 @@ type SessionAuth interface {
 	// cookie is absent, unknown, or expired.
 	RequireSession(h http.Handler) http.Handler
 	// Login checks password against the admin's bcrypt hash; on success
-	// it sets the session cookie on w. Returns an error on mismatch —
+	// it sets the session cookie on w, using r to decide whether the
+	// cookie should be marked Secure. Returns an error on mismatch —
 	// the caller renders the failure.
-	Login(w http.ResponseWriter, password string) error
+	Login(w http.ResponseWriter, r *http.Request, password string) error
 	// Logout invalidates r's session (if any) and expires the cookie.
 	Logout(w http.ResponseWriter, r *http.Request)
 }
