@@ -125,16 +125,16 @@ func (a *AlertRules) List(w http.ResponseWriter, r *http.Request) {
 }
 
 type alertRuleBody struct {
-	ID              int64             `json:"id"`
-	Name            string            `json:"name"`
-	Kind            string            `json:"kind"`
-	Service         string            `json:"service"`
-	Environment     string            `json:"environment"`
-	MinSeverity     string            `json:"min_severity"`
-	N               int               `json:"n"`
-	WindowMinutes   int               `json:"window_minutes"`
-	URL             string            `json:"url"`
-	Headers         map[string]string `json:"headers"`
+	ID            int64             `json:"id"`
+	Name          string            `json:"name"`
+	Kind          string            `json:"kind"`
+	Service       string            `json:"service"`
+	Environment   string            `json:"environment"`
+	MinSeverity   string            `json:"min_severity"`
+	N             int               `json:"n"`
+	WindowMinutes int               `json:"window_minutes"`
+	URL           string            `json:"url"`
+	Headers       map[string]string `json:"headers"`
 	// Enabled is a pointer so omitting it is distinguishable from an
 	// explicit false: on create, nil defaults to true; on update, nil
 	// preserves the rule's current enabled state instead of clobbering it
