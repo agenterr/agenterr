@@ -314,6 +314,9 @@ silently: a dropped batch, an oversized record, or a spool eviction is
 always logged and counted, visible in ship's own periodic self-log line
 (shipped/buffered/dropped/last-error, once a minute).
 
+Migrating from a Vector + OpenObserve (or similar) stack? See
+[docs/replacing-vector-openobserve.md](docs/replacing-vector-openobserve.md).
+
 ## Agent setup
 
 Give an agent access to the seventeen MCP tools (`list_projects`,
