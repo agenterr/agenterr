@@ -374,6 +374,10 @@ Flags override env vars, which override the defaults above.
   last-resort guardrail on top of that, not a replacement for it.
 - **`/healthz`** is unauthenticated and pings the store on every call —
   point your uptime checker or orchestrator's readiness probe at it.
+- **Login throttling** is per client IP (5 failed attempts per minute).
+  Behind a reverse proxy all clients share the proxy's IP; the limiter
+  deliberately ignores `X-Forwarded-For` (trivially forgeable). Keep the
+  UI behind your proxy's own protections if you need per-user limits.
 
 ## License
 

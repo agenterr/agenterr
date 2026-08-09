@@ -3,12 +3,6 @@
 Carried out of the MVP review cycle, 2026-08-06. Each was reviewed and
 ruled acceptable to ship; none blocks self-hosted use. Ordered by weight.
 
-## Before any hosted / HTTPS-only deployment
-
-- **No login rate limiting.** bcrypt cost is the only throttle. Fine
-  behind a VPN/private VPS; add lockout/backoff if admin UIs become
-  internet-facing.
-
 ## Product improvements
 
 - **Per-issue day counts.** The issue-detail sparkline uses project-wide

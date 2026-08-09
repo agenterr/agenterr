@@ -257,6 +257,28 @@ func TestLogin_HappyPath(t *testing.T) {
 	}
 }
 
+func TestLogin_RateLimited429(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(t, fs)
+	defer srv.Close()
+	client := srv.Client()
+	for i := 0; i < 5; i++ {
+		resp, err := client.PostForm(srv.URL+"/login", url.Values{"password": {"wrong"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	resp, err := client.PostForm(srv.URL+"/login", url.Values{"password": {"wrong"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+}
+
 func TestIssuesList_RendersTitlesAndCounts(t *testing.T) {
 	fs := newFakeStore()
 	fs.issueList = []core.Issue{

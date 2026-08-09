@@ -22,7 +22,21 @@ const (
 // caller is responsible for rendering the failure (e.g. re-showing the
 // login form).
 func (a *Auth) Login(w http.ResponseWriter, r *http.Request, password string) error {
+	ip := clientIP(r)
+	now := time.Now()
+
+	a.mu.Lock()
+	sweepExpiredFailures(a.failures, now)
+	allowed := a.loginAllowed(ip, now)
+	a.mu.Unlock()
+	if !allowed {
+		return ErrRateLimited
+	}
+
 	if err := bcrypt.CompareHashAndPassword(a.adminPasswordHash, []byte(password)); err != nil {
+		a.mu.Lock()
+		a.recordLoginFailure(ip, now)
+		a.mu.Unlock()
 		return errors.New("invalid password")
 	}
 
@@ -35,6 +49,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request, password string) er
 	a.mu.Lock()
 	sweepExpiredSessions(a.sessions) // single admin -> map is tiny; O(handful)
 	a.sessions[token] = expiry
+	delete(a.failures, ip)
 	a.mu.Unlock()
 
 	// Secure tracks how the request arrived (direct TLS or a proxy's

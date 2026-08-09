@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"html/template"
 	"net/http"
 
@@ -32,6 +33,10 @@ func (h *Login) Submit(w http.ResponseWriter, r *http.Request) {
 	}
 	password := r.FormValue("password")
 	if err := h.Auth.Login(w, r, password); err != nil {
+		if errors.Is(err, auth.ErrRateLimited) {
+			renderFullStatus(w, h.Tpl, http.StatusTooManyRequests, map[string]any{"Error": "Too many attempts. Wait a minute and try again."})
+			return
+		}
 		renderFullStatus(w, h.Tpl, http.StatusUnauthorized, map[string]any{"Error": "Wrong password."})
 		return
 	}

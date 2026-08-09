@@ -49,6 +49,10 @@ type Auth struct {
 	// restarts (a restart just forces re-login).
 	mu       sync.Mutex
 	sessions map[string]time.Time // token -> expiry
+
+	// failures tracks per-IP login failures for the rate limiter (see
+	// ratelimit.go), guarded by the same mu as sessions.
+	failures map[string]failWindow
 }
 
 // New constructs an Auth wrapping admin for key lookups and
@@ -58,6 +62,7 @@ func New(admin store.Admin, adminPasswordHash []byte) *Auth {
 		admin:             admin,
 		adminPasswordHash: adminPasswordHash,
 		sessions:          make(map[string]time.Time),
+		failures:          make(map[string]failWindow),
 	}
 }
 

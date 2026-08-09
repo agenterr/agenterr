@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -389,4 +390,58 @@ func TestLogout_ExpiresCookie(t *testing.T) {
 	if !cookies[0].Secure {
 		t.Error("clearing cookie behind TLS proxy should be Secure (attribute match)")
 	}
+}
+
+func TestLogin_RateLimited(t *testing.T) {
+	a := newTestAuth(t)
+	for i := 0; i < loginFailLimit; i++ {
+		rw := httptest.NewRecorder()
+		if err := a.Login(rw, plainReq(), "wrong-password"); err == nil {
+			t.Fatalf("attempt %d: expected error", i)
+		}
+	}
+	// Limit reached: even the right password is refused.
+	err := a.Login(httptest.NewRecorder(), plainReq(), testPassword)
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+}
+
+func TestLogin_RateLimitWindowExpires(t *testing.T) {
+	a := newTestAuth(t)
+	for i := 0; i < loginFailLimit; i++ {
+		_ = a.Login(httptest.NewRecorder(), plainReq(), "wrong-password")
+	}
+	a.setFailWindowStart(clientIP(plainReq()), time.Now().Add(-2*loginFailWindow)) // test hook, declared in this file
+	if err := a.Login(httptest.NewRecorder(), plainReq(), testPassword); err != nil {
+		t.Fatalf("after window expiry: %v", err)
+	}
+}
+
+func TestLogin_SuccessResetsFailures(t *testing.T) {
+	a := newTestAuth(t)
+	for i := 0; i < loginFailLimit-1; i++ {
+		_ = a.Login(httptest.NewRecorder(), plainReq(), "wrong-password")
+	}
+	if err := a.Login(httptest.NewRecorder(), plainReq(), testPassword); err != nil {
+		t.Fatalf("should still be allowed: %v", err)
+	}
+	// Counter was cleared by the success — a fresh run of failures is needed to trip it again.
+	for i := 0; i < loginFailLimit-1; i++ {
+		_ = a.Login(httptest.NewRecorder(), plainReq(), "wrong-password")
+	}
+	if err := a.Login(httptest.NewRecorder(), plainReq(), testPassword); err != nil {
+		t.Fatalf("counter should have reset on success: %v", err)
+	}
+}
+
+// setFailWindowStart is a test-only helper that reaches into Auth's
+// internal failure map to force a window's start time, so window-expiry
+// behavior can be tested without waiting a minute.
+func (a *Auth) setFailWindowStart(ip string, start time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fw := a.failures[ip]
+	fw.start = start
+	a.failures[ip] = fw
 }
