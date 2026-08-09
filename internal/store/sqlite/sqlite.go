@@ -46,12 +46,23 @@ type DB struct {
 // WAL mode lets readers proceed without blocking on a writer, and
 // busy_timeout(5000) has any writer-vs-writer contention wait instead of
 // failing outright. Capping MaxOpenConns(1) would serialize reads behind
-// writes and defeat the point of WAL. The single-process pipeline design
-// means there is at most one concurrent writer in practice (WriteBatch),
-// so this relies on WAL + busy_timeout for correctness, not a
-// self-managed mutex.
+// writes and defeat the point of WAL. Multiple components write
+// concurrently on separate pool connections in practice — pipeline batch
+// flush (WriteBatch), noise drop-counter flush (AddNoiseDrops), alert
+// state (RecordAlertResult), and retention (Prune) — so this relies on
+// WAL + busy_timeout for correctness, not a self-managed mutex.
+//
+// _txlock=immediate makes every BeginTx acquire the writer lock at BEGIN
+// (SQLite "BEGIN IMMEDIATE") instead of the driver's default deferred
+// begin. This matters because a deferred transaction only consults the
+// busy handler (what installs busy_timeout) while still outside a
+// transaction; once it has stepped into the read half of a deferred tx,
+// a writer-lock conflict on its first write statement fails immediately
+// with SQLITE_BUSY without ever waiting. Beginning IMMEDIATE moves the
+// lock acquisition to BEGIN, where the busy handler still applies, so
+// concurrent writers wait (up to busy_timeout) instead of erroring.
 func Open(path string) (*DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate", path)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open: %w", err)
