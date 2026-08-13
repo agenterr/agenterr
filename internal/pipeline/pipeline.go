@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agenterr/agenterr/internal/core"
+	"github.com/agenterr/agenterr/internal/normalize"
 	"github.com/agenterr/agenterr/internal/store"
 )
 
@@ -232,6 +233,19 @@ func (p *Pipeline) Pending() int {
 // which this already did (unflushed decrement, on par with what flush
 // does for logs that make it to the writer).
 func (p *Pipeline) process(l core.Log) (store.Entry, bool) {
+	// Normalize first: parsing, severity detection, rules, and
+	// fingerprinting must all see clean bytes (spec §1). The red-SGR
+	// hint is recorded for the future off-by-default severity
+	// heuristic; it changes nothing today.
+	if body, red := normalize.StripANSI(l.Body); body != l.Body {
+		l.Body = body
+		if red {
+			if l.Attrs == nil {
+				l.Attrs = map[string]string{}
+			}
+			l.Attrs["ansi.red"] = "true"
+		}
+	}
 	if !p.o.DisableBodyParse && p.d.ParseBodies(l.ProjectID) {
 		l = core.ParseStructuredBody(l)
 	}

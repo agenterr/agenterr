@@ -821,3 +821,44 @@ func TestNopDropper_PreservesPlan1Behavior(t *testing.T) {
 		t.Error("NopDropper.ParseBodies = false, want true")
 	}
 }
+
+func TestProcessStripsANSI(t *testing.T) {
+	w := &fakeWriter{}
+	p := New(w, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{FlushEvery: 5 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	logs := []core.Log{
+		{ProjectID: 1, Time: time.Now(), Severity: core.SeverityInfo,
+			Body: "2026/08/08 22:18:20 \x1b[31;1mrepo.go:22 \x1b[35;1mrecord not found"},
+		// Panic lift must fire even when ANSI precedes the prefix —
+		// this is the case DetectPanicSeverity missed before normalize.
+		{ProjectID: 1, Time: time.Now(), Severity: core.SeverityInfo,
+			Body: "\x1b[31mpanic: boom"},
+	}
+	if err := p.Enqueue(logs); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	eventually(t, time.Second, func() bool { return w.totalEntries() == 2 })
+
+	var entries []store.Entry
+	for _, b := range w.snapshot() {
+		entries = append(entries, b...)
+	}
+	if got := entries[0].Log.Body; got != "2026/08/08 22:18:20 repo.go:22 record not found" {
+		t.Errorf("body not stripped: %q", got)
+	}
+	if entries[0].Log.Attrs["ansi.red"] != "true" {
+		t.Errorf("ansi.red hint missing, attrs = %v", entries[0].Log.Attrs)
+	}
+	if entries[1].Log.Body != "panic: boom" {
+		t.Errorf("panic body not stripped: %q", entries[1].Log.Body)
+	}
+	if entries[1].Log.Severity != core.SeverityFatal {
+		t.Errorf("panic behind ANSI not lifted to FATAL, got %v", entries[1].Log.Severity)
+	}
+	if !entries[1].IsEvent {
+		t.Error("stripped panic should be an event")
+	}
+}
