@@ -209,6 +209,27 @@ Measured on a replayed day of real trial traffic (~330k logs):
 | Ingest throughput | ≥ current (no regression at 500-log batches) | — |
 | Templating rate on trial corpus | ≥ 90% of lines (traefik must template) | — |
 
+### Speed-test suite (proving the o2 claim)
+
+Two layers, both replaying the same fixed corpus (a captured/generated
+day of trial-shaped traffic, ~330k logs, committed as a generator not
+raw data):
+
+1. **CI benchmark gate (`test/bench`, runs on every PR):** Go benchmarks
+   for the canonical operations — scoped search (service + 24 h),
+   worst-case unscoped 30 d search, `aggregate_logs`, `get_log_context`,
+   ingest throughput, and measured bytes/record after flush. Each
+   asserts against the §7 targets as hard thresholds; a PR that pushes
+   scoped search over 50 ms fails. Targets, not o2, are the CI baseline
+   — o2 doesn't run in CI.
+2. **Head-to-head harness (`make bench-vs-o2`, local/manual):**
+   docker-composes a real OpenObserve, feeds both stores the identical
+   corpus, runs the equivalent query on each side (agenterr MCP/API vs
+   o2 `_search` SQL), and prints a side-by-side latency + on-disk-size
+   table. This is the artifact behind any public "beats OpenObserve"
+   claim, and re-runnable against future o2 versions. Run before
+   tagging v0.2.0; the output table goes in the release notes.
+
 ## 8. Validation & testing
 
 - **Step 0 — prototype before the build.** Throwaway Drain extractor
