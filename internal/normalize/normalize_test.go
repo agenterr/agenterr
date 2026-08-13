@@ -4,10 +4,10 @@ import "testing"
 
 func TestStripANSI(t *testing.T) {
 	tests := []struct {
-		name  string
-		in    string
-		want  string
-		red   bool
+		name string
+		in   string
+		want string
+		red  bool
 	}{
 		{"no escapes fast path", "plain log line", "plain log line", false},
 		// Real GORM line from the the-trial-customer trial (runbook, 2026-08-08).
