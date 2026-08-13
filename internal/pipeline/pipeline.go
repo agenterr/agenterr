@@ -240,10 +240,12 @@ func (p *Pipeline) process(l core.Log) (store.Entry, bool) {
 	if body, red := normalize.StripANSI(l.Body); body != l.Body {
 		l.Body = body
 		if red {
-			if l.Attrs == nil {
-				l.Attrs = map[string]string{}
+			attrs := make(map[string]string, len(l.Attrs)+1)
+			for k, v := range l.Attrs {
+				attrs[k] = v
 			}
-			l.Attrs["ansi.red"] = "true"
+			attrs["ansi.red"] = "true"
+			l.Attrs = attrs
 		}
 	}
 	if !p.o.DisableBodyParse && p.d.ParseBodies(l.ProjectID) {
