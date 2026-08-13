@@ -55,14 +55,12 @@ func (d *drain) newTemplate(tokens []string, key string) *tmpl {
 	return t
 }
 
-func (d *drain) Extract(body string) (int, []string, bool) {
-	if strings.ContainsRune(body, '\n') || strings.ContainsRune(body, '\x00') || body == "" {
-		return 0, nil, false
-	}
-	tokens := strings.Split(body, " ")
-	if len(tokens) > 200 {
-		return 0, nil, false
-	}
+// resolve finds the template the tokenized line belongs to: the most
+// similar existing template in its group, reused as-is when it already
+// covers the line, or — append-only — a newly minted template (exact for
+// a first sighting, generalized under a NEW id when reuse would require
+// mutating an existing template's tokens).
+func (d *drain) resolve(tokens []string) *tmpl {
 	key := groupKey(tokens)
 
 	var best *tmpl
@@ -72,32 +70,39 @@ func (d *drain) Extract(body string) (int, []string, bool) {
 			best, bestSim = t, s
 		}
 	}
+	if best == nil || bestSim < d.simThresh {
+		return d.newTemplate(tokens, key) // exact template, zero vars
+	}
 
-	var target *tmpl
-	switch {
-	case best == nil || bestSim < d.simThresh:
-		target = d.newTemplate(tokens, key) // exact template, zero vars
-	default:
-		mutate := false
-		for i, tok := range tokens {
-			if best.tokens[i] != wild && best.tokens[i] != tok {
-				mutate = true
-				break
-			}
-		}
-		if !mutate {
-			target = best
-		} else {
-			// Append-only: mint the generalized template as a NEW id.
-			merged := append([]string(nil), best.tokens...)
-			for i, tok := range tokens {
-				if merged[i] != wild && merged[i] != tok {
-					merged[i] = wild
-				}
-			}
-			target = d.newTemplate(merged, key)
+	mutate := false
+	for i, tok := range tokens {
+		if best.tokens[i] != wild && best.tokens[i] != tok {
+			mutate = true
+			break
 		}
 	}
+	if !mutate {
+		return best
+	}
+	// Append-only: mint the generalized template as a NEW id.
+	merged := append([]string(nil), best.tokens...)
+	for i, tok := range tokens {
+		if merged[i] != wild && merged[i] != tok {
+			merged[i] = wild
+		}
+	}
+	return d.newTemplate(merged, key)
+}
+
+func (d *drain) Extract(body string) (int, []string, bool) {
+	if strings.ContainsRune(body, '\n') || strings.ContainsRune(body, '\x00') || body == "" {
+		return 0, nil, false
+	}
+	tokens := strings.Split(body, " ")
+	if len(tokens) > 200 {
+		return 0, nil, false
+	}
+	target := d.resolve(tokens)
 
 	var vars []string
 	for i, tok := range target.tokens {
