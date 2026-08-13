@@ -862,3 +862,61 @@ func TestProcessStripsANSI(t *testing.T) {
 		t.Error("stripped panic should be an event")
 	}
 }
+
+// TestProcessStripsANSI_DoesNotMutateCallerAttrs proves that when a log with
+// a non-nil Attrs map is stripped of ANSI and marked with ansi.red, the
+// original caller's map is not mutated — the pipeline clones it first.
+func TestProcessStripsANSI_DoesNotMutateCallerAttrs(t *testing.T) {
+	w := &fakeWriter{}
+	p := New(w, core.DefaultGrouper{}, NopNotifier{}, NopDropper{}, Options{FlushEvery: 5 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	// Create a log with non-nil Attrs map and red ANSI in body.
+	originalAttrs := map[string]string{
+		"user_id":  "42",
+		"trace_id": "abc123",
+	}
+	log := core.Log{
+		ProjectID: 1,
+		Time:      time.Now(),
+		Severity:  core.SeverityInfo,
+		Body:      "\x1b[31mError happened\x1b[0m",
+		Attrs:     originalAttrs,
+	}
+
+	if err := p.Enqueue([]core.Log{log}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	eventually(t, time.Second, func() bool { return w.totalEntries() == 1 })
+
+	batches := w.snapshot()
+	if len(batches) != 1 || len(batches[0]) != 1 {
+		t.Fatalf("expected 1 entry, got %d", w.totalEntries())
+	}
+	storedEntry := batches[0][0]
+
+	// The stored entry's Attrs should have ansi.red and the original attrs.
+	if storedEntry.Log.Attrs["ansi.red"] != "true" {
+		t.Errorf("stored entry missing ansi.red, attrs = %v", storedEntry.Log.Attrs)
+	}
+	if storedEntry.Log.Attrs["user_id"] != "42" {
+		t.Errorf("stored entry user_id = %q, want 42", storedEntry.Log.Attrs["user_id"])
+	}
+	if storedEntry.Log.Attrs["trace_id"] != "abc123" {
+		t.Errorf("stored entry trace_id = %q, want abc123", storedEntry.Log.Attrs["trace_id"])
+	}
+
+	// The original caller's map must NOT have been mutated.
+	if _, ok := originalAttrs["ansi.red"]; ok {
+		t.Errorf("caller's original map was mutated: has ansi.red key")
+	}
+	if len(originalAttrs) != 2 {
+		t.Errorf("caller's original map length changed: got %d, want 2", len(originalAttrs))
+	}
+	if originalAttrs["user_id"] != "42" || originalAttrs["trace_id"] != "abc123" {
+		t.Errorf("caller's original map contents were modified")
+	}
+}
