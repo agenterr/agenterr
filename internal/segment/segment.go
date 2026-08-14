@@ -124,6 +124,13 @@ func Write(path string, rows []Row) (Footer, error) {
 	foot.MinTs, foot.MaxTs = sorted[0].TsMicros, sorted[len(sorted)-1].TsMicros
 	foot.MinLogID, foot.MaxLogID = sorted[0].LogID, sorted[0].LogID
 
+	// Validate that all severities are in byte range before encoding.
+	for i, r := range sorted {
+		if r.Severity < 0 || r.Severity > 255 {
+			return Footer{}, fmt.Errorf("segment: row %d: severity %d out of byte range", i, r.Severity)
+		}
+	}
+
 	logIDs, ts, sevs, tmplIDs, nvars, vars, raws, services, envs, rels, traces, attrs, isEvent := encodeRowsToColumns(sorted, &foot)
 
 	svcDict, svcRefs := BuildDict(services)
