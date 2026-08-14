@@ -150,3 +150,21 @@ func TestWriteEmptyRejected(t *testing.T) {
 		t.Error("empty segment must be rejected")
 	}
 }
+
+func TestWriteOutOfRangeSeverity(t *testing.T) {
+	rows := sampleRows(5, 4)
+	rows[2].Severity = 300 // out of byte range
+	path := filepath.Join(t.TempDir(), "bad.seg")
+	if _, err := Write(path, rows); err == nil {
+		t.Error("write with Severity > 255 must fail")
+	}
+}
+
+func TestWriteNegativeSeverity(t *testing.T) {
+	rows := sampleRows(5, 5)
+	rows[1].Severity = -1 // negative severity
+	path := filepath.Join(t.TempDir(), "bad.seg")
+	if _, err := Write(path, rows); err == nil {
+		t.Error("write with negative Severity must fail")
+	}
+}

@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -137,5 +139,47 @@ func TestReplayRecordsIOError(t *testing.T) {
 	}
 	if !errors.Is(err, testErr) {
 		t.Errorf("expected error matching %v but got %v", testErr, err)
+	}
+}
+
+func TestWALCorruptHeaderOOM(t *testing.T) {
+	// Test that a corrupt WAL header claiming a huge length is treated as torn tail
+	// and does not attempt allocation that could cause OOM.
+	path := filepath.Join(t.TempDir(), "wal")
+	w, err := OpenWAL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write a few valid records first.
+	rows := walRows(3)
+	if err := w.Append(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Append a corrupt header claiming 0xFFFFFFFF (4 GiB) followed by any CRC.
+	data, _ := os.ReadFile(path)
+	buf := bytes.NewBuffer(data)
+	// Write huge length: 0xFFFFFFFF
+	binary.Write(buf, binary.LittleEndian, uint32(0xFFFFFFFF))
+	// Write dummy CRC
+	binary.Write(buf, binary.LittleEndian, uint32(0x12345678))
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replay must return the 3 valid rows and no error, without attempting allocation.
+	got, err := ReplayWAL(path)
+	if err != nil {
+		t.Fatalf("replay must not error on corrupt header: %v", err)
+	}
+	if !reflect.DeepEqual(got, rows) {
+		t.Errorf("want 3 valid rows, got %d", len(got))
 	}
 }

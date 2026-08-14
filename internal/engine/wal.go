@@ -18,6 +18,11 @@ import (
 	"github.com/agenterr/agenterr/internal/segment"
 )
 
+// maxWALRecord is the maximum allowed length of a single WAL record.
+// A Row cannot legitimately approach this given the 200-token body cap.
+// Treating records exceeding this as corrupt prevents OOM from malformed headers.
+const maxWALRecord = 16 << 20 // 16 MiB
+
 // WAL is an append-only crash log of rows accepted but not yet flushed
 // into a segment. Records are length-prefixed, CRC'd JSON — one per
 // row. Sync policy belongs to the caller (the engine batches fsyncs on
@@ -109,6 +114,10 @@ func replayRecords(r io.Reader) ([]segment.Row, error) {
 			return nil, fmt.Errorf("engine: wal replay read header: %w", err)
 		}
 		plen := binary.LittleEndian.Uint32(hdr[:4])
+		// Corrupt header claiming huge length is treated as torn tail to prevent OOM.
+		if plen > maxWALRecord {
+			return rows, nil
+		}
 		want := binary.LittleEndian.Uint32(hdr[4:])
 		payload := make([]byte, plen)
 		_, err = io.ReadFull(br, payload)
