@@ -257,13 +257,13 @@ func decodeDictionaryColumn(raw map[string][]byte, n int, dictCol, refCol string
 	if err != nil {
 		return nil, err
 	}
-	max := uint64(0)
+	maxRef := uint64(0)
 	for _, r := range refs {
-		if r > max {
-			max = r
+		if r > maxRef {
+			maxRef = r
 		}
 	}
-	dict, err := DecodeStrings(raw[dictCol], int(max)+1)
+	dict, err := DecodeStrings(raw[dictCol], int(maxRef)+1)
 	if err != nil {
 		return nil, err
 	}

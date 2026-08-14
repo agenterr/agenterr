@@ -166,9 +166,13 @@ func TestWALCorruptHeaderOOM(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	buf := bytes.NewBuffer(data)
 	// Write huge length: 0xFFFFFFFF
-	binary.Write(buf, binary.LittleEndian, uint32(0xFFFFFFFF))
+	if err := binary.Write(buf, binary.LittleEndian, uint32(0xFFFFFFFF)); err != nil {
+		t.Fatal(err)
+	}
 	// Write dummy CRC
-	binary.Write(buf, binary.LittleEndian, uint32(0x12345678))
+	if err := binary.Write(buf, binary.LittleEndian, uint32(0x12345678)); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)

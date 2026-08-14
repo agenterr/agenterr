@@ -30,6 +30,7 @@ func EncodeDeltaInt64(vals []int64) []byte {
 	return out
 }
 
+// DecodeDeltaInt64 reverses EncodeDeltaInt64, decoding n values.
 func DecodeDeltaInt64(b []byte, n int) ([]int64, error) {
 	out := make([]int64, 0, n)
 	prev := int64(0)
@@ -48,6 +49,7 @@ func DecodeDeltaInt64(b []byte, n int) ([]int64, error) {
 	return out, nil
 }
 
+// EncodeUvarints encodes vals as uvarints, concatenated.
 func EncodeUvarints(vals []uint64) []byte {
 	var out []byte
 	for _, v := range vals {
@@ -56,6 +58,7 @@ func EncodeUvarints(vals []uint64) []byte {
 	return out
 }
 
+// DecodeUvarints reverses EncodeUvarints, decoding n values.
 func DecodeUvarints(b []byte, n int) ([]uint64, error) {
 	out := make([]uint64, 0, n)
 	for i := 0; i < n; i++ {
@@ -82,6 +85,7 @@ func EncodeStrings(vals []string) []byte {
 	return out
 }
 
+// DecodeStrings reverses EncodeStrings, decoding n values.
 func DecodeStrings(b []byte, n int) ([]string, error) {
 	out := make([]string, 0, n)
 	for i := 0; i < n; i++ {
@@ -116,6 +120,7 @@ func BuildDict(vals []string) ([]string, []uint64) {
 	return dict, refs
 }
 
+// ApplyDict expands refs using dict, validating all refs are in range.
 func ApplyDict(dict []string, refs []uint64) ([]string, error) {
 	out := make([]string, 0, len(refs))
 	for i, r := range refs {
