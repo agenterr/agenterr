@@ -91,6 +91,46 @@ func (w *WAL) Close() error {
 	return w.f.Close()
 }
 
+// replayRecords scans records from r and returns all intact ones. A torn tail
+// — a partial record from a crash mid-write — ends replay silently: those bytes
+// were never acked as durable. Genuine I/O errors are wrapped and returned.
+func replayRecords(r io.Reader) ([]segment.Row, error) {
+	br := bufio.NewReader(r)
+	var rows []segment.Row
+	for {
+		var hdr [8]byte
+		_, err := io.ReadFull(br, hdr[:])
+		if err != nil {
+			// Only EOF and ErrUnexpectedEOF indicate torn tails/clean ends.
+			// Genuine I/O errors must be surfaced.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return rows, nil // clean EOF or torn header — replay ends
+			}
+			return nil, fmt.Errorf("engine: wal replay read header: %w", err)
+		}
+		plen := binary.LittleEndian.Uint32(hdr[:4])
+		want := binary.LittleEndian.Uint32(hdr[4:])
+		payload := make([]byte, plen)
+		_, err = io.ReadFull(br, payload)
+		if err != nil {
+			// Only EOF and ErrUnexpectedEOF indicate torn payloads.
+			// Genuine I/O errors must be surfaced.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return rows, nil // torn payload
+			}
+			return nil, fmt.Errorf("engine: wal replay read payload: %w", err)
+		}
+		if crc32.ChecksumIEEE(payload) != want {
+			return rows, nil // corrupt record — stop at last good one
+		}
+		var r segment.Row
+		if err := json.Unmarshal(payload, &r); err != nil {
+			return rows, nil // undecodable — treat as torn
+		}
+		rows = append(rows, r)
+	}
+}
+
 // ReplayWAL returns every intact record in the WAL at path. A torn tail
 // — a partial record from a crash mid-write — ends replay silently:
 // those bytes were never acked as durable. A missing file is an empty
@@ -105,26 +145,5 @@ func ReplayWAL(path string) ([]segment.Row, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	br := bufio.NewReader(f)
-	var rows []segment.Row
-	for {
-		var hdr [8]byte
-		if _, err := io.ReadFull(br, hdr[:]); err != nil {
-			return rows, nil // clean EOF or torn header — replay ends
-		}
-		plen := binary.LittleEndian.Uint32(hdr[:4])
-		want := binary.LittleEndian.Uint32(hdr[4:])
-		payload := make([]byte, plen)
-		if _, err := io.ReadFull(br, payload); err != nil {
-			return rows, nil // torn payload
-		}
-		if crc32.ChecksumIEEE(payload) != want {
-			return rows, nil // corrupt record — stop at last good one
-		}
-		var r segment.Row
-		if err := json.Unmarshal(payload, &r); err != nil {
-			return rows, nil // undecodable — treat as torn
-		}
-		rows = append(rows, r)
-	}
+	return replayRecords(f)
 }
