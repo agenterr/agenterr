@@ -1,0 +1,105 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+
+	"github.com/agenterr/agenterr/internal/segment"
+)
+
+func walRows(n int) []segment.Row {
+	rows := make([]segment.Row, n)
+	for i := range rows {
+		rows[i] = segment.Row{
+			LogID: int64(i + 1), TsMicros: 1755000000000000 + int64(i),
+			Severity: 9, TemplateID: 3, Vars: []string{"a", "b"},
+			Service: "api", Attrs: "{}",
+		}
+	}
+	return rows
+}
+
+func TestWALAppendReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wal")
+	w, err := OpenWAL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := walRows(10)
+	if err := w.Append(rows[:6]); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(rows[6:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReplayWAL(path)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if !reflect.DeepEqual(got, rows) {
+		t.Errorf("replay mismatch: got %d rows", len(got))
+	}
+}
+
+func TestWALTornTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wal")
+	w, _ := OpenWAL(path)
+	rows := walRows(5)
+	if err := w.Append(rows); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Sync()
+	_ = w.Close()
+
+	data, _ := os.ReadFile(path)
+	// Chop mid-record: drop the last 3 bytes (inside record 5's payload).
+	if err := os.WriteFile(path, data[:len(data)-3], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReplayWAL(path)
+	if err != nil {
+		t.Fatalf("torn tail must not error: %v", err)
+	}
+	if !reflect.DeepEqual(got, rows[:4]) {
+		t.Errorf("want first 4 intact rows, got %d", len(got))
+	}
+
+	// Corrupt CRC mid-file: also ends replay at the last good record.
+	data2 := append([]byte(nil), data...)
+	data2[10] ^= 0xff // inside record 1
+	if err := os.WriteFile(path, data2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got2, err := ReplayWAL(path)
+	if err != nil {
+		t.Fatalf("corrupt record must not error: %v", err)
+	}
+	if len(got2) != 0 {
+		t.Errorf("corrupt first record: want 0 rows, got %d", len(got2))
+	}
+}
+
+func TestWALMissingFileAndReset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wal")
+	if got, err := ReplayWAL(path); err != nil || got != nil {
+		t.Errorf("missing wal: got %v, %v", got, err)
+	}
+	w, _ := OpenWAL(path)
+	_ = w.Append(walRows(3))
+	_ = w.Sync()
+	if err := w.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	if got, _ := ReplayWAL(path); len(got) != 0 {
+		t.Errorf("after reset: want empty, got %d rows", len(got))
+	}
+}
