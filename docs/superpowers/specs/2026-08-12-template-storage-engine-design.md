@@ -266,3 +266,17 @@ raw data):
 - Red-ANSI severity heuristic ships off by default.
 - Rollups outlive segment retention.
 - Fingerprinting and templates stay separate dimensions in v0.2.0.
+- **Engine state is per-project** (decided at Plan A final review,
+  2026-08-14): one `{WAL, memtable}` pair per project (WAL at
+  `data/wal/<project>.wal`), because `segment.Row` carries no ProjectID —
+  segments are per-project files and replay must be routable. Plan B's
+  startup replay iterates WAL files by directory listing (never the
+  manifest) so an orphaned WAL is never skipped. Flush sequencing:
+  `segment.Write` → manifest insert → `WAL.Reset` → `Memtable.Reset`;
+  a crash between manifest commit and WAL.Reset means replay yields rows
+  already in a segment, so the flush loop dedupes on LogID against the
+  manifest's MaxLogID.
+- Plan A format simplifications vs §3's table (severity as raw bytes,
+  template_id as plain uvarints, footer counts per-severity only rather
+  than per-(severity, service)): accepted for v1 unless the §7 benchmark
+  gates fail; changing footer shape later requires a version bump.
