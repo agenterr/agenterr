@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -101,5 +102,40 @@ func TestWALMissingFileAndReset(t *testing.T) {
 	_ = w.Close()
 	if got, _ := ReplayWAL(path); len(got) != 0 {
 		t.Errorf("after reset: want empty, got %d rows", len(got))
+	}
+}
+
+type failingReader struct {
+	exhausted bool
+	failErr   error
+}
+
+func (fr *failingReader) Read(p []byte) (int, error) {
+	if fr.exhausted {
+		return 0, fr.failErr
+	}
+	// First read returns minimal data to represent an incomplete header
+	// that will trigger an I/O error when trying to read more.
+	fr.exhausted = true
+	// Return 4 bytes (half a header), so ReadFull will need to call Read again.
+	if len(p) >= 4 {
+		return 4, nil
+	}
+	return len(p), nil
+}
+
+func TestReplayRecordsIOError(t *testing.T) {
+	// Test that genuine I/O errors (not EOF/ErrUnexpectedEOF) are surfaced.
+	// We use a reader that returns partial data and then fails.
+	testErr := errors.New("simulated disk read error")
+	failReader := &failingReader{failErr: testErr}
+
+	// Should encounter an I/O error when trying to read the header.
+	rows, err := replayRecords(failReader)
+	if err == nil {
+		t.Fatalf("expected I/O error but got none; rows=%d", len(rows))
+	}
+	if !errors.Is(err, testErr) {
+		t.Errorf("expected error matching %v but got %v", testErr, err)
 	}
 }
