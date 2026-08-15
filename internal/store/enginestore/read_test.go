@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/agenterr/agenterr/internal/core"
+	"github.com/agenterr/agenterr/internal/segment"
 	"github.com/agenterr/agenterr/internal/store"
+	sqlitestore "github.com/agenterr/agenterr/internal/store/sqlite"
 )
 
 func seed(t *testing.T, s *Store, pid int64) time.Time {
@@ -530,20 +532,49 @@ func TestSearchLogsAllProjectsMergesEveryProject(t *testing.T) {
 	checkBoth("after flush")
 }
 
-// TestReadsCreateNoEngineState guards readProj's non-creating contract:
-// pure reads against a project id that was never written must not mint a
-// WAL file (or any other engine-state side effect) for it.
-// TestRetryReadSegmentRowsSkipsWhenReplaced covers I2's normal case: a
-// caller snapshotted a segment's manifest row before a concurrent
-// compaction/prune dropped it (row and file together, via dropSegment).
-// Retrying against a fresh manifest finds the row gone too, so this is a
-// legitimate replacement, not corruption — ok=false, err=nil, and the
-// caller (collectRows/logByID) simply skips the segment.
-func TestRetryReadSegmentRowsSkipsWhenReplaced(t *testing.T) {
+// segReplacement writes a new segment file (via segment.Write) covering
+// rows and inserts its manifest row, returning the inserted SegmentMeta.
+// Used by the restart tests below to simulate the "replacement" segment a
+// real compaction/prune would have produced — the point being that its
+// rows must become visible via the RESTART path, not merely absent.
+func segReplacement(t *testing.T, s *Store, projectID int64, relSuffix string, rows []segment.Row) sqlitestore.SegmentMeta {
+	t.Helper()
+	rel := filepath.Join("segments", strconv.FormatInt(projectID, 10), relSuffix)
+	foot, err := segment.Write(s.segPath(rel), rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := sqlitestore.SegmentMeta{
+		ProjectID: projectID, Path: rel,
+		MinTs: foot.MinTs, MaxTs: foot.MaxTs,
+		MinLogID: foot.MinLogID, MaxLogID: foot.MaxLogID,
+		Count: int64(foot.Count), Events: foot.Events, Services: foot.Services,
+	}
+	id, err := s.InsertSegment(ctx, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.ID = id
+	return meta
+}
+
+// TestCollectRowsRestartsOnReplacedSegment is the regression case for the
+// coordinator-flagged skip-semantics bug: a segment a collectRows attempt
+// snapshotted gets legitimately replaced (dropSegment for the old one,
+// plus a new manifest row + file standing in for what a real compaction
+// would have produced) between the snapshot and the file open. The
+// replacement is NOT part of the snapshot currently being iterated, so
+// collectRows must abandon that attempt and re-snapshot from scratch
+// (restart) rather than silently omitting the replacement's rows from the
+// result.
+func TestCollectRowsRestartsOnReplacedSegment(t *testing.T) {
 	s := openStore(t, t.TempDir(), Options{})
 	p, _ := s.CreateProject(ctx, "p", 30)
 	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "row one", "api", at)}); err != nil {
+	if _, err := s.WriteBatch(ctx, []store.Entry{
+		logEntry(p.ID, "row one", "api", at),
+		logEntry(p.ID, "row two", "api", at.Add(time.Second)),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.FlushAll(); err != nil {
@@ -553,40 +584,40 @@ func TestRetryReadSegmentRowsSkipsWhenReplaced(t *testing.T) {
 	if err != nil || len(segs) != 1 {
 		t.Fatalf("precondition: err=%v segs=%+v", err, segs)
 	}
-	stale := segs[0] // as an earlier caller would have snapshotted it
+	stale := segs[0] // as collectRowsOnce's manifest snapshot would have captured it
 
-	// Simulate the race: manifest row AND file both go away (dropSegment,
-	// same call prune/compact use) after `stale` was captured.
+	staleRows := func() []segment.Row {
+		_, rows, err := segment.Read(s.segPath(stale.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}()
+
+	// Simulate the race: the old segment (row + file) is dropped and a
+	// replacement is installed covering the SAME rows — standing in for
+	// what a real compaction/prune-rewrite would have produced.
 	if err := s.dropSegment(ctx, stale); err != nil {
 		t.Fatal(err)
 	}
+	segReplacement(t, s, p.ID, "replacement.seg", staleRows)
 
-	sinceM, untilM := boundsMicros(time.Time{}, time.Time{})
-	rows, ok, err := s.retryReadSegmentRows(ctx, p.ID, stale, sinceM, untilM, "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if ok {
-		t.Fatalf("expected ok=false (segment legitimately gone), got rows=%+v", rows)
-	}
-
-	// The read path as a whole must still succeed and return no rows
-	// (nothing else was written) rather than erroring.
 	got, err := s.collectRows(ctx, p.ID, time.Time{}, time.Time{}, "")
 	if err != nil {
-		t.Fatalf("collectRows after drop: %v", err)
+		t.Fatalf("collectRows: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("collectRows after drop: got %d rows, want 0", len(got))
+	if len(got) != 2 {
+		t.Fatalf("collectRows after mid-pass replacement: got %d rows, want 2 (replacement's rows must not be silently dropped)", len(got))
 	}
 }
 
-// TestRetryReadSegmentRowsErrorsOnRealCorruption covers I2's corruption
-// case: the file is gone but the manifest row is still there — a
-// combination neither compaction nor prune can produce (both remove the
-// manifest row before the file), so it must propagate as an error naming
-// the path rather than being silently skipped.
-func TestRetryReadSegmentRowsErrorsOnRealCorruption(t *testing.T) {
+// TestCollectRowsRestartHelperErrorsOnRealCorruption exercises
+// readSegmentRowsWithRestart directly for I2's corruption case: the file
+// is gone but the manifest row is still there — a combination neither
+// compaction nor prune can produce (both remove the manifest row before
+// the file) — so it must propagate as an error naming the path rather
+// than restarting or being silently skipped.
+func TestCollectRowsRestartHelperErrorsOnRealCorruption(t *testing.T) {
 	s := openStore(t, t.TempDir(), Options{})
 	p, _ := s.CreateProject(ctx, "p", 30)
 	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -606,15 +637,116 @@ func TestRetryReadSegmentRowsErrorsOnRealCorruption(t *testing.T) {
 	}
 
 	sinceM, untilM := boundsMicros(time.Time{}, time.Time{})
-	_, ok, err := s.retryReadSegmentRows(ctx, p.ID, m, sinceM, untilM, "")
-	if ok {
-		t.Fatal("expected ok=false on corruption")
+	_, restart, err := s.readSegmentRowsWithRestart(ctx, p.ID, m, sinceM, untilM, "")
+	if restart {
+		t.Fatal("expected restart=false on corruption")
 	}
 	if err == nil {
 		t.Fatal("expected an error")
 	}
 	if !strings.Contains(err.Error(), m.Path) {
 		t.Fatalf("error does not mention the missing path %q: %v", m.Path, err)
+	}
+
+	// The read path as a whole must surface the corruption too, not
+	// exhaust restarts silently.
+	if _, err := s.collectRows(ctx, p.ID, time.Time{}, time.Time{}, ""); err == nil {
+		t.Fatal("collectRows: expected corruption error, got nil")
+	} else if !strings.Contains(err.Error(), m.Path) {
+		t.Fatalf("collectRows error does not mention path: %v", err)
+	}
+}
+
+// TestLogByIDRestartsOnReplacedSegment is logByID's equivalent of
+// TestCollectRowsRestartsOnReplacedSegment: the target log's segment is
+// replaced mid-lookup (dropSegment + a stand-in replacement covering the
+// same rows). logByID must find the log in the replacement via a restart,
+// not report it missing.
+func TestLogByIDRestartsOnReplacedSegment(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "target row", "api", at)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID})
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("precondition: err=%v logs=%+v", err, logs)
+	}
+	targetID := logs[0].ID
+
+	segs, err := s.Segments(ctx, p.ID)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("precondition: err=%v segs=%+v", err, segs)
+	}
+	stale := segs[0]
+	staleRows := func() []segment.Row {
+		_, rows, err := segment.Read(s.segPath(stale.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}()
+
+	if err := s.dropSegment(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	segReplacement(t, s, p.ID, "replacement.seg", staleRows)
+
+	row, found, err := s.logByID(ctx, p.ID, targetID)
+	if err != nil {
+		t.Fatalf("logByID: %v", err)
+	}
+	if !found {
+		t.Fatal("logByID: target log reported not found after mid-lookup replacement")
+	}
+	if row.LogID != targetID {
+		t.Fatalf("logByID: got log %d, want %d", row.LogID, targetID)
+	}
+}
+
+// TestReadSegmentRowsWithRestartSignalsRestartOnDroppedSegment is a
+// narrower unit check on the primitive collectRows' bounded retry loop
+// (maxSegmentSetRestarts in collectRows/logByID) is built on: given a
+// manifest snapshot of a segment that has since been dropped outright (no
+// replacement — e.g. prune, not compaction), the helper must report
+// restart=true, err=nil every time it is asked about that same stale
+// snapshot, never silently returning zero rows as if that were a valid
+// empty result.
+func TestReadSegmentRowsWithRestartSignalsRestartOnDroppedSegment(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "row one", "api", at)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := s.Segments(ctx, p.ID)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("precondition: err=%v segs=%+v", err, segs)
+	}
+	stale := segs[0]
+	if err := s.dropSegment(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	sinceM, untilM := boundsMicros(time.Time{}, time.Time{})
+	// Asked more than once against the same stale snapshot (as
+	// collectRows's bounded loop effectively would if the manifest kept
+	// racing it), the signal must stay restart=true/err=nil — never flip
+	// to a fabricated empty success.
+	for i := 0; i < maxSegmentSetRestarts; i++ {
+		_, restart, err := s.readSegmentRowsWithRestart(ctx, p.ID, stale, sinceM, untilM, "")
+		if err != nil {
+			t.Fatalf("attempt %d: unexpected error: %v", i, err)
+		}
+		if !restart {
+			t.Fatalf("attempt %d: expected restart=true (segment gone from fresh manifest, no replacement)", i)
+		}
 	}
 }
 

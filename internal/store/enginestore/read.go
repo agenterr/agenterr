@@ -35,18 +35,56 @@ func (s *Store) readProj(projectID int64) *projState {
 	return s.projects[projectID]
 }
 
+// maxSegmentSetRestarts bounds how many times collectRows/logByID will
+// re-snapshot the manifest and start over after finding a segment they
+// were mid-pass on has been legitimately replaced (compacted or pruned
+// away). Exceeding it means the segment set is being rewritten faster
+// than a single query can complete — treated as a loud error, never a
+// silent partial result.
+const maxSegmentSetRestarts = 3
+
 // collectRows returns all rows for a project across the memtable and
 // every manifest segment overlapping [since, until] (zero times = no
 // bound), optionally filtered by service via segment footers.
 //
-// The manifest query and the memtable snapshot are taken together under
-// ps.mu so a concurrent flushProject (which holds ps.mu across
-// InsertSegment → wal.Reset → mem.Reset) cannot be observed mid-flight:
-// callers either see the pre-flush state (new segment absent, memtable
-// still holding its rows) or the post-flush state (new segment present,
-// memtable already reset) — never a mix that duplicates or drops rows.
+// Each attempt (collectRowsOnce) takes the manifest query and the
+// memtable snapshot together under ps.mu so a concurrent flushProject
+// (which holds ps.mu across InsertSegment → wal.Reset → mem.Reset) cannot
+// be observed mid-flight: callers either see the pre-flush state (new
+// segment absent, memtable still holding its rows) or the post-flush
+// state (new segment present, memtable already reset) — never a mix that
+// duplicates or drops rows.
+//
+// A single attempt can still find, after that snapshot, that one of its
+// member segments has been compacted or pruned away entirely (both
+// remove the manifest row before the file) between the snapshot and this
+// attempt's file open. The replacement segment (a merged segment covering
+// the same rows, or nothing if pruned) is NOT in the snapshot currently
+// being iterated — returning the partial result built so far would
+// silently under-report rows that legitimately still exist. Instead,
+// collectRowsOnce reports restart=true and collectRows abandons the
+// attempt and re-snapshots from scratch (bounded by
+// maxSegmentSetRestarts), so the replacement segment is read normally on
+// the next attempt.
 func (s *Store) collectRows(ctx context.Context, projectID int64, since, until time.Time, service string) ([]segment.Row, error) {
 	sinceM, untilM := boundsMicros(since, until)
+	for attempt := 1; attempt <= maxSegmentSetRestarts; attempt++ {
+		rows, restart, err := s.collectRowsOnce(ctx, projectID, sinceM, untilM, service)
+		if err != nil {
+			return nil, err
+		}
+		if !restart {
+			return rows, nil
+		}
+	}
+	return nil, fmt.Errorf("enginestore: segment set changed repeatedly during read (project %d)", projectID)
+}
+
+// collectRowsOnce is one attempt of collectRows: a fresh manifest+memtable
+// snapshot, followed by a single pass over every member segment. See
+// collectRows for what restart=true means and why a partial result is
+// never returned in that case.
+func (s *Store) collectRowsOnce(ctx context.Context, projectID int64, sinceM, untilM int64, service string) ([]segment.Row, bool, error) {
 	ps := s.readProj(projectID)
 
 	var segs []sqlitestore.SegmentMeta
@@ -59,14 +97,14 @@ func (s *Store) collectRows(ctx context.Context, projectID int64, since, until t
 		// there is nothing racing it.
 		segs, err = s.Segments(ctx, projectID)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	} else {
 		ps.mu.Lock()
 		segs, err = s.Segments(ctx, projectID)
 		if err != nil {
 			ps.mu.Unlock()
-			return nil, err
+			return nil, false, err
 		}
 		memRows = ps.mem.Snapshot()
 		ps.mu.Unlock()
@@ -74,25 +112,17 @@ func (s *Store) collectRows(ctx context.Context, projectID int64, since, until t
 
 	var out []segment.Row
 	for _, m := range segs {
-		rows, err := s.readSegmentRows(m, sinceM, untilM, service)
+		rows, restart, err := s.readSegmentRowsWithRestart(ctx, projectID, m, sinceM, untilM, service)
 		if err != nil {
-			if !isSegmentNotExist(err) {
-				return nil, err
-			}
-			rows, ok, rerr := s.retryReadSegmentRows(ctx, projectID, m, sinceM, untilM, service)
-			if rerr != nil {
-				return nil, rerr
-			}
-			if !ok {
-				continue // replaced by a compaction/prune that landed between our manifest snapshot and this read
-			}
-			out = append(out, rows...)
-			continue
+			return nil, false, err
+		}
+		if restart {
+			return nil, true, nil
 		}
 		out = append(out, rows...)
 	}
 	out = append(out, filterRowsByTime(memRows, sinceM, untilM)...)
-	return out, nil
+	return out, false, nil
 }
 
 // isSegmentNotExist reports whether err (from segment.Open/Read, or the
@@ -134,46 +164,26 @@ func (s *Store) freshSegmentByID(ctx context.Context, projectID, segID int64) (s
 	return sqlitestore.SegmentMeta{}, false, nil
 }
 
-// retryReadSegmentRows is collectRows' ENOENT recovery path: m's file
-// disappeared (compaction or prune removed it) between the manifest
+// readSegmentRowsWithRestart is collectRowsOnce's ENOENT handler: m's
+// file disappeared (compaction or prune removed it) between the manifest
 // snapshot that produced m and this read. It re-fetches the manifest via
-// freshSegmentByID and retries the read exactly once.
+// freshSegmentByID to distinguish the two ways that can happen:
 //
 //   - Row gone from the fresh manifest too: the segment was legitimately
-//     replaced (compaction folded it into a merged segment covering the
-//     same rows, or prune dropped it) — this is not an error, the caller
-//     should just skip it. Returns ok=false, err=nil.
+//     replaced — compaction folded it into a merged segment covering the
+//     same rows (which is NOT among the segments this attempt is
+//     iterating), or prune dropped it outright. Either way, this attempt
+//     cannot see the true current state and must not return a partial
+//     result: restart=true, err=nil, telling the caller to abandon this
+//     pass and re-snapshot from scratch.
 //   - Row still present in the fresh manifest but the file is still
 //     missing: that combination is not explainable by compaction or
 //     prune (both remove the manifest row before the file), so it is real
 //     corruption and must propagate as an error naming the path.
-func (s *Store) retryReadSegmentRows(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta, sinceM, untilM int64, service string) ([]segment.Row, bool, error) {
-	fresh, found, err := s.freshSegmentByID(ctx, projectID, m.ID)
-	if err != nil {
-		return nil, false, err
-	}
-	if !found {
-		return nil, false, nil
-	}
-	rows, err := s.readSegmentRows(fresh, sinceM, untilM, service)
-	if err != nil {
-		if isSegmentNotExist(err) {
-			return nil, false, fmt.Errorf("enginestore: segment %s missing but manifest row %d still present: %w", fresh.Path, fresh.ID, err)
-		}
-		return nil, false, err
-	}
-	return rows, true, nil
-}
-
-// readSegmentFileWithRetry is logByID's counterpart to
-// retryReadSegmentRows: it fully decodes segment m (no time/service
-// filtering — logByID scans every row for a matching LogID), applying the
-// same ENOENT-retry-once discipline. See retryReadSegmentRows for what
-// ok=false vs an error each mean.
-func (s *Store) readSegmentFileWithRetry(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta) ([]segment.Row, bool, error) {
-	_, rows, err := segment.Read(s.segPath(m.Path))
+func (s *Store) readSegmentRowsWithRestart(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta, sinceM, untilM int64, service string) (rows []segment.Row, restart bool, err error) {
+	rows, err = s.readSegmentRows(m, sinceM, untilM, service)
 	if err == nil {
-		return rows, true, nil
+		return rows, false, nil
 	}
 	if !isSegmentNotExist(err) {
 		return nil, false, err
@@ -183,7 +193,37 @@ func (s *Store) readSegmentFileWithRetry(ctx context.Context, projectID int64, m
 		return nil, false, ferr
 	}
 	if !found {
-		return nil, false, nil
+		return nil, true, nil
+	}
+	rows, err = s.readSegmentRows(fresh, sinceM, untilM, service)
+	if err != nil {
+		if isSegmentNotExist(err) {
+			return nil, false, fmt.Errorf("enginestore: segment %s missing but manifest row %d still present: %w", fresh.Path, fresh.ID, err)
+		}
+		return nil, false, err
+	}
+	return rows, false, nil
+}
+
+// readSegmentFileWithRestart is logByIDOnce's counterpart to
+// readSegmentRowsWithRestart: it fully decodes segment m (no time/service
+// filtering — logByID scans every row for a matching LogID), applying the
+// same restart-on-legitimate-replacement, error-on-corruption discipline.
+// See readSegmentRowsWithRestart for what restart=true vs an error mean.
+func (s *Store) readSegmentFileWithRestart(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta) (rows []segment.Row, restart bool, err error) {
+	_, rows, err = segment.Read(s.segPath(m.Path))
+	if err == nil {
+		return rows, false, nil
+	}
+	if !isSegmentNotExist(err) {
+		return nil, false, err
+	}
+	fresh, found, ferr := s.freshSegmentByID(ctx, projectID, m.ID)
+	if ferr != nil {
+		return nil, false, ferr
+	}
+	if !found {
+		return nil, true, nil
 	}
 	_, rows, err = segment.Read(s.segPath(fresh.Path))
 	if err != nil {
@@ -192,7 +232,7 @@ func (s *Store) readSegmentFileWithRetry(ctx context.Context, projectID int64, m
 		}
 		return nil, false, err
 	}
-	return rows, true, nil
+	return rows, false, nil
 }
 
 // boundsMicros converts a [since, until] time range (a zero Time meaning
@@ -399,21 +439,40 @@ func (s *Store) SearchLogs(ctx context.Context, f store.LogFilter) ([]core.Log, 
 }
 
 // logByID locates one row by log id within a project (memtable first,
-// then manifest segments whose id range covers it). The memtable
-// snapshot and the manifest query are taken together under ps.mu — see
-// collectRows for why that is required to avoid racing flushProject.
+// then manifest segments whose id range covers it). Each attempt
+// (logByIDOnce) takes the memtable snapshot and the manifest query
+// together under ps.mu — see collectRows for why that is required to
+// avoid racing flushProject — and, like collectRows, restarts from a
+// fresh snapshot (bounded by maxSegmentSetRestarts) rather than reporting
+// "not found" if a member segment it needed turns out to have been
+// legitimately compacted or pruned away mid-lookup: the id could live in
+// the replacement segment, which this attempt's snapshot does not contain.
 func (s *Store) logByID(ctx context.Context, projectID, logID int64) (segment.Row, bool, error) {
+	for attempt := 1; attempt <= maxSegmentSetRestarts; attempt++ {
+		row, found, restart, err := s.logByIDOnce(ctx, projectID, logID)
+		if err != nil {
+			return segment.Row{}, false, err
+		}
+		if !restart {
+			return row, found, nil
+		}
+	}
+	return segment.Row{}, false, fmt.Errorf("enginestore: segment set changed repeatedly during read (project %d)", projectID)
+}
+
+// logByIDOnce is one attempt of logByID. See logByID for what restart
+// means and why "not found" is never returned in that case.
+func (s *Store) logByIDOnce(ctx context.Context, projectID, logID int64) (row segment.Row, found, restart bool, err error) {
 	ps := s.readProj(projectID)
 
 	var memRows []segment.Row
 	var segs []sqlitestore.SegmentMeta
-	var err error
 	if ps == nil {
 		// No projState: no flush can be running for this project, so the
 		// manifest query needs no ps.mu coherence lock.
 		segs, err = s.Segments(ctx, projectID)
 		if err != nil {
-			return segment.Row{}, false, err
+			return segment.Row{}, false, false, err
 		}
 	} else {
 		ps.mu.Lock()
@@ -421,32 +480,32 @@ func (s *Store) logByID(ctx context.Context, projectID, logID int64) (segment.Ro
 		segs, err = s.Segments(ctx, projectID)
 		ps.mu.Unlock()
 		if err != nil {
-			return segment.Row{}, false, err
+			return segment.Row{}, false, false, err
 		}
 	}
 	for _, r := range memRows {
 		if r.LogID == logID {
-			return r, true, nil
+			return r, true, false, nil
 		}
 	}
 	for _, m := range segs {
 		if logID < m.MinLogID || logID > m.MaxLogID {
 			continue
 		}
-		rows, ok, err := s.readSegmentFileWithRetry(ctx, projectID, m)
+		rows, restart, err := s.readSegmentFileWithRestart(ctx, projectID, m)
 		if err != nil {
-			return segment.Row{}, false, err
+			return segment.Row{}, false, false, err
 		}
-		if !ok {
-			continue // replaced by a compaction/prune landed in the race window
+		if restart {
+			return segment.Row{}, false, true, nil
 		}
 		for _, r := range rows {
 			if r.LogID == logID {
-				return r, true, nil
+				return r, true, false, nil
 			}
 		}
 	}
-	return segment.Row{}, false, nil
+	return segment.Row{}, false, false, nil
 }
 
 // LogContext returns up to n logs at-or-before the target (inclusive)
