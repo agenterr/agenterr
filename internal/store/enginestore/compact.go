@@ -151,11 +151,17 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 // re-compacting it would recompute the very same minLogID (the earlier
 // merge's own MinLogID, since it is still the smallest) and collide with
 // — i.e. get renamed over — the live, manifest-referenced output of the
-// prior generation, outside ps.mu. Manifest ids are monotonic and every
-// re-compaction includes at least one member (the earlier merged
-// segment, or the new arrival) with a higher id than any previous
-// generation used, so appending the max member id makes the name unique
-// per generation and never equal to a current member's path.
+// prior generation, outside ps.mu. segment_manifest.id is an
+// AUTOINCREMENT primary key (migration 0010): SQLite tracks the
+// high-water mark in sqlite_sequence and never reissues an id, even one
+// freed by ReplaceSegments deleting the current max row — a plain
+// INTEGER PRIMARY KEY rowid alias would not have this guarantee, since
+// SQLite would then assign max(existing)+1 and could reuse a deleted
+// max id. With AUTOINCREMENT, every re-compaction includes at least one
+// member (the earlier merged segment, or the new arrival) with a higher
+// id than any previous generation used, so appending the max member id
+// makes the name unique per generation and never equal to a current
+// member's path.
 func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlitestore.SegmentMeta) (sqlitestore.SegmentMeta, error) {
 	var rows []segment.Row
 	var rawRows int64
