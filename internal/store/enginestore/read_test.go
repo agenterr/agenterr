@@ -219,6 +219,114 @@ func TestPruneStraddlingSegment(t *testing.T) {
 	}
 }
 
+// TestIssuesEnvironmentFilterAllProjects guards ProjectID == 0 ("all
+// projects", per store.IssueFilter's documented convention) against the
+// Environment filter silently scoping to a single project: before the
+// fix, IssueIDsInEnvironment always constrained project_id, so an
+// all-projects environment query returned nothing.
+func TestIssuesEnvironmentFilterAllProjects(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p1, _ := s.CreateProject(ctx, "p1", 30)
+	p2, _ := s.CreateProject(ctx, "p2", 30)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	mk := func(pid int64, env, fp string) store.Entry {
+		return store.Entry{
+			Log: core.Log{ProjectID: pid, Time: at, Severity: core.SeverityError,
+				Body: "boom " + fp, Service: "api", Environment: env},
+			IsEvent: true, Fingerprint: fp, Title: "boom " + fp,
+		}
+	}
+	if _, err := s.WriteBatch(ctx, []store.Entry{
+		mk(p1.ID, "production", "fp1"),
+		mk(p2.ID, "production", "fp2"),
+		mk(p1.ID, "staging", "fp3"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	issues, err := s.Issues(ctx, store.IssueFilter{Environment: "production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("issues = %+v, want 2 (one per project)", issues)
+	}
+	seenProjects := map[int64]bool{}
+	for _, iss := range issues {
+		seenProjects[iss.ProjectID] = true
+	}
+	if !seenProjects[p1.ID] || !seenProjects[p2.ID] {
+		t.Fatalf("expected issues from both projects, got: %+v", issues)
+	}
+}
+
+// TestSearchLogsNoDuplicatesDuringConcurrentPrune guards the Prune
+// manifest-swap locking fix: a segment rewrite (insert "-pruned" replacement
+// then delete the original) concurrent with a read must never let
+// collectRows observe both the old segment and its replacement in the same
+// Segments() snapshot — that would double-count the rows that survived the
+// rewrite.
+func TestSearchLogsNoDuplicatesDuringConcurrentPrune(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cutoff := base.Add(24 * time.Hour)
+
+	stop := make(chan struct{})
+	var writeErr atomic.Value
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			entries := []store.Entry{
+				logEntry(p.ID, "old row", "svc", base.Add(time.Duration(i)*time.Microsecond)),     // before cutoff
+				logEntry(p.ID, "fresh row", "svc", cutoff.Add(time.Duration(i)*time.Microsecond)), // after cutoff: straddles with the row above once flushed together
+			}
+			if _, err := s.WriteBatch(ctx, entries); err != nil {
+				writeErr.Store(err)
+				return
+			}
+			if err := s.FlushAll(); err != nil {
+				writeErr.Store(err)
+				return
+			}
+			if _, err := s.Prune(ctx, p.ID, cutoff); err != nil {
+				writeErr.Store(err)
+				return
+			}
+			i++
+		}
+	}()
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID, Limit: 100000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := make(map[int64]bool, len(logs))
+		for _, l := range logs {
+			if seen[l.ID] {
+				t.Fatalf("duplicate log id %d in result set of %d logs", l.ID, len(logs))
+			}
+			seen[l.ID] = true
+		}
+	}
+	close(stop)
+	wg.Wait()
+	if v := writeErr.Load(); v != nil {
+		t.Fatalf("writer error: %v", v)
+	}
+}
+
 // TestSearchLogsNoDuplicatesDuringConcurrentFlush guards the
 // collectRows/logByID coherence fix: a flush concurrent with a read must
 // never produce a result set where the same LogID appears twice (seen
