@@ -28,6 +28,11 @@ import (
 type Options struct {
 	FlushRows  int           // segment flush threshold; default 64_000
 	FlushEvery time.Duration // background flush interval; default 5m
+
+	// CompactEvery is the interval between scheduled compaction passes
+	// (CompactAll). Zero selects the default (1h); negative disables the
+	// compaction loop entirely (tests call CompactAll directly instead).
+	CompactEvery time.Duration
 }
 
 // Store is the engine-backed store.Store. The embedded *sqlite.DB serves
@@ -73,6 +78,9 @@ func Open(dbPath string, opts Options) (*Store, error) {
 	if opts.FlushEvery <= 0 {
 		opts.FlushEvery = 5 * time.Minute
 	}
+	if opts.CompactEvery == 0 {
+		opts.CompactEvery = time.Hour
+	}
 	db, err := sqlite.Open(dbPath)
 	if err != nil {
 		return nil, err
@@ -92,6 +100,10 @@ func Open(dbPath string, opts Options) (*Store, error) {
 
 	s.wg.Add(1)
 	go s.flushLoop()
+	if opts.CompactEvery > 0 {
+		s.wg.Add(1)
+		go s.compactLoop()
+	}
 	return s, nil
 }
 
@@ -194,6 +206,26 @@ func (s *Store) flushLoop() {
 			// forever.
 			if err := s.FlushAll(); err != nil {
 				slog.Error("enginestore: periodic flush failed", "error", err)
+			}
+		}
+	}
+}
+
+// compactLoop periodically merges small flushed segments (CompactAll) on
+// the same stop/wg lifecycle as flushLoop. Only started when
+// Options.CompactEvery is positive (Open turns a negative value into "no
+// loop" rather than a ticker).
+func (s *Store) compactLoop() {
+	defer s.wg.Done()
+	t := time.NewTicker(s.opts.CompactEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+			if err := s.CompactAll(context.Background()); err != nil {
+				slog.Error("enginestore: periodic compaction failed", "error", err)
 			}
 		}
 	}
