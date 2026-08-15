@@ -349,7 +349,7 @@ func dbAndEngineBytes(dbPath string) (int64, error) {
 	total := fi.Size()
 
 	engineDir := filepath.Join(filepath.Dir(dbPath), "engine")
-	err = filepath.WalkDir(engineDir, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(engineDir, func(_ string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil

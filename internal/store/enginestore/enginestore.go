@@ -109,7 +109,7 @@ func Open(dbPath string, opts Options) (*Store, error) {
 // to a brand new log, after which the old issue_events row would
 // resolve to the WRONG body.
 func (s *Store) recover(ctx context.Context) error {
-	segs, err := s.DB.Segments(ctx, 0)
+	segs, err := s.Segments(ctx, 0)
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func (s *Store) recover(ctx context.Context) error {
 			s.nextLogID.Store(m.MaxLogID)
 		}
 	}
-	maxEventLogID, err := s.DB.MaxIssueEventLogID(ctx)
+	maxEventLogID, err := s.MaxIssueEventLogID(ctx)
 	if err != nil {
 		return err
 	}

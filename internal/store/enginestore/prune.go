@@ -38,7 +38,7 @@ func (s *Store) Prune(ctx context.Context, projectID int64, before time.Time) (i
 	cutoff := before.UTC().UnixMicro()
 
 	ps.mu.Lock()
-	segs, err := s.DB.Segments(ctx, projectID)
+	segs, err := s.Segments(ctx, projectID)
 	if err != nil {
 		ps.mu.Unlock()
 		return 0, err
