@@ -129,6 +129,11 @@ func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]st
 	return nil, nil
 }
 
+// Aggregate is unused in these tests.
+func (f *fakeStore) Aggregate(_ context.Context, _ store.AggregateFilter) ([]store.AggregateRow, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) CreateProject(_ context.Context, name string, retentionDays int) (core.Project, error) {
 	f.nextID++
 	p := core.Project{ID: f.nextID, Name: name, Slug: "slug-" + name, RetentionDays: retentionDays, CreatedAt: time.Now().UTC()}

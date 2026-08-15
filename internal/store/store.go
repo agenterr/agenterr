@@ -93,6 +93,13 @@ type Reader interface {
 	// ServiceCounts returns the top 20 services by log count for
 	// projectID since the given time, ordered descending by count.
 	ServiceCounts(ctx context.Context, projectID int64, since time.Time) ([]ServiceCount, error)
+	// Aggregate groups a project's log volume by service, severity,
+	// hour, or day (f.GroupBy), covering both flushed and unflushed
+	// data. f.ProjectID must be non-zero; there is no "all projects"
+	// mode. Ordering: service by Logs descending (ties by Key
+	// ascending); severity by numeric Key descending (most severe
+	// first); hour/day by Key ascending.
+	Aggregate(ctx context.Context, f AggregateFilter) ([]AggregateRow, error)
 }
 
 // ServiceCount is one service's log volume, used to build the noise
@@ -100,6 +107,24 @@ type Reader interface {
 type ServiceCount struct {
 	Service string
 	Logs    int64
+}
+
+// AggregateFilter narrows an Aggregate query. GroupBy must be one of
+// "service", "severity", "hour", or "day"; any other value errors.
+// ProjectID must be non-zero — Aggregate has no "all projects" mode.
+type AggregateFilter struct {
+	ProjectID    int64
+	Since, Until time.Time
+	GroupBy      string
+}
+
+// AggregateRow is one group-by bucket's log/event volume. Key's shape
+// depends on GroupBy: the service name, the severity as a decimal string,
+// or an hour ("2006-01-02T15") / day ("2006-01-02") in UTC.
+type AggregateRow struct {
+	Key    string
+	Logs   int64
+	Events int64
 }
 
 // Admin manages projects, issue status, and API keys.
