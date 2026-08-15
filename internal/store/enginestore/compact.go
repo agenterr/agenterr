@@ -16,9 +16,20 @@ import (
 // current UTC day, daily buckets for prior days — and any bucket with
 // two or more segments (excluding the still-filling current hour) is
 // merged into one. The manifest swap is crash-atomic (ReplaceSegments);
-// old files are removed only after commit. Reads stay coherent: the
-// swap and removals run under the project's ps.mu, mirroring flush and
-// prune. Reading the old (immutable) segments happens outside the lock.
+// old files are removed only after commit. The manifest swap and old-file
+// removal run under the project's ps.mu, mirroring flush and prune — that
+// guarantees no reader observes a manifest row with no backing file (the
+// row is gone before the file is removed) and no row is double-counted
+// or lost across the swap (the whole replace commits in one transaction).
+// It does NOT guarantee every reader's file open lands after the swap: a
+// reader can snapshot the manifest just before this runs and then try to
+// open a member segment just after its file is removed. That ENOENT is
+// expected, not corruption — collectRows/logByID handle it by re-fetching
+// the manifest and retrying once (see isSegmentNotExist/freshSegmentByID
+// in read.go): gone from the fresh manifest too means legitimately
+// replaced (skip it, the merged segment covers the same rows), still
+// present means real corruption (propagate). Reading the old (immutable)
+// segments happens outside the lock.
 //
 // CompactAll is serialized on s.compactMu: the compaction loop is a
 // single goroutine, but CompactAll is also exported for tests and any
@@ -26,6 +37,14 @@ import (
 // candidate buckets (and, worse, could pick colliding output paths).
 // Concurrent calls simply run back-to-back — fine at the hourly cadence
 // this is meant for.
+//
+// Between buckets, a non-blocking check of s.stop lets a pass in progress
+// on compactLoop's goroutine bail out early (returning nil, not an error —
+// stopping mid-pass is normal shutdown, not failure) instead of running to
+// completion across every project/bucket first: Close() waits on that
+// goroutine via s.wg, and a full pass over many projects could otherwise
+// delay shutdown well past Close's caller's patience. Any buckets skipped
+// this way are simply picked up by the next scheduled pass.
 func (s *Store) CompactAll(ctx context.Context) error {
 	s.compactMu.Lock()
 	defer s.compactMu.Unlock()
@@ -41,6 +60,11 @@ func (s *Store) CompactAll(ctx context.Context) error {
 	var firstErr error
 	for pid, pidSegs := range byProject {
 		for key, members := range bucketSegments(pidSegs, now) {
+			select {
+			case <-s.stop:
+				return nil
+			default:
+			}
 			if err := s.compactBucket(ctx, pid, key, members); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("enginestore: compact project %d bucket %s: %w", pid, key, err)
 			}
@@ -97,6 +121,12 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 		return err
 	}
 
+	// s.proj() (not readProj) is deliberate here: compaction is a write-side
+	// actor that must take ps.mu around the manifest swap below, including
+	// for a segment-only project (all memtable rows already flushed, no
+	// projState left) that a pure read path would never touch — the "reads
+	// never create engine state" rule (readProj's doc comment) applies to
+	// queries, not to this maintenance write.
 	ps, err := s.proj(projectID)
 	if err != nil {
 		_ = os.Remove(s.segPath(meta.Path))
@@ -144,6 +174,15 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 // file at segments/<pid>/c-<bucket>-<minLogID>-<maxMemberID>.seg,
 // returning the manifest row ready for ReplaceSegments.
 //
+// RawRows and SizeBytes are computed from ground truth here — RawRows by
+// counting TemplateID==0 over the concatenated rows actually in memory,
+// SizeBytes by os.Stat on the file just written — rather than summed from
+// member metadata. A member's own RawRows/SizeBytes can be zero even
+// though it holds raw rows (e.g. a straddling segment rewritten by an
+// older prune.go that omitted those columns); summing such zeros would
+// silently poison every merged segment downstream, so this function never
+// trusts member totals for either field.
+//
 // The name includes both the minimum member LogID and the maximum
 // member MANIFEST id (not LogID): bucket+minLogID alone is a pure
 // function of the bucket's original contents, so when a later,
@@ -164,7 +203,6 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 // member's path.
 func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlitestore.SegmentMeta) (sqlitestore.SegmentMeta, error) {
 	var rows []segment.Row
-	var rawRows int64
 	minLogID := members[0].MinLogID
 	maxMemberID := members[0].ID
 	for _, m := range members {
@@ -173,7 +211,6 @@ func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlite
 			return sqlitestore.SegmentMeta{}, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
 		}
 		rows = append(rows, rs...)
-		rawRows += m.RawRows
 		if m.MinLogID < minLogID {
 			minLogID = m.MinLogID
 		}
@@ -194,6 +231,12 @@ func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlite
 	fi, err := os.Stat(abs)
 	if err != nil {
 		return sqlitestore.SegmentMeta{}, fmt.Errorf("enginestore: stat merged segment: %w", err)
+	}
+	var rawRows int64
+	for _, r := range rows {
+		if r.TemplateID == 0 {
+			rawRows++
+		}
 	}
 	return sqlitestore.SegmentMeta{
 		ProjectID: projectID, Path: rel,

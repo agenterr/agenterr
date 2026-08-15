@@ -222,6 +222,90 @@ func TestPruneStraddlingSegment(t *testing.T) {
 	}
 }
 
+// TestPruneStraddlingSegmentRawRowsAndSizeBytesGroundTruth is I1's
+// regression case: rewriteSegment's manifest row must report the true
+// RawRows/SizeBytes of the rows it actually kept, not zero values — a
+// straddling segment whose survivors include a raw-fallback row (body
+// with a newline, per template.Extract) previously produced a rewritten
+// manifest row with RawRows=0/SizeBytes=0 regardless of what was kept.
+// Compacting that rewritten segment with another one must then still
+// report the true merged RawRows, since buildMergedSegment used to sum
+// member RawRows (poisoned by the zero) instead of recomputing it.
+func TestPruneStraddlingSegmentRawRowsAndSizeBytesGroundTruth(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{CompactEvery: -1})
+	p, _ := s.CreateProject(ctx, "p", 30)
+
+	day := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour).Add(6 * time.Hour)
+	cutoff := day.Add(30 * time.Minute)
+	dropped := day                          // before cutoff: pruned away
+	rawKept := day.Add(45 * time.Minute)    // after cutoff: multiline -> raw fallback, survives
+	normalKept := day.Add(50 * time.Minute) // after cutoff: templatable, survives
+
+	if _, err := s.WriteBatch(ctx, []store.Entry{
+		logEntry(p.ID, "dropped row", "api", dropped),
+		logEntry(p.ID, "raw kept\nsecond line", "api", rawKept),
+		logEntry(p.ID, "normal kept row", "api", normalKept),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil { // one segment straddling cutoff
+		t.Fatal(err)
+	}
+
+	n, err := s.Prune(ctx, p.ID, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned %d rows, want 1", n)
+	}
+
+	segs, err := s.Segments(ctx, p.ID)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("manifest after prune: err=%v segs=%+v", err, segs)
+	}
+	rewritten := segs[0]
+	if rewritten.Count != 2 {
+		t.Fatalf("rewritten count = %d, want 2", rewritten.Count)
+	}
+	if rewritten.RawRows != 1 {
+		t.Errorf("rewritten RawRows = %d, want 1 (ground truth from kept rows, not zeroed member metadata)", rewritten.RawRows)
+	}
+	if rewritten.SizeBytes <= 0 {
+		t.Errorf("rewritten SizeBytes = %d, want > 0 (os.Stat on the written file)", rewritten.SizeBytes)
+	}
+
+	// Compact the rewritten segment together with a second, freshly
+	// flushed segment in the same past-day bucket.
+	other := day.Add(2 * time.Hour)
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "other segment row", "api", other)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+	if segs, _ := s.Segments(ctx, p.ID); len(segs) != 2 {
+		t.Fatalf("precondition before compact: %+v", segs)
+	}
+
+	if err := s.CompactAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := s.Segments(ctx, p.ID)
+	if err != nil || len(merged) != 1 {
+		t.Fatalf("manifest after compact: err=%v segs=%+v", err, merged)
+	}
+	if merged[0].Count != 3 {
+		t.Fatalf("merged count = %d, want 3", merged[0].Count)
+	}
+	if merged[0].RawRows != 1 {
+		t.Errorf("merged RawRows = %d, want 1 (recomputed over the concatenated rows, not summed from members)", merged[0].RawRows)
+	}
+	if merged[0].SizeBytes <= 0 {
+		t.Errorf("merged SizeBytes = %d, want > 0", merged[0].SizeBytes)
+	}
+}
+
 // TestIssuesEnvironmentFilterAllProjects guards ProjectID == 0 ("all
 // projects", per store.IssueFilter's documented convention) against the
 // Environment filter silently scoping to a single project: before the
@@ -449,6 +533,91 @@ func TestSearchLogsAllProjectsMergesEveryProject(t *testing.T) {
 // TestReadsCreateNoEngineState guards readProj's non-creating contract:
 // pure reads against a project id that was never written must not mint a
 // WAL file (or any other engine-state side effect) for it.
+// TestRetryReadSegmentRowsSkipsWhenReplaced covers I2's normal case: a
+// caller snapshotted a segment's manifest row before a concurrent
+// compaction/prune dropped it (row and file together, via dropSegment).
+// Retrying against a fresh manifest finds the row gone too, so this is a
+// legitimate replacement, not corruption — ok=false, err=nil, and the
+// caller (collectRows/logByID) simply skips the segment.
+func TestRetryReadSegmentRowsSkipsWhenReplaced(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "row one", "api", at)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := s.Segments(ctx, p.ID)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("precondition: err=%v segs=%+v", err, segs)
+	}
+	stale := segs[0] // as an earlier caller would have snapshotted it
+
+	// Simulate the race: manifest row AND file both go away (dropSegment,
+	// same call prune/compact use) after `stale` was captured.
+	if err := s.dropSegment(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	sinceM, untilM := boundsMicros(time.Time{}, time.Time{})
+	rows, ok, err := s.retryReadSegmentRows(ctx, p.ID, stale, sinceM, untilM, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected ok=false (segment legitimately gone), got rows=%+v", rows)
+	}
+
+	// The read path as a whole must still succeed and return no rows
+	// (nothing else was written) rather than erroring.
+	got, err := s.collectRows(ctx, p.ID, time.Time{}, time.Time{}, "")
+	if err != nil {
+		t.Fatalf("collectRows after drop: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("collectRows after drop: got %d rows, want 0", len(got))
+	}
+}
+
+// TestRetryReadSegmentRowsErrorsOnRealCorruption covers I2's corruption
+// case: the file is gone but the manifest row is still there — a
+// combination neither compaction nor prune can produce (both remove the
+// manifest row before the file), so it must propagate as an error naming
+// the path rather than being silently skipped.
+func TestRetryReadSegmentRowsErrorsOnRealCorruption(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "row one", "api", at)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := s.Segments(ctx, p.ID)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("precondition: err=%v segs=%+v", err, segs)
+	}
+	m := segs[0]
+	if err := os.Remove(s.segPath(m.Path)); err != nil {
+		t.Fatal(err)
+	}
+
+	sinceM, untilM := boundsMicros(time.Time{}, time.Time{})
+	_, ok, err := s.retryReadSegmentRows(ctx, p.ID, m, sinceM, untilM, "")
+	if ok {
+		t.Fatal("expected ok=false on corruption")
+	}
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), m.Path) {
+		t.Fatalf("error does not mention the missing path %q: %v", m.Path, err)
+	}
+}
+
 func TestReadsCreateNoEngineState(t *testing.T) {
 	dir := t.TempDir()
 	s := openStore(t, dir, Options{})
