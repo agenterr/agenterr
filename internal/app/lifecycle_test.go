@@ -5,6 +5,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -15,6 +17,49 @@ import (
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/store/enginestore"
 )
+
+// TestDBAndEngineBytesIncludesEngineDir guards the MaxDBBytes guardrail
+// fix: log bodies live under <dir(DBPath)>/engine/segments, not in the
+// SQLite file, so the size check must include that directory or the
+// guardrail silently stops bounding most of what it exists to bound. It
+// must also tolerate an engine directory that doesn't exist yet (a
+// freshly bootstrapped store, or a test fixture that never wrote logs).
+func TestDBAndEngineBytesIncludesEngineDir(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "agenterr.db")
+	if err := os.WriteFile(dbPath, make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No engine directory yet: total is just the db file.
+	total, err := dbAndEngineBytes(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1000 {
+		t.Fatalf("total with no engine dir = %d, want 1000", total)
+	}
+
+	segDir := filepath.Join(dir, "engine", "segments", "1")
+	if err := os.MkdirAll(segDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(segDir, "000001.seg"), make([]byte, 2500), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	total, err = dbAndEngineBytes(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3500 {
+		t.Fatalf("total with engine dir = %d, want 3500 (1000 db + 2500 segment)", total)
+	}
+
+	if _, err := dbAndEngineBytes(filepath.Join(dir, "missing.db")); err == nil {
+		t.Fatal("missing db path: want error, got nil")
+	}
+}
 
 // TestStopWaitsForAlertDelivery pins register's OnStop ordering (see
 // lifecycle.go): pipe.Drain must run before the alerts worker's ctx is

@@ -14,6 +14,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/agenterr/agenterr/internal/segment"
 )
@@ -32,13 +33,41 @@ type WAL struct {
 	bw *bufio.Writer
 }
 
-// OpenWAL opens (creating if needed) the WAL at path for appending.
+// OpenWAL opens (creating if needed) the WAL at path for appending. When
+// this call creates the file (as opposed to reopening an existing one),
+// the new directory entry needs its own fsync to be crash-durable — a
+// rename or create is only guaranteed to survive a crash once the
+// directory listing itself has been fsync'd, separately from the file's
+// own data. Reopening an existing file is a no-op on the directory, so
+// that case skips the extra fsync.
 func OpenWAL(path string) (*WAL, error) {
+	_, statErr := os.Stat(path)
+	existed := statErr == nil
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("engine: open wal: %w", err)
 	}
+	if !existed {
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+	}
 	return &WAL{f: f, bw: bufio.NewWriter(f)}, nil
+}
+
+// syncDir opens dir, fsyncs it, and closes it — the standard way to make
+// a preceding directory-entry change (a rename or create) crash-durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("engine: open dir for sync: %w", err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("engine: sync dir: %w", err)
+	}
+	return nil
 }
 
 // Append writes one record per row to the WAL buffer.

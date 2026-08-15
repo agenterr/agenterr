@@ -134,6 +134,59 @@ func (db *DB) DeleteSegment(ctx context.Context, id int64) error {
 	return nil
 }
 
+// SwapSegment atomically replaces the manifest row oldID with m, in one
+// transaction: DELETE old, INSERT new, single commit. This exists
+// because Prune's segment rewrite (a straddling segment split into a
+// "-pruned" replacement) previously did this as two separate
+// InsertSegment/DeleteSegment commits; a crash between them left BOTH
+// manifest rows behind — a permanent double-read of the surviving rows
+// — and the retry on the next retention tick hit InsertSegment's
+// natural-key expectations for a segment that (from the manifest's
+// perspective) already existed, wedging retention on that project
+// indefinitely. Doing the delete and insert in one transaction makes the
+// swap crash-atomic: after a crash, the manifest holds either the old
+// row (untouched) or the new one, never both, and a retry always starts
+// from a state InsertSegment/DeleteSegment can make progress from again.
+//
+// Swapping a missing oldID (already gone, e.g. a retried swap after a
+// crash that landed post-commit but before the caller observed success)
+// is not an error: the DELETE simply affects zero rows and the INSERT
+// still proceeds, so the new segment ends up recorded either way. This
+// favors idempotent retries over surfacing a race that has no unsafe
+// outcome — the alternative (checking rows-affected and erroring) would
+// only turn a harmless retry into a hard failure.
+func (db *DB) SwapSegment(ctx context.Context, oldID int64, m SegmentMeta) (int64, error) {
+	svc, err := json.Marshal(m.Services)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: marshal services: %w", err)
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: swap segment begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM segment_manifest WHERE id = ?`, oldID); err != nil {
+		return 0, fmt.Errorf("sqlite: swap segment delete: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO segment_manifest (project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ProjectID, m.Path, m.MinTs, m.MaxTs, m.MinLogID, m.MaxLogID, m.Count, m.Events,
+		string(svc), time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: swap segment insert: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: swap segment id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("sqlite: swap segment commit: %w", err)
+	}
+	return id, nil
+}
+
 // RollupKey identifies one hourly rollup bucket. Hour is UTC,
 // formatted "2006-01-02T15".
 type RollupKey struct {
@@ -375,6 +428,23 @@ func (db *DB) OpenIssueCount(ctx context.Context, projectID int64) (int64, error
 		return 0, fmt.Errorf("sqlite: open issue count: %w", err)
 	}
 	return n, nil
+}
+
+// MaxIssueEventLogID returns the highest log_id referenced by any
+// retained issue_events row, or 0 if there are none. enginestore's
+// recover uses this to seed nextLogID alongside the manifest and WALs:
+// after a full prune, a project's manifest and WAL can both go empty
+// (every segment dropped, WAL reset) while issue_events still holds refs
+// to LogIDs that pruning intentionally does not touch (spec: event refs
+// outlive bodies). Without this, nextLogID would restart low enough to
+// reissue an already-referenced LogID to a brand new log, and the old
+// issue_events row would then resolve to the WRONG body.
+func (db *DB) MaxIssueEventLogID(ctx context.Context) (int64, error) {
+	var max int64
+	if err := db.sql.QueryRowContext(ctx, `SELECT COALESCE(MAX(log_id), 0) FROM issue_events`).Scan(&max); err != nil {
+		return 0, fmt.Errorf("sqlite: max issue event log id: %w", err)
+	}
+	return max, nil
 }
 
 // DeleteIssueEventsBefore removes event refs older than before for a

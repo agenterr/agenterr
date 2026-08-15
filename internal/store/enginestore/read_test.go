@@ -386,3 +386,59 @@ func TestSearchLogsNoDuplicatesDuringConcurrentFlush(t *testing.T) {
 		t.Fatalf("writer error: %v", v)
 	}
 }
+
+// TestSearchLogsAllProjectsMergesEveryProject guards the ProjectID == 0
+// ("all projects", the convention used by the web /search page, the
+// admin-key /api/v1/logs endpoint, and the MCP search_logs tool) read
+// path: before the fix, collectRows(0, ...) read every project's manifest
+// segments but reconstructed each row via Reconstruct(projectID=0, ...),
+// which always failed with "template missing" once any row had gone
+// through a flush (and never saw unflushed rows at all, since project 0
+// has no memtable of its own). This must work identically before AND
+// after FlushAll: pre-flush it exercises the memtable-only path, post-
+// flush it exercises the segment/Reconstruct path this bug specifically
+// broke.
+func TestSearchLogsAllProjectsMergesEveryProject(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p1, err := s.CreateProject(ctx, "p1", 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := s.CreateProject(ctx, "p2", 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := s.WriteBatch(ctx, []store.Entry{
+		logEntry(p1.ID, "connection refused by peer one", "api", at),
+		logEntry(p2.ID, "connection refused by peer two", "web", at.Add(time.Second)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	checkBoth := func(when string) {
+		t.Helper()
+		logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: 0, Query: "connection refused"})
+		if err != nil {
+			t.Fatalf("%s: SearchLogs err = %v", when, err)
+		}
+		if len(logs) != 2 {
+			t.Fatalf("%s: got %d logs, want 2: %+v", when, len(logs), logs)
+		}
+		seenProjects := map[int64]bool{}
+		for _, l := range logs {
+			seenProjects[l.ProjectID] = true
+		}
+		if !seenProjects[p1.ID] || !seenProjects[p2.ID] {
+			t.Fatalf("%s: expected logs from both projects, got: %+v", when, logs)
+		}
+	}
+
+	checkBoth("before flush")
+
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	checkBoth("after flush")
+}

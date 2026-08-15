@@ -102,6 +102,73 @@ func filterRowsByTime(rows []segment.Row, sinceM, untilM int64) []segment.Row {
 	return out
 }
 
+// pairedRow bundles a row with the project it belongs to. Needed only
+// when scanning across every project (ProjectID == 0 — "all projects",
+// used by the web /search page, the admin-key /api/v1/logs endpoint, and
+// the MCP search_logs tool): rowToLog/Reconstruct both key off the row's
+// true project, which a single filter value cannot supply once rows from
+// multiple projects are merged into one slice.
+type pairedRow struct {
+	ProjectID int64
+	Row       segment.Row
+}
+
+// collectRowsAllProjects merges collectRows across every project this
+// Store has ever opened a projState for. It deliberately does not call
+// proj() for a new id purely to satisfy a read — s.mu is only used to
+// enumerate the existing s.projects map, matching findLog's convention
+// elsewhere in this file. This is complete: every project with a
+// manifest segment has one because flushProject can only ever produce a
+// segment via proj(), and proj() opens (and never removes) that
+// project's WAL file, which recover() globs and replays for every
+// project on every Open — so any project with segments or WAL rows
+// already has a projState by the time this runs.
+//
+// Each project's (segments, memtable) pair is still read through
+// collectRows, so it keeps that function's ps.mu coherence guarantee
+// against a concurrent flushProject on that same project — this only
+// adds a loop across projects, not a new locking discipline.
+func (s *Store) collectRowsAllProjects(ctx context.Context, since, until time.Time, service string) ([]pairedRow, error) {
+	s.mu.Lock()
+	pids := make([]int64, 0, len(s.projects))
+	for pid := range s.projects {
+		pids = append(pids, pid)
+	}
+	s.mu.Unlock()
+
+	var out []pairedRow
+	for _, pid := range pids {
+		rows, err := s.collectRows(ctx, pid, since, until, service)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			out = append(out, pairedRow{ProjectID: pid, Row: r})
+		}
+	}
+	return out, nil
+}
+
+// collectPairedRows is collectRows tagged with each row's project: for a
+// single project (projectID != 0) it just wraps collectRows's result; for
+// projectID == 0 ("all projects") it delegates to collectRowsAllProjects.
+// SearchLogs is the only caller — factored out mainly to keep that
+// function's branching count down.
+func (s *Store) collectPairedRows(ctx context.Context, projectID int64, since, until time.Time, service string) ([]pairedRow, error) {
+	if projectID == 0 {
+		return s.collectRowsAllProjects(ctx, since, until, service)
+	}
+	single, err := s.collectRows(ctx, projectID, since, until, service)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pairedRow, len(single))
+	for i, r := range single {
+		out[i] = pairedRow{ProjectID: projectID, Row: r}
+	}
+	return out, nil
+}
+
 // rowLess reports whether a sorts strictly before b in the (TsMicros,
 // LogID) total order — LogIDs are unique and monotonic, so this breaks
 // exact-timestamp ties deterministically (unlike comparing TsMicros
@@ -154,18 +221,19 @@ func (s *Store) SearchLogs(ctx context.Context, f store.LogFilter) ([]core.Log, 
 	if limit == 0 {
 		limit = 50
 	}
-	rows, err := s.collectRows(ctx, f.ProjectID, f.Since, f.Until, f.Service)
+	rows, err := s.collectPairedRows(ctx, f.ProjectID, f.Since, f.Until, f.Service)
 	if err != nil {
 		return nil, err
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].TsMicros != rows[j].TsMicros {
-			return rows[i].TsMicros > rows[j].TsMicros
+		if rows[i].Row.TsMicros != rows[j].Row.TsMicros {
+			return rows[i].Row.TsMicros > rows[j].Row.TsMicros
 		}
-		return rows[i].LogID > rows[j].LogID
+		return rows[i].Row.LogID > rows[j].Row.LogID
 	})
 	out := make([]core.Log, 0, limit)
-	for _, r := range rows {
+	for _, pr := range rows {
+		r := pr.Row
 		if f.Service != "" && r.Service != f.Service {
 			continue
 		}
@@ -175,7 +243,7 @@ func (s *Store) SearchLogs(ctx context.Context, f store.LogFilter) ([]core.Log, 
 		if r.Severity < int(f.MinSeverity) {
 			continue
 		}
-		l, err := s.rowToLog(f.ProjectID, r)
+		l, err := s.rowToLog(pr.ProjectID, r)
 		if err != nil {
 			return nil, err
 		}

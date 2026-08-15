@@ -85,6 +85,63 @@ func TestSegmentManifestCRUD(t *testing.T) {
 	}
 }
 
+// TestSwapSegmentAtomicReplace guards the crash-atomicity SwapSegment
+// exists for: the old manifest row must be gone and the new one present
+// after a successful swap (both effects of the same commit), and
+// swapping an already-missing oldID must not error — it's the retry path
+// after a crash that landed post-commit — instead it just inserts the new
+// row (documented, chosen over erroring so a retried swap stays
+// idempotent).
+func TestSwapSegmentAtomicReplace(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	p := mustProj(ctx, t, db)
+
+	old := SegmentMeta{ProjectID: p.ID, Path: "segments/1/000001.seg",
+		MinTs: 100, MaxTs: 200, MinLogID: 1, MaxLogID: 50, Count: 50, Services: []string{"api"}}
+	oldID, err := db.InsertSegment(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := SegmentMeta{ProjectID: p.ID, Path: "segments/1/000001-pruned.seg",
+		MinTs: 150, MaxTs: 200, MinLogID: 30, MaxLogID: 50, Count: 20, Services: []string{"api"}}
+	// Note: SQLite may legitimately reuse oldID's rowid for the
+	// replacement here — segment_manifest's id is a plain rowid alias
+	// (no AUTOINCREMENT), so once the table's only row is deleted within
+	// the same transaction, the next insert's default rowid selection can
+	// land back on 1. That is not a correctness problem for the swap: the
+	// assertion that matters is the row's content (Path/Count below), not
+	// whether the id number happens to be reused.
+	newID, err := db.SwapSegment(ctx, oldID, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.Segments(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("segments after swap = %+v, want exactly the replacement", got)
+	}
+	if got[0].ID != newID || got[0].Path != replacement.Path || got[0].Count != 20 {
+		t.Errorf("got %+v", got[0])
+	}
+
+	// Swapping a missing oldID (simulating a retry after a crash that
+	// landed post-commit) does not error — it still inserts the new row.
+	another := SegmentMeta{ProjectID: p.ID, Path: "segments/1/000002.seg",
+		MinTs: 300, MaxTs: 400, MinLogID: 51, MaxLogID: 60, Count: 10, Services: []string{"api"}}
+	if _, err := db.SwapSegment(ctx, 999999, another); err != nil {
+		t.Fatalf("SwapSegment with missing oldID errored: %v", err)
+	}
+	got2, err := db.Segments(ctx, p.ID)
+	if err != nil || len(got2) != 2 {
+		t.Fatalf("segments after missing-oldID swap = %+v, err %v", got2, err)
+	}
+}
+
 func TestRollupsAccumulateAndQuery(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
@@ -179,6 +236,44 @@ func TestUpsertIssuesSemantics(t *testing.T) {
 	_, refs2, _ := db.IssueRefs(ctx, issueID)
 	if len(refs2) != 1 || refs2[0].LogID != 3 {
 		t.Errorf("after delete-before: refs = %+v, want only logID 3", refs2)
+	}
+}
+
+// TestMaxIssueEventLogID guards enginestore's recover, which uses this to
+// seed nextLogID alongside the manifest and WALs: after a full prune, a
+// project's manifest and WAL can both go empty while issue_events still
+// references older LogIDs (event refs deliberately outlive bodies), and
+// nextLogID must not restart low enough to reissue one of those ids.
+func TestMaxIssueEventLogID(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	p := mustProj(ctx, t, db)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	max, err := db.MaxIssueEventLogID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if max != 0 {
+		t.Fatalf("empty issue_events: max = %d, want 0", max)
+	}
+
+	ev := func(logID int64, fp string) store.Entry {
+		return store.Entry{
+			Log:     core.Log{ID: logID, ProjectID: p.ID, Time: at, Severity: core.SeverityError, Body: "boom"},
+			IsEvent: true, Fingerprint: fp, Title: "boom",
+		}
+	}
+	if _, err := db.UpsertIssues(ctx, []store.Entry{ev(7, "fp-a"), ev(3, "fp-b"), ev(42, "fp-c")}); err != nil {
+		t.Fatal(err)
+	}
+
+	max, err = db.MaxIssueEventLogID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if max != 42 {
+		t.Fatalf("max = %d, want 42", max)
 	}
 }
 

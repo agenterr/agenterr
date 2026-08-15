@@ -8,6 +8,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -180,32 +181,38 @@ func (db *DB) SetIssueStatus(ctx context.Context, id int64, s core.IssueStatus) 
 	return nil
 }
 
+// migration0008 is the filename of the migration that drops the legacy
+// logs table (and its FTS5 index) as part of the cutover to the engine's
+// segment-based log storage. migrate uses this to detect, within the
+// current process's run, whether that migration was the one that just
+// applied — see the VACUUM call at the end of migrate.
+const migration0008 = "0008_drop_logs.sql"
+
 // migrate applies any migration files under migrations/*.sql that have not
 // yet been recorded in schema_migrations, in filename order, each inside
 // its own transaction.
+//
+// If migration0008 is applied during this call, a VACUUM runs once,
+// outside any migration transaction, after the loop completes. A v0.1.x
+// database carries the (now-dropped) logs table's pages in its freelist:
+// dropping a table doesn't shrink the file, it just marks the pages
+// free for reuse, so the file stays multi-gigabyte until something
+// reclaims that space. Left alone, that stale freelist keeps the
+// MaxDBBytes guardrail (enforceMaxDBBytes) tripping forever on a
+// database that, post-cutover, holds none of the log bodies the
+// guardrail is meant to police. VACUUM is only ever run here — the one
+// process run where 0008 itself just applied — never on ordinary
+// startup, since it rewrites the entire file and is not something to
+// pay for on every boot.
 func (db *DB) migrate() error {
 	if _, err := db.sql.Exec(createMigrationsTable); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
-	applied := map[string]bool{}
-	rows, err := db.sql.Query(selectAppliedMigrations)
+	applied, err := db.loadAppliedMigrations()
 	if err != nil {
-		return fmt.Errorf("query applied migrations: %w", err)
-	}
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan applied migration: %w", err)
-		}
-		applied[v] = true
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
 		return err
 	}
-	_ = rows.Close()
 
 	entries, err := fs.ReadDir(migrationsFS, "migrations")
 	if err != nil {
@@ -217,30 +224,72 @@ func (db *DB) migrate() error {
 	}
 	sort.Strings(names)
 
+	applied0008ThisRun := false
 	for _, name := range names {
 		if applied[name] {
 			continue
 		}
-		content, err := migrationsFS.ReadFile("migrations/" + name)
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", name, err)
+		if err := db.applyMigration(name); err != nil {
+			return err
 		}
+		if name == migration0008 {
+			applied0008ThisRun = true
+		}
+	}
 
-		tx, err := db.sql.Begin()
-		if err != nil {
-			return fmt.Errorf("begin tx for migration %s: %w", name, err)
+	if applied0008ThisRun {
+		if _, err := db.sql.Exec(`VACUUM`); err != nil {
+			return fmt.Errorf("vacuum after %s: %w", migration0008, err)
 		}
-		if _, err := tx.Exec(string(content)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply migration %s: %w", name, err)
+		slog.Info("legacy log storage dropped (no-migrator cutover); database vacuumed")
+	}
+	return nil
+}
+
+// loadAppliedMigrations returns the set of migration filenames already
+// recorded in schema_migrations.
+func (db *DB) loadAppliedMigrations() (map[string]bool, error) {
+	applied := map[string]bool{}
+	rows, err := db.sql.Query(selectAppliedMigrations)
+	if err != nil {
+		return nil, fmt.Errorf("query applied migrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("scan applied migration: %w", err)
 		}
-		if _, err := tx.Exec(insertMigration, name); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record migration %s: %w", name, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit migration %s: %w", name, err)
-		}
+		applied[v] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return applied, nil
+}
+
+// applyMigration runs one migration file's SQL and records it in
+// schema_migrations, both inside a single transaction.
+func (db *DB) applyMigration(name string) error {
+	content, err := migrationsFS.ReadFile("migrations/" + name)
+	if err != nil {
+		return fmt.Errorf("read migration %s: %w", name, err)
+	}
+
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx for migration %s: %w", name, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(string(content)); err != nil {
+		return fmt.Errorf("apply migration %s: %w", name, err)
+	}
+	if _, err := tx.Exec(insertMigration, name); err != nil {
+		return fmt.Errorf("record migration %s: %w", name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", name, err)
 	}
 	return nil
 }

@@ -186,7 +186,7 @@ func (s *Server) getIssue(ctx context.Context, _ *mcpsdk.CallToolRequest, in get
 
 type searchLogsInput struct {
 	Project     int64  `json:"project,omitempty" jsonschema:"Project ID; admin keys only"`
-	Query       string `json:"query,omitempty" jsonschema:"Full-text match on log body"`
+	Query       string `json:"query,omitempty" jsonschema:"Substring match on log body"`
 	MinSeverity string `json:"min_severity,omitempty" jsonschema:"Minimum severity: trace, debug, info, warn, error, fatal"`
 	Service     string `json:"service,omitempty" jsonschema:"Filter by service name"`
 	Environment string `json:"environment,omitempty" jsonschema:"Filter by environment"`

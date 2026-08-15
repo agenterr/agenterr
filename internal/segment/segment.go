@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 	"sort"
 )
 
@@ -203,7 +204,31 @@ func Write(path string, rows []Row) (Footer, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return Footer{}, fmt.Errorf("segment: rename: %w", err)
 	}
+	// The rename itself needs its own fsync to be crash-durable: on most
+	// POSIX filesystems a rename is only guaranteed to survive a crash
+	// once the directory entry change has been fsync'd, separately from
+	// the file's own data (already fsync'd above). Without this, a crash
+	// right after Rename can leave the directory listing the file under
+	// its old .tmp name, or not at all, even though the data itself is
+	// safely on disk.
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return Footer{}, err
+	}
 	return foot, nil
+}
+
+// syncDir opens dir, fsyncs it, and closes it — the standard way to make
+// a preceding directory-entry change (a rename or create) crash-durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("segment: open dir for sync: %w", err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("segment: sync dir: %w", err)
+	}
+	return nil
 }
 
 // Open reads and CRC-verifies a segment's footer without touching the
