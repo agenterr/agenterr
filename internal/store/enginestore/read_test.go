@@ -1,6 +1,8 @@
 package enginestore
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -441,4 +443,23 @@ func TestSearchLogsAllProjectsMergesEveryProject(t *testing.T) {
 	}
 
 	checkBoth("after flush")
+}
+
+// TestReadsCreateNoEngineState guards readProj's non-creating contract:
+// pure reads against a project id that was never written must not mint a
+// WAL file (or any other engine-state side effect) for it.
+func TestReadsCreateNoEngineState(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir, Options{})
+	// Reads against never-written project ids must not mint WAL files.
+	_, _ = s.SearchLogs(ctx, store.LogFilter{ProjectID: 424242})
+	_, _ = s.Stats(ctx, store.StatsFilter{ProjectID: 424242})
+	_, _ = s.ServiceCounts(ctx, 424242, time.Time{})
+	if _, err := os.Stat(filepath.Join(dir, "engine", "wal", "424242.wal")); !os.IsNotExist(err) {
+		t.Fatalf("read created engine state: stat err = %v", err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "engine", "wal"))
+	if len(entries) != 0 {
+		t.Fatalf("wal dir not empty after pure reads: %v", entries)
+	}
 }
