@@ -536,9 +536,12 @@ func (s *Store) Issues(ctx context.Context, f store.IssueFilter) ([]core.Issue, 
 	return out, nil
 }
 
-// Aggregate groups a project's log volume by service, severity, hour,
-// or day — flushed rollups plus the unflushed memtable, so results are
-// exact and immediate. ProjectID must be non-zero.
+// Aggregate groups a project's log volume by service, severity, hour, or
+// day — flushed rollups plus the unflushed memtable, so results are
+// immediate. Windows are hour-granular: Since/Until are truncated to the
+// hour (Until inclusive of its full hour) — the rollup bucket size — so
+// the memtable scan and the rollup query agree at any bound, flushed or
+// not. ProjectID must be non-zero.
 func (s *Store) Aggregate(ctx context.Context, f store.AggregateFilter) ([]store.AggregateRow, error) {
 	if f.ProjectID == 0 {
 		return nil, fmt.Errorf("enginestore: aggregate requires a project")
@@ -552,7 +555,7 @@ func (s *Store) Aggregate(ctx context.Context, f store.AggregateFilter) ([]store
 		buckets[k] = v
 	}
 	if ps := s.readProj(f.ProjectID); ps != nil {
-		sinceM, untilM := boundsMicros(f.Since, f.Until)
+		sinceM, untilM := aggregateBoundsMicros(f.Since, f.Until)
 		for _, r := range ps.mem.Snapshot() {
 			if r.TsMicros < sinceM || r.TsMicros > untilM {
 				continue
@@ -570,6 +573,25 @@ func (s *Store) Aggregate(ctx context.Context, f store.AggregateFilter) ([]store
 		}
 	}
 	return orderAggregate(f.GroupBy, buckets), nil
+}
+
+// aggregateBoundsMicros converts [since, until] to hour-granular inclusive
+// epoch-micro bounds matching RollupAggregate's SQL truncation: since is
+// truncated down to the hour, and until (when set) is truncated down to
+// the hour and then extended to that hour's end (inclusive) — otherwise a
+// row at, say, 10:30 with until=10:00 would be counted by the rollup path
+// (whose hour bucket "10:00" covers the full hour) but dropped by a
+// micro-exact memtable filter, making Aggregate's result depend on
+// whether that row had been flushed yet.
+func aggregateBoundsMicros(since, until time.Time) (sinceM, untilM int64) {
+	sinceM, untilM = int64(-1<<62), int64(1<<62)
+	if !since.IsZero() {
+		sinceM = since.UTC().Truncate(time.Hour).UnixMicro()
+	}
+	if !until.IsZero() {
+		untilM = until.UTC().Truncate(time.Hour).Add(time.Hour).UnixMicro() - 1
+	}
+	return sinceM, untilM
 }
 
 // memKey computes the same bucket key RollupAggregate's SQL uses, for a
