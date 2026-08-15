@@ -63,7 +63,7 @@ func (s *Store) Prune(ctx context.Context, projectID int64, before time.Time) (i
 	}
 	ps.mu.Unlock()
 
-	if err := s.DB.DeleteIssueEventsBefore(ctx, projectID, before); err != nil {
+	if err := s.DeleteIssueEventsBefore(ctx, projectID, before); err != nil {
 		return removed, err
 	}
 	return removed, nil
@@ -73,7 +73,7 @@ func (s *Store) Prune(ctx context.Context, projectID int64, before time.Time) (i
 // first: a file with no manifest row is an ignorable orphan, while a
 // manifest row with no file would fail reads.
 func (s *Store) dropSegment(ctx context.Context, m sqlitestore.SegmentMeta) error {
-	if err := s.DB.DeleteSegment(ctx, m.ID); err != nil {
+	if err := s.DeleteSegment(ctx, m.ID); err != nil {
 		return err
 	}
 	if err := os.Remove(s.segPath(m.Path)); err != nil && !os.IsNotExist(err) {
@@ -122,7 +122,7 @@ func (s *Store) rewriteSegment(ctx context.Context, m sqlitestore.SegmentMeta, c
 		MinLogID: foot.MinLogID, MaxLogID: foot.MaxLogID,
 		Count: int64(foot.Count), Events: foot.Events, Services: foot.Services,
 	}
-	if _, err := s.DB.SwapSegment(ctx, m.ID, meta); err != nil {
+	if _, err := s.SwapSegment(ctx, m.ID, meta); err != nil {
 		_ = os.Remove(s.segPath(rel))
 		return 0, err
 	}

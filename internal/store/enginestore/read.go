@@ -39,7 +39,7 @@ func (s *Store) collectRows(ctx context.Context, projectID int64, since, until t
 		return nil, err
 	}
 	ps.mu.Lock()
-	segs, err := s.DB.Segments(ctx, projectID)
+	segs, err := s.Segments(ctx, projectID)
 	if err != nil {
 		ps.mu.Unlock()
 		return nil, err
@@ -269,7 +269,7 @@ func (s *Store) logByID(ctx context.Context, projectID, logID int64) (segment.Ro
 	}
 	ps.mu.Lock()
 	memRows := ps.mem.Snapshot()
-	segs, err := s.DB.Segments(ctx, projectID)
+	segs, err := s.Segments(ctx, projectID)
 	ps.mu.Unlock()
 	if err != nil {
 		return segment.Row{}, false, err
@@ -371,7 +371,7 @@ func (s *Store) findLog(ctx context.Context, logID int64) (segment.Row, int64, e
 			return r, pid, nil
 		}
 	}
-	segs, err := s.DB.Segments(ctx, 0)
+	segs, err := s.Segments(ctx, 0)
 	if err != nil {
 		return segment.Row{}, 0, err
 	}
@@ -390,7 +390,7 @@ func (s *Store) findLog(ctx context.Context, logID int64) (segment.Row, int64, e
 // Stats merges flushed rollups with unflushed memtable rows, so counts
 // are exact and immediate. OpenIssues comes from the metadata DB.
 func (s *Store) Stats(ctx context.Context, f store.StatsFilter) (store.Stats, error) {
-	logs, events, perDay, err := s.DB.RollupStats(ctx, f.ProjectID, f.Since)
+	logs, events, perDay, err := s.RollupStats(ctx, f.ProjectID, f.Since)
 	if err != nil {
 		return store.Stats{}, err
 	}
@@ -417,7 +417,7 @@ func (s *Store) Stats(ctx context.Context, f store.StatsFilter) (store.Stats, er
 		}
 		perDay[day] = d
 	}
-	open, err := s.DB.OpenIssueCount(ctx, f.ProjectID)
+	open, err := s.OpenIssueCount(ctx, f.ProjectID)
 	if err != nil {
 		return store.Stats{}, err
 	}
@@ -432,7 +432,7 @@ func (s *Store) Stats(ctx context.Context, f store.StatsFilter) (store.Stats, er
 // ServiceCounts merges rollups with the memtable and returns the top 20
 // services by log count (descending, ties by ascending name).
 func (s *Store) ServiceCounts(ctx context.Context, projectID int64, since time.Time) ([]store.ServiceCount, error) {
-	counts, err := s.DB.RollupServiceCounts(ctx, projectID, since)
+	counts, err := s.RollupServiceCounts(ctx, projectID, since)
 	if err != nil {
 		return nil, err
 	}
@@ -486,7 +486,7 @@ func (s *Store) Issues(ctx context.Context, f store.IssueFilter) ([]core.Issue, 
 	if err != nil {
 		return nil, err
 	}
-	ids, err := s.DB.IssueIDsInEnvironment(ctx, f.ProjectID, env)
+	ids, err := s.IssueIDsInEnvironment(ctx, f.ProjectID, env)
 	if err != nil {
 		return nil, err
 	}
@@ -512,7 +512,7 @@ const maxIssueScan = 1_000_000
 // each event's log resolved from the engine. A ref whose log has been
 // pruned yields the event with only its LogID populated.
 func (s *Store) Issue(ctx context.Context, id int64) (core.Issue, []core.Event, error) {
-	iss, refs, err := s.DB.IssueRefs(ctx, id)
+	iss, refs, err := s.IssueRefs(ctx, id)
 	if err != nil {
 		return core.Issue{}, nil, err
 	}

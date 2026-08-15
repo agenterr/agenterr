@@ -72,7 +72,7 @@ func (s *Store) WriteBatch(ctx context.Context, entries []store.Entry) ([]store.
 		}
 	}
 
-	outcomes, err := s.DB.UpsertIssues(ctx, entries)
+	outcomes, err := s.UpsertIssues(ctx, entries)
 	if err != nil {
 		return nil, err
 	}
@@ -141,13 +141,13 @@ func (s *Store) flushProject(projectID int64) error {
 		MinLogID: foot.MinLogID, MaxLogID: foot.MaxLogID,
 		Count: int64(foot.Count), Events: foot.Events, Services: foot.Services,
 	}
-	if _, err := s.DB.InsertSegment(context.Background(), meta); err != nil {
+	if _, err := s.InsertSegment(context.Background(), meta); err != nil {
 		// The file exists but the manifest doesn't know it: remove the
 		// orphan so a retry doesn't collide, keep memtable+WAL intact.
 		_ = os.Remove(abs)
 		return fmt.Errorf("enginestore: insert segment manifest: %w", err)
 	}
-	if err := s.DB.AddRollups(context.Background(), rollupsFrom(projectID, rows)); err != nil {
+	if err := s.AddRollups(context.Background(), rollupsFrom(projectID, rows)); err != nil {
 		slog.Error("enginestore: rollup update failed (counts will undercount)", "error", err)
 	}
 	if err := ps.wal.Reset(); err != nil {
