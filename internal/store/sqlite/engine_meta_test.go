@@ -250,12 +250,12 @@ func TestMaxIssueEventLogID(t *testing.T) {
 	p := mustProj(ctx, t, db)
 	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
-	max, err := db.MaxIssueEventLogID(ctx)
+	gotMax, err := db.MaxIssueEventLogID(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if max != 0 {
-		t.Fatalf("empty issue_events: max = %d, want 0", max)
+	if gotMax != 0 {
+		t.Fatalf("empty issue_events: max = %d, want 0", gotMax)
 	}
 
 	ev := func(logID int64, fp string) store.Entry {
@@ -268,12 +268,12 @@ func TestMaxIssueEventLogID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	max, err = db.MaxIssueEventLogID(ctx)
+	wantMax, err := db.MaxIssueEventLogID(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if max != 42 {
-		t.Fatalf("max = %d, want 42", max)
+	if wantMax != 42 {
+		t.Fatalf("max = %d, want 42", wantMax)
 	}
 }
 

@@ -440,11 +440,11 @@ func (db *DB) OpenIssueCount(ctx context.Context, projectID int64) (int64, error
 // reissue an already-referenced LogID to a brand new log, and the old
 // issue_events row would then resolve to the WRONG body.
 func (db *DB) MaxIssueEventLogID(ctx context.Context) (int64, error) {
-	var max int64
-	if err := db.sql.QueryRowContext(ctx, `SELECT COALESCE(MAX(log_id), 0) FROM issue_events`).Scan(&max); err != nil {
+	var maxID int64
+	if err := db.sql.QueryRowContext(ctx, `SELECT COALESCE(MAX(log_id), 0) FROM issue_events`).Scan(&maxID); err != nil {
 		return 0, fmt.Errorf("sqlite: max issue event log id: %w", err)
 	}
-	return max, nil
+	return maxID, nil
 }
 
 // DeleteIssueEventsBefore removes event refs older than before for a
