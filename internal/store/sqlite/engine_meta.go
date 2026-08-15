@@ -294,16 +294,21 @@ DELETE FROM issue_events WHERE issue_id = ? AND id NOT IN (
 	}, nil
 }
 
-// IssueIDsInEnvironment returns the set of issue ids in projectID with at
+// IssueIDsInEnvironment returns the set of issue ids in projectID (0 = all
+// projects, matching the store.IssueFilter.ProjectID convention) with at
 // least one retained event sample recorded in environment. It is the
 // engine's substitute for the legacy Issues environment filter, which
 // matches against the logs table — a table the engine write path never
 // populates (log bodies live in segments, not sqlite); issue_events is
 // the engine's own per-event environment record instead.
 func (db *DB) IssueIDsInEnvironment(ctx context.Context, projectID int64, environment string) (map[int64]bool, error) {
-	rows, err := db.sql.QueryContext(ctx,
-		`SELECT DISTINCT issue_id FROM issue_events WHERE project_id = ? AND environment = ?`,
-		projectID, environment)
+	q := `SELECT DISTINCT issue_id FROM issue_events WHERE environment = ?`
+	args := []any{environment}
+	if projectID != 0 {
+		q += ` AND project_id = ?`
+		args = append(args, projectID)
+	}
+	rows, err := db.sql.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: issue ids in environment: %w", err)
 	}

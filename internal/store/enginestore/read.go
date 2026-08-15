@@ -12,6 +12,7 @@ import (
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/segment"
 	"github.com/agenterr/agenterr/internal/store"
+	sqlitestore "github.com/agenterr/agenterr/internal/store/sqlite"
 )
 
 // segPath resolves a manifest-relative segment path (as stored in
@@ -32,14 +33,7 @@ func (s *Store) segPath(rel string) string {
 // still holding its rows) or the post-flush state (new segment present,
 // memtable already reset) — never a mix that duplicates or drops rows.
 func (s *Store) collectRows(ctx context.Context, projectID int64, since, until time.Time, service string) ([]segment.Row, error) {
-	var out []segment.Row
-	sinceM, untilM := int64(-1<<62), int64(1<<62)
-	if !since.IsZero() {
-		sinceM = since.UTC().UnixMicro()
-	}
-	if !until.IsZero() {
-		untilM = until.UTC().UnixMicro()
-	}
+	sinceM, untilM := boundsMicros(since, until)
 	ps, err := s.proj(projectID)
 	if err != nil {
 		return nil, err
@@ -53,29 +47,59 @@ func (s *Store) collectRows(ctx context.Context, projectID int64, since, until t
 	memRows := ps.mem.Snapshot()
 	ps.mu.Unlock()
 
+	var out []segment.Row
 	for _, m := range segs {
-		if m.MaxTs < sinceM || m.MinTs > untilM {
-			continue
-		}
-		if service != "" && !contains(m.Services, service) {
-			continue
-		}
-		_, rows, err := segment.Read(s.segPath(m.Path))
+		rows, err := s.readSegmentRows(m, sinceM, untilM, service)
 		if err != nil {
-			return nil, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
+			return nil, err
 		}
-		for _, r := range rows {
-			if r.TsMicros >= sinceM && r.TsMicros <= untilM {
-				out = append(out, r)
-			}
-		}
+		out = append(out, rows...)
 	}
-	for _, r := range memRows {
+	out = append(out, filterRowsByTime(memRows, sinceM, untilM)...)
+	return out, nil
+}
+
+// boundsMicros converts a [since, until] time range (a zero Time meaning
+// unbounded on that side) to inclusive epoch-micro bounds.
+func boundsMicros(since, until time.Time) (sinceM, untilM int64) {
+	sinceM, untilM = int64(-1<<62), int64(1<<62)
+	if !since.IsZero() {
+		sinceM = since.UTC().UnixMicro()
+	}
+	if !until.IsZero() {
+		untilM = until.UTC().UnixMicro()
+	}
+	return sinceM, untilM
+}
+
+// readSegmentRows reads one manifest segment's rows and returns those
+// within [sinceM, untilM]. It skips the file read entirely (returning nil,
+// nil) when the segment's own time range or recorded service set already
+// rules it out.
+func (s *Store) readSegmentRows(m sqlitestore.SegmentMeta, sinceM, untilM int64, service string) ([]segment.Row, error) {
+	if m.MaxTs < sinceM || m.MinTs > untilM {
+		return nil, nil
+	}
+	if service != "" && !contains(m.Services, service) {
+		return nil, nil
+	}
+	_, rows, err := segment.Read(s.segPath(m.Path))
+	if err != nil {
+		return nil, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
+	}
+	return filterRowsByTime(rows, sinceM, untilM), nil
+}
+
+// filterRowsByTime returns the subset of rows with TsMicros within
+// [sinceM, untilM].
+func filterRowsByTime(rows []segment.Row, sinceM, untilM int64) []segment.Row {
+	var out []segment.Row
+	for _, r := range rows {
 		if r.TsMicros >= sinceM && r.TsMicros <= untilM {
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // rowLess reports whether a sorts strictly before b in the (TsMicros,

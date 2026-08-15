@@ -17,13 +17,30 @@ import (
 // a segment straddling the cutoff is rewritten without its old rows.
 // Event refs are cleaned alongside. Rollups are intentionally retained
 // (spec: trend history outlives bodies). Returns removed log count.
+//
+// The manifest mutations (per-segment insert-then-delete swap) run under
+// ps.mu, acquired after flushProject returns (flushProject takes ps.mu
+// itself, so this must not nest inside it). This closes the same race
+// class flushProject was hardened against: collectRows takes its manifest
+// snapshot under ps.mu too, so without this lock a concurrent reader could
+// observe both a straddling segment's old file and its "-pruned"
+// replacement in the same Segments() call — double-counting the rows that
+// survived the rewrite. DeleteIssueEventsBefore is metadata-only (no
+// manifest or memtable interaction) and runs after the lock is released.
 func (s *Store) Prune(ctx context.Context, projectID int64, before time.Time) (int64, error) {
 	if err := s.flushProject(projectID); err != nil {
 		return 0, err
 	}
+	ps, err := s.proj(projectID)
+	if err != nil {
+		return 0, err
+	}
 	cutoff := before.UTC().UnixMicro()
+
+	ps.mu.Lock()
 	segs, err := s.DB.Segments(ctx, projectID)
 	if err != nil {
+		ps.mu.Unlock()
 		return 0, err
 	}
 	var removed int64
@@ -31,17 +48,21 @@ func (s *Store) Prune(ctx context.Context, projectID int64, before time.Time) (i
 		switch {
 		case m.MaxTs < cutoff: // entirely old
 			if err := s.dropSegment(ctx, m); err != nil {
+				ps.mu.Unlock()
 				return removed, err
 			}
 			removed += m.Count
 		case m.MinTs < cutoff: // straddles: rewrite without old rows
 			n, err := s.rewriteSegment(ctx, m, cutoff)
 			if err != nil {
+				ps.mu.Unlock()
 				return removed, err
 			}
 			removed += n
 		}
 	}
+	ps.mu.Unlock()
+
 	if err := s.DB.DeleteIssueEventsBefore(ctx, projectID, before); err != nil {
 		return removed, err
 	}
