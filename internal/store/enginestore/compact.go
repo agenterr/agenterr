@@ -25,11 +25,15 @@ import (
 // reader can snapshot the manifest just before this runs and then try to
 // open a member segment just after its file is removed. That ENOENT is
 // expected, not corruption — collectRows/logByID handle it by re-fetching
-// the manifest and retrying once (see isSegmentNotExist/freshSegmentByID
-// in read.go): gone from the fresh manifest too means legitimately
-// replaced (skip it, the merged segment covers the same rows), still
-// present means real corruption (propagate). Reading the old (immutable)
-// segments happens outside the lock.
+// the manifest (see isSegmentNotExist/freshSegmentByID in read.go): gone
+// from the fresh manifest too means legitimately replaced, and since the
+// replacement (merged) segment is not part of the snapshot the reader is
+// mid-pass on, the reader abandons that pass and restarts from a brand
+// new snapshot (readSegmentRowsWithRestart/readSegmentFileWithRestart,
+// bounded by maxSegmentSetRestarts) rather than silently returning a
+// result missing that segment's rows; still present in the fresh manifest
+// means real corruption (propagate). Reading the old (immutable) segments
+// happens outside the lock.
 //
 // CompactAll is serialized on s.compactMu: the compaction loop is a
 // single goroutine, but CompactAll is also exported for tests and any
