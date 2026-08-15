@@ -64,7 +64,7 @@ func TestFlushThresholdWritesSegment(t *testing.T) {
 	if _, err := s.WriteBatch(ctx, entries); err != nil {
 		t.Fatal(err)
 	}
-	segs, err := s.DB.Segments(ctx, p.ID)
+	segs, err := s.Segments(ctx, p.ID)
 	if err != nil || len(segs) != 1 {
 		t.Fatalf("segments = %v err %v", segs, err)
 	}
@@ -72,7 +72,7 @@ func TestFlushThresholdWritesSegment(t *testing.T) {
 		t.Errorf("segment count = %d", segs[0].Count)
 	}
 	// Rollups recorded at flush.
-	logs, _, _, err := s.DB.RollupStats(ctx, p.ID, at.Add(-time.Hour))
+	logs, _, _, err := s.RollupStats(ctx, p.ID, at.Add(-time.Hour))
 	if err != nil || logs != 3 {
 		t.Errorf("rollup logs = %d err %v", logs, err)
 	}

@@ -213,7 +213,7 @@ func TestPruneStraddlingSegment(t *testing.T) {
 	if len(logs) != 1 || logs[0].Body != "new one" {
 		t.Fatalf("after prune: %+v", logs)
 	}
-	segs, _ := s.DB.Segments(ctx, p.ID)
+	segs, _ := s.Segments(ctx, p.ID)
 	if len(segs) != 1 || segs[0].Count != 1 {
 		t.Fatalf("manifest after prune: %+v", segs)
 	}
