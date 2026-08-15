@@ -22,6 +22,16 @@ func (s *Store) segPath(rel string) string {
 	return filepath.Join(s.dir, rel)
 }
 
+// readProj returns the project's engine state if it exists, or nil. Reads
+// must never create WAL files or projStates for projects they merely
+// query — segments are still served via the manifest. Only proj()
+// (WriteBatch/flushProject/Prune/recover) may create projState.
+func (s *Store) readProj(projectID int64) *projState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.projects[projectID]
+}
+
 // collectRows returns all rows for a project across the memtable and
 // every manifest segment overlapping [since, until] (zero times = no
 // bound), optionally filtered by service via segment footers.
@@ -34,18 +44,30 @@ func (s *Store) segPath(rel string) string {
 // memtable already reset) — never a mix that duplicates or drops rows.
 func (s *Store) collectRows(ctx context.Context, projectID int64, since, until time.Time, service string) ([]segment.Row, error) {
 	sinceM, untilM := boundsMicros(since, until)
-	ps, err := s.proj(projectID)
-	if err != nil {
-		return nil, err
-	}
-	ps.mu.Lock()
-	segs, err := s.Segments(ctx, projectID)
-	if err != nil {
+	ps := s.readProj(projectID)
+
+	var segs []sqlitestore.SegmentMeta
+	var memRows []segment.Row
+	var err error
+	if ps == nil {
+		// No projState for this project: no flush can be running for it
+		// (flushProject only ever runs against a projState reached via
+		// proj()), so the manifest query needs no ps.mu coherence lock —
+		// there is nothing racing it.
+		segs, err = s.Segments(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		ps.mu.Lock()
+		segs, err = s.Segments(ctx, projectID)
+		if err != nil {
+			ps.mu.Unlock()
+			return nil, err
+		}
+		memRows = ps.mem.Snapshot()
 		ps.mu.Unlock()
-		return nil, err
 	}
-	memRows := ps.mem.Snapshot()
-	ps.mu.Unlock()
 
 	var out []segment.Row
 	for _, m := range segs {
@@ -195,7 +217,11 @@ func (s *Store) rowToLog(projectID int64, r segment.Row) (core.Log, error) {
 	body := r.Raw
 	if r.TemplateID != 0 {
 		var ok bool
-		body, ok = s.ex.Reconstruct(projectID, r.TemplateID, r.Vars)
+		var err error
+		body, ok, err = s.ex.Reconstruct(projectID, r.TemplateID, r.Vars)
+		if err != nil {
+			return core.Log{}, fmt.Errorf("enginestore: reconstruct template %d for log %d: %w", r.TemplateID, r.LogID, err)
+		}
 		if !ok {
 			return core.Log{}, fmt.Errorf("enginestore: template %d missing for log %d", r.TemplateID, r.LogID)
 		}
@@ -263,16 +289,26 @@ func (s *Store) SearchLogs(ctx context.Context, f store.LogFilter) ([]core.Log, 
 // snapshot and the manifest query are taken together under ps.mu — see
 // collectRows for why that is required to avoid racing flushProject.
 func (s *Store) logByID(ctx context.Context, projectID, logID int64) (segment.Row, bool, error) {
-	ps, err := s.proj(projectID)
-	if err != nil {
-		return segment.Row{}, false, err
-	}
-	ps.mu.Lock()
-	memRows := ps.mem.Snapshot()
-	segs, err := s.Segments(ctx, projectID)
-	ps.mu.Unlock()
-	if err != nil {
-		return segment.Row{}, false, err
+	ps := s.readProj(projectID)
+
+	var memRows []segment.Row
+	var segs []sqlitestore.SegmentMeta
+	var err error
+	if ps == nil {
+		// No projState: no flush can be running for this project, so the
+		// manifest query needs no ps.mu coherence lock.
+		segs, err = s.Segments(ctx, projectID)
+		if err != nil {
+			return segment.Row{}, false, err
+		}
+	} else {
+		ps.mu.Lock()
+		memRows = ps.mem.Snapshot()
+		segs, err = s.Segments(ctx, projectID)
+		ps.mu.Unlock()
+		if err != nil {
+			return segment.Row{}, false, err
+		}
 	}
 	for _, r := range memRows {
 		if r.LogID == logID {
@@ -398,24 +434,22 @@ func (s *Store) Stats(ctx context.Context, f store.StatsFilter) (store.Stats, er
 	if !f.Since.IsZero() {
 		sinceM = f.Since.UTC().UnixMicro()
 	}
-	ps, err := s.proj(f.ProjectID)
-	if err != nil {
-		return store.Stats{}, err
-	}
-	for _, r := range ps.mem.Snapshot() {
-		if r.TsMicros < sinceM {
-			continue
+	if ps := s.readProj(f.ProjectID); ps != nil {
+		for _, r := range ps.mem.Snapshot() {
+			if r.TsMicros < sinceM {
+				continue
+			}
+			logs++
+			day := time.UnixMicro(r.TsMicros).UTC().Format("2006-01-02")
+			d := perDay[day]
+			d.Day = day
+			d.Logs++
+			if r.IsEvent {
+				events++
+				d.Events++
+			}
+			perDay[day] = d
 		}
-		logs++
-		day := time.UnixMicro(r.TsMicros).UTC().Format("2006-01-02")
-		d := perDay[day]
-		d.Day = day
-		d.Logs++
-		if r.IsEvent {
-			events++
-			d.Events++
-		}
-		perDay[day] = d
 	}
 	open, err := s.OpenIssueCount(ctx, f.ProjectID)
 	if err != nil {
@@ -440,13 +474,11 @@ func (s *Store) ServiceCounts(ctx context.Context, projectID int64, since time.T
 	if !since.IsZero() {
 		sinceM = since.UTC().UnixMicro()
 	}
-	ps, err := s.proj(projectID)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range ps.mem.Snapshot() {
-		if r.TsMicros >= sinceM {
-			counts[r.Service]++
+	if ps := s.readProj(projectID); ps != nil {
+		for _, r := range ps.mem.Snapshot() {
+			if r.TsMicros >= sinceM {
+				counts[r.Service]++
+			}
 		}
 	}
 	out := make([]store.ServiceCount, 0, len(counts))
