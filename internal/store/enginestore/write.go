@@ -21,6 +21,22 @@ import (
 // Rows are durable (WAL fsync'd) before this returns — the pipeline's
 // ack. Issue upserts happen after log durability; a failure there
 // surfaces as the batch error (the pipeline logs and drops).
+//
+// Multi-project batches are processed sequentially, one project at a
+// time. If a WAL append/sync fails partway through, WriteBatch returns
+// immediately: rows for projects already processed are durable in their
+// WAL and already visible via the memtable, rows for the failing and any
+// remaining projects are not written at all, and issue upserts are
+// skipped for the ENTIRE batch (including entries from already-durable
+// projects). This is a partial-failure state, not an atomic one. It is
+// safe today because the only caller, the ingest pipeline, logs and
+// drops a failed batch outright and never retries it — retrying the same
+// entries would re-append the already-durable rows under new log ids
+// (harmless duplication) but skip issue accounting a second time is not
+// guaranteed either way. Any future caller MUST NOT retry a failed batch
+// with the same entries; a redesign (e.g. per-project error slices, or
+// buffering all WAL writes before any Sync) is required before this
+// method can safely support partial-batch retry.
 func (s *Store) WriteBatch(ctx context.Context, entries []store.Entry) ([]store.IssueOutcome, error) {
 	byProject := map[int64][]segment.Row{}
 	for i := range entries {
@@ -41,11 +57,13 @@ func (s *Store) WriteBatch(ctx context.Context, entries []store.Entry) ([]store.
 			return nil, err
 		}
 		ps.mu.Lock()
-		if err := ps.wal.Append(rows); err == nil {
-			err = ps.wal.Sync()
-		} else {
+		if err := ps.wal.Append(rows); err != nil {
 			ps.mu.Unlock()
 			return nil, fmt.Errorf("enginestore: wal append: %w", err)
+		}
+		if err := ps.wal.Sync(); err != nil {
+			ps.mu.Unlock()
+			return nil, fmt.Errorf("enginestore: wal sync: %w", err)
 		}
 		ps.mem.Append(rows)
 		need := ps.mem.Len() >= s.opts.FlushRows
@@ -128,7 +146,7 @@ func (s *Store) flushProject(projectID int64) error {
 		// The file exists but the manifest doesn't know it: remove the
 		// orphan so a retry doesn't collide, keep memtable+WAL intact.
 		_ = os.Remove(abs)
-		return err
+		return fmt.Errorf("enginestore: insert segment manifest: %w", err)
 	}
 	if err := s.DB.AddRollups(context.Background(), rollupsFrom(projectID, rows)); err != nil {
 		slog.Error("enginestore: rollup update failed (counts will undercount)", "error", err)

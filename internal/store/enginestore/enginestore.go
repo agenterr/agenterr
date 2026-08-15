@@ -56,6 +56,13 @@ type projState struct {
 // Open opens the SQLite metadata store at dbPath, prepares the engine
 // data directory beside it, replays per-project WALs (deduping rows the
 // manifest already covers), and starts the background flush ticker.
+//
+// The engine data directory (filepath.Dir(dbPath)/engine) is owned by a
+// single Store within a single process. Opening a second live Store over
+// the same dbPath concurrently is unsupported: both instances would mint
+// overlapping LogIDs and segment file names, corrupting the manifest.
+// (Reopening after a prior Store's Close is fine — that is the recovery
+// path this function implements.)
 func Open(dbPath string, opts Options) (*Store, error) {
 	if opts.FlushRows <= 0 {
 		opts.FlushRows = 64_000
@@ -188,12 +195,21 @@ func (s *Store) Close() error {
 	s.wg.Wait()
 	err := s.FlushAll()
 	s.mu.Lock()
+	pss := make([]*projState, 0, len(s.projects))
 	for _, ps := range s.projects {
+		pss = append(pss, ps)
+	}
+	s.mu.Unlock()
+	// Each WAL's own mutex is acquired around its Close so an in-flight
+	// WriteBatch holding ps.mu (Append/Sync) can never race a concurrent
+	// Close on the same *engine.WAL.
+	for _, ps := range pss {
+		ps.mu.Lock()
 		if cerr := ps.wal.Close(); cerr != nil && err == nil {
 			err = cerr
 		}
+		ps.mu.Unlock()
 	}
-	s.mu.Unlock()
 	if cerr := s.DB.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
