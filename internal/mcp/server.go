@@ -1,4 +1,4 @@
-// Package mcp is Agenterr's MCP edge — seventeen token-frugal tools served
+// Package mcp is Agenterr's MCP edge — eighteen token-frugal tools served
 // over Streamable HTTP at /mcp. It reads via store.Reader and administers
 // via store.Admin (issue status transitions, project listing),
 // store.NoiseRules (rule listing), and store.AlertRules (rule listing);

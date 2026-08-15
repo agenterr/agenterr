@@ -129,6 +129,32 @@ type AggregateRow struct {
 	Events int64
 }
 
+// EngineStats summarizes a template-storage-engine backend's segment and
+// row bookkeeping for a project: how much data lives in immutable
+// segments (Segments, Rows, RawRows, SizeBytes — all manifest totals) and
+// how much is still sitting in the unflushed memtable (MemRows). Rate and
+// per-record derivations (raw-fallback %, bytes/record) are computed by
+// presentation layers from these raw fields, not stored here.
+type EngineStats struct {
+	Segments  int64
+	Rows      int64
+	RawRows   int64
+	SizeBytes int64
+	MemRows   int64
+}
+
+// EngineMetrics is an optional capability a Reader backend may implement
+// to expose engine-level storage metrics (segment counts, raw-template
+// fallback rows, on-disk bytes, unflushed rows). Only the template
+// storage engine backend (enginestore) implements it; callers that need
+// this data (the MCP get_stats tool, the REST /api/v1/stats route) do a
+// checked type assertion against store.Reader and simply omit the block
+// when it's absent, rather than requiring every Reader implementation
+// (including test fakes) to carry it.
+type EngineMetrics interface {
+	EngineStats(ctx context.Context, projectID int64) (EngineStats, error)
+}
+
 // Admin manages projects, issue status, and API keys.
 type Admin interface {
 	CreateProject(ctx context.Context, name string, retentionDays int) (core.Project, error)

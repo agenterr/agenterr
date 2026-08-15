@@ -300,6 +300,67 @@ func renderStats(st store.Stats) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderEngineBlock renders get_stats's optional engine block: segment
+// count, stored (flushed) rows, the raw-template-fallback percentage,
+// average bytes per stored record, and unflushed (memtable) rows. Rate
+// and bytes/record are guarded against a zero Rows denominator (nothing
+// flushed yet) rather than dividing by zero.
+func renderEngineBlock(es store.EngineStats) string {
+	return fmt.Sprintf("engine: segments=%d stored_rows=%d raw_fallback=%.1f%% bytes_per_record=%.1f unflushed_rows=%d",
+		es.Segments, es.Rows, rawFallbackPct(es), bytesPerRecord(es), es.MemRows)
+}
+
+// rawFallbackPct is the percentage of stored (flushed) rows that fell
+// back to raw storage (no template match), 0 when nothing has flushed.
+func rawFallbackPct(es store.EngineStats) float64 {
+	if es.Rows == 0 {
+		return 0
+	}
+	return float64(es.RawRows) / float64(es.Rows) * 100
+}
+
+// bytesPerRecord is average on-disk bytes per stored (flushed) row, 0
+// when nothing has flushed.
+func bytesPerRecord(es store.EngineStats) float64 {
+	if es.Rows == 0 {
+		return 0
+	}
+	return float64(es.SizeBytes) / float64(es.Rows)
+}
+
+// renderAggregate renders aggregate_logs's compact table: a header count
+// line followed by one KEY/LOGS/EVENTS row per bucket, in the order
+// store.Reader.Aggregate already returned them (service by Logs desc,
+// severity by numeric Key desc, hour/day by Key asc — Aggregate's
+// contract, not re-sorted here). Severity keys (decimal severity
+// numbers) render as their canonical name via core.Severity; every other
+// group_by's Key is already the display value.
+func renderAggregate(rows []store.AggregateRow, groupBy string) string {
+	lines := make([]string, 0, len(rows)+2)
+	lines = append(lines, fmt.Sprintf("%d rows (group_by=%s):", len(rows), groupBy))
+	lines = append(lines, "KEY LOGS EVENTS")
+	for _, r := range rows {
+		lines = append(lines, fmt.Sprintf("%s %d %d", aggregateKeyLabel(groupBy, r.Key), r.Logs, r.Events))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// aggregateKeyLabel renders one AggregateRow.Key for display. For
+// group_by=severity, Key is core.Severity's decimal string form; an
+// unparseable key (shouldn't happen, but never worth failing the whole
+// render over) falls back to the raw key rather than panicking or
+// erroring.
+func aggregateKeyLabel(groupBy, key string) string {
+	if groupBy != "severity" {
+		return key
+	}
+	n, err := strconv.Atoi(key)
+	if err != nil {
+		return key
+	}
+	return core.Severity(n).String()
+}
+
 // Payload caps that keep a single tool result within a token-frugal
 // budget even when the underlying log body or stack trace is huge (a
 // multi-KB panic dump, a giant JSON blob logged as the body, etc).
