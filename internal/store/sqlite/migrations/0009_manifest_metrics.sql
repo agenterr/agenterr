@@ -1,0 +1,2 @@
+ALTER TABLE segment_manifest ADD COLUMN raw_rows INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE segment_manifest ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;
