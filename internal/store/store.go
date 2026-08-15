@@ -96,9 +96,11 @@ type Reader interface {
 	// Aggregate groups a project's log volume by service, severity,
 	// hour, or day (f.GroupBy), covering both flushed and unflushed
 	// data. f.ProjectID must be non-zero; there is no "all projects"
-	// mode. Ordering: service by Logs descending (ties by Key
-	// ascending); severity by numeric Key descending (most severe
-	// first); hour/day by Key ascending.
+	// mode. Windows are hour-granular: Since/Until are truncated to the
+	// hour (Until inclusive of its full hour) — the rollup bucket size.
+	// Ordering: service by Logs descending (ties by Key ascending);
+	// severity by numeric Key descending (most severe first); hour/day
+	// by Key ascending.
 	Aggregate(ctx context.Context, f AggregateFilter) ([]AggregateRow, error)
 }
 

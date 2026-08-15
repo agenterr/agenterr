@@ -510,3 +510,49 @@ func TestAggregate(t *testing.T) {
 		t.Error("ProjectID 0 must error (documented)")
 	}
 }
+
+// TestAggregateHourGranularWindowsCongruentAcrossFlush pins that
+// non-hour-aligned Since/Until produce the same result whether the
+// underlying rows are still in the memtable or have been flushed to
+// rollups — the two paths must agree on the same (truncated-hour)
+// window, not just on data that happens to align to the hour.
+func TestAggregateHourGranularWindowsCongruentAcrossFlush(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// Since=10:30 truncates down to hour 10; Until=12:10 truncates down
+	// to hour 12 and extends to that hour's end — so the effective
+	// window covers hours [10, 13), i.e. up to but not including 13:00.
+	since := base.Add(10*time.Hour + 30*time.Minute)
+	until := base.Add(12*time.Hour + 10*time.Minute)
+	entries := []store.Entry{
+		logEntry(p.ID, "r1", "svc", base.Add(10*time.Hour+15*time.Minute)), // hour 10: in window
+		logEntry(p.ID, "r2", "svc", base.Add(10*time.Hour+45*time.Minute)), // hour 10: in window
+		logEntry(p.ID, "r3", "svc", base.Add(12*time.Hour+30*time.Minute)), // hour 12: in window (until's hour is inclusive)
+		logEntry(p.ID, "r4", "svc", base.Add(13*time.Hour+5*time.Minute)),  // hour 13: outside window
+	}
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
+		t.Fatal(err)
+	}
+
+	assertLogs := func(t *testing.T, want int64) {
+		t.Helper()
+		rows, err := s.Aggregate(ctx, store.AggregateFilter{ProjectID: p.ID, Since: since, Until: until, GroupBy: "service"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var total int64
+		for _, r := range rows {
+			total += r.Logs
+		}
+		if total != want {
+			t.Fatalf("logs = %d, want %d (%+v)", total, want, rows)
+		}
+	}
+
+	assertLogs(t, 3) // all four rows still unflushed (memtable path)
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+	assertLogs(t, 3) // same rows now flushed (rollup path) — must agree
+}
