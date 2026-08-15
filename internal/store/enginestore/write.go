@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/segment"
 	"github.com/agenterr/agenterr/internal/store"
 	sqlitestore "github.com/agenterr/agenterr/internal/store/sqlite"
@@ -174,98 +173,4 @@ func rollupsFrom(projectID int64, rows []segment.Row) map[sqlitestore.RollupKey]
 		out[k] = a
 	}
 	return out
-}
-
-// SearchLogs (minimal, Task-2 scope): project + time filters only —
-// Task 3 replaces this with the full implementation.
-func (s *Store) SearchLogs(ctx context.Context, f store.LogFilter) ([]core.Log, error) {
-	rows, err := s.collectRows(ctx, f.ProjectID, f.Since, f.Until, "")
-	if err != nil {
-		return nil, err
-	}
-	out := make([]core.Log, 0, len(rows))
-	for _, r := range rows {
-		l, err := s.rowToLog(f.ProjectID, r)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, l)
-	}
-	return out, nil
-}
-
-// collectRows returns all rows for a project across the memtable and
-// every manifest segment overlapping [since, until] (zero times = no
-// bound), optionally filtered by service via segment footers.
-func (s *Store) collectRows(ctx context.Context, projectID int64, since, until time.Time, service string) ([]segment.Row, error) {
-	var out []segment.Row
-	sinceM, untilM := int64(-1<<62), int64(1<<62)
-	if !since.IsZero() {
-		sinceM = since.UTC().UnixMicro()
-	}
-	if !until.IsZero() {
-		untilM = until.UTC().UnixMicro()
-	}
-	segs, err := s.DB.Segments(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	for _, m := range segs {
-		if m.MaxTs < sinceM || m.MinTs > untilM {
-			continue
-		}
-		if service != "" && !contains(m.Services, service) {
-			continue
-		}
-		_, rows, err := segment.Read(filepath.Join(s.dir, m.Path))
-		if err != nil {
-			return nil, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
-		}
-		for _, r := range rows {
-			if r.TsMicros >= sinceM && r.TsMicros <= untilM {
-				out = append(out, r)
-			}
-		}
-	}
-	ps, err := s.proj(projectID)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range ps.mem.Snapshot() {
-		if r.TsMicros >= sinceM && r.TsMicros <= untilM {
-			out = append(out, r)
-		}
-	}
-	return out, nil
-}
-
-func contains(ss []string, s string) bool {
-	for _, v := range ss {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
-// rowToLog reconstructs the core.Log a row represents.
-func (s *Store) rowToLog(projectID int64, r segment.Row) (core.Log, error) {
-	body := r.Raw
-	if r.TemplateID != 0 {
-		var ok bool
-		body, ok = s.ex.Reconstruct(projectID, r.TemplateID, r.Vars)
-		if !ok {
-			return core.Log{}, fmt.Errorf("enginestore: template %d missing for log %d", r.TemplateID, r.LogID)
-		}
-	}
-	var attrs map[string]string
-	if err := json.Unmarshal([]byte(r.Attrs), &attrs); err != nil {
-		return core.Log{}, fmt.Errorf("enginestore: attrs for log %d: %w", r.LogID, err)
-	}
-	return core.Log{
-		ID: r.LogID, ProjectID: projectID, Time: time.UnixMicro(r.TsMicros).UTC(),
-		Severity: core.Severity(r.Severity), Body: body,
-		Service: r.Service, Environment: r.Environment,
-		Release: r.Release, TraceID: r.TraceID, Attrs: attrs,
-	}, nil
 }
