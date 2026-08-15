@@ -13,7 +13,7 @@ import (
 
 	"github.com/agenterr/agenterr/internal/alerts"
 	"github.com/agenterr/agenterr/internal/core"
-	"github.com/agenterr/agenterr/internal/store/sqlite"
+	"github.com/agenterr/agenterr/internal/store/enginestore"
 )
 
 // TestStopWaitsForAlertDelivery pins register's OnStop ordering (see
@@ -35,7 +35,7 @@ func TestStopWaitsForAlertDelivery(t *testing.T) {
 
 	cfg := testConfig(t, "test-admin-password")
 
-	var db *sqlite.DB
+	var db *enginestore.Store
 	var engine *alerts.Engine
 	app := fxtest.New(t,
 		Module,

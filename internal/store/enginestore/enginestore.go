@@ -42,8 +42,10 @@ type Store struct {
 
 	nextLogID atomic.Int64
 
-	stop chan struct{}
-	wg   sync.WaitGroup
+	stop      chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type projState struct {
@@ -189,29 +191,35 @@ func (s *Store) FlushAll() error {
 }
 
 // Close stops the flush loop, flushes everything, closes WALs, and
-// closes the metadata DB.
+// closes the metadata DB. It is safe to call more than once — every call
+// after the first is a no-op that returns the first call's result — since
+// callers such as a health check probing "is the store still usable" may
+// reasonably close it independently of the owning lifecycle hook.
 func (s *Store) Close() error {
-	close(s.stop)
-	s.wg.Wait()
-	err := s.FlushAll()
-	s.mu.Lock()
-	pss := make([]*projState, 0, len(s.projects))
-	for _, ps := range s.projects {
-		pss = append(pss, ps)
-	}
-	s.mu.Unlock()
-	// Each WAL's own mutex is acquired around its Close so an in-flight
-	// WriteBatch holding ps.mu (Append/Sync) can never race a concurrent
-	// Close on the same *engine.WAL.
-	for _, ps := range pss {
-		ps.mu.Lock()
-		if cerr := ps.wal.Close(); cerr != nil && err == nil {
+	s.closeOnce.Do(func() {
+		close(s.stop)
+		s.wg.Wait()
+		err := s.FlushAll()
+		s.mu.Lock()
+		pss := make([]*projState, 0, len(s.projects))
+		for _, ps := range s.projects {
+			pss = append(pss, ps)
+		}
+		s.mu.Unlock()
+		// Each WAL's own mutex is acquired around its Close so an in-flight
+		// WriteBatch holding ps.mu (Append/Sync) can never race a concurrent
+		// Close on the same *engine.WAL.
+		for _, ps := range pss {
+			ps.mu.Lock()
+			if cerr := ps.wal.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
+			ps.mu.Unlock()
+		}
+		if cerr := s.DB.Close(); cerr != nil && err == nil {
 			err = cerr
 		}
-		ps.mu.Unlock()
-	}
-	if cerr := s.DB.Close(); cerr != nil && err == nil {
-		err = cerr
-	}
-	return err
+		s.closeErr = err
+	})
+	return s.closeErr
 }

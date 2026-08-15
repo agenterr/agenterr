@@ -31,7 +31,7 @@ type IssueFilter struct {
 // LogFilter narrows a SearchLogs query.
 type LogFilter struct {
 	ProjectID    int64
-	Query        string // FTS match on body; "" = all
+	Query        string // substring match on body; "" = all
 	MinSeverity  core.Severity
 	Service      string
 	Environment  string

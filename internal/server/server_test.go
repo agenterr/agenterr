@@ -24,19 +24,19 @@ import (
 	"github.com/agenterr/agenterr/internal/pipeline"
 	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
-	"github.com/agenterr/agenterr/internal/store/sqlite"
+	"github.com/agenterr/agenterr/internal/store/enginestore"
 	"github.com/agenterr/agenterr/internal/web"
 )
 
-// newTestDeps constructs a full Deps over a real temp-file sqlite store and
-// the real edges, mirroring how cmd/agenterr will wire things. This is a
-// composition test, not a re-test of each edge's own behavior.
-func newTestDeps(t *testing.T) (Deps, *sqlite.DB) {
+// newTestDeps constructs a full Deps over a real temp-dir template storage
+// engine and the real edges, mirroring how cmd/agenterr will wire things.
+// This is a composition test, not a re-test of each edge's own behavior.
+func newTestDeps(t *testing.T) (Deps, *enginestore.Store) {
 	t.Helper()
 
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := enginestore.Open(filepath.Join(t.TempDir(), "test.db"), enginestore.Options{})
 	if err != nil {
-		t.Fatalf("sqlite.Open: %v", err)
+		t.Fatalf("enginestore.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -274,4 +274,4 @@ func TestRequestLogMiddleware(t *testing.T) {
 	}
 }
 
-var _ store.Store = (*sqlite.DB)(nil)
+var _ store.Store = (*enginestore.Store)(nil)

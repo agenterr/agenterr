@@ -5,20 +5,13 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/store"
 )
-
-const insertLog = `
-INSERT INTO logs (project_id, ts, severity, body, service, environment, release, trace_id, attrs)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 const upsertIssue = `
 INSERT INTO issues (project_id, fingerprint, title, severity, status, first_seen, last_seen, count)
@@ -34,117 +27,8 @@ SELECT id FROM issues WHERE project_id = ? AND fingerprint = ?`
 const selectIssueStatusByFingerprint = `
 SELECT status FROM issues WHERE project_id = ? AND fingerprint = ?`
 
-const setLogIssueID = `UPDATE logs SET issue_id = ? WHERE id = ?`
-
-const insertEvent = `INSERT INTO events (issue_id, log_id, ts) VALUES (?, ?, ?)`
-
-const trimEvents = `
-DELETE FROM events WHERE issue_id = ? AND id NOT IN (
-  SELECT id FROM events WHERE issue_id = ? ORDER BY ts DESC, id DESC LIMIT 50
-)`
-
 const insertKey = `
 INSERT INTO keys (project_id, kind, hash, prefix, created_at) VALUES (?, ?, ?, ?, ?)`
-
-// WriteBatch persists entries and atomically upserts any associated issues.
-// See store.Writer for the full semantics contract.
-func (db *DB) WriteBatch(ctx context.Context, entries []store.Entry) ([]store.IssueOutcome, error) {
-	tx, err := db.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: begin tx: %w", err)
-	}
-	// Rollback error is unactionable: after a successful Commit it is
-	// always sql.ErrTxDone, and on any earlier failure we already return
-	// the real error.
-	defer func() { _ = tx.Rollback() }()
-
-	var outcomes []store.IssueOutcome
-
-	for _, e := range entries {
-		outcome, err := writeEntry(ctx, tx, e)
-		if err != nil {
-			return nil, err
-		}
-		if outcome != nil {
-			outcomes = append(outcomes, *outcome)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("sqlite: commit: %w", err)
-	}
-	return outcomes, nil
-}
-
-// writeEntry inserts one log row within tx and, if e.IsEvent, upserts its
-// issue and returns the resulting IssueOutcome. Non-event entries return
-// (nil, nil) — WriteBatch only appends to outcomes when the result is
-// non-nil.
-func writeEntry(ctx context.Context, tx *sql.Tx, e store.Entry) (*store.IssueOutcome, error) {
-	attrsJSON, err := json.Marshal(e.Log.Attrs)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: marshal attrs: %w", err)
-	}
-	ts := e.Log.Time.UTC().Format(time.RFC3339Nano)
-
-	res, err := tx.ExecContext(ctx, insertLog,
-		e.Log.ProjectID, ts, int(e.Log.Severity), e.Log.Body,
-		e.Log.Service, e.Log.Environment, e.Log.Release, e.Log.TraceID, string(attrsJSON))
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: insert log: %w", err)
-	}
-	logID, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: log last insert id: %w", err)
-	}
-
-	if !e.IsEvent {
-		return nil, nil
-	}
-
-	// Read the issue's status before the upsert, inside this same
-	// transaction: that's the only way to tell "first sight" (no row)
-	// apart from "was resolved" (row, status='resolved') apart from
-	// "already open/ignored" (row, other status) — the upsert itself
-	// only tells us insert-vs-update, not what the prior status was.
-	var prevStatus string
-	err = tx.QueryRowContext(ctx, selectIssueStatusByFingerprint, e.Log.ProjectID, e.Fingerprint).Scan(&prevStatus)
-	existed := true
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		existed = false
-	case err != nil:
-		return nil, fmt.Errorf("sqlite: select issue status: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, upsertIssue,
-		e.Log.ProjectID, e.Fingerprint, e.Title, int(e.Log.Severity), ts, ts); err != nil {
-		return nil, fmt.Errorf("sqlite: upsert issue: %w", err)
-	}
-
-	var issueID int64
-	if err := tx.QueryRowContext(ctx, selectIssueIDByFingerprint, e.Log.ProjectID, e.Fingerprint).Scan(&issueID); err != nil {
-		return nil, fmt.Errorf("sqlite: select issue id: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, setLogIssueID, issueID, logID); err != nil {
-		return nil, fmt.Errorf("sqlite: set log issue id: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, insertEvent, issueID, logID, ts); err != nil {
-		return nil, fmt.Errorf("sqlite: insert event: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, trimEvents, issueID, issueID); err != nil {
-		return nil, fmt.Errorf("sqlite: trim events: %w", err)
-	}
-
-	return &store.IssueOutcome{
-		IssueID:  issueID,
-		New:      !existed,
-		Reopened: existed && prevStatus == string(core.StatusResolved),
-	}, nil
-}
 
 // MintKey generates a new high-entropy API key of the form
 // agt_<kind>_<32 base64url chars>, stores its bcrypt hash plus a 12-char

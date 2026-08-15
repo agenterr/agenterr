@@ -31,7 +31,7 @@ import (
 	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/server"
 	"github.com/agenterr/agenterr/internal/store"
-	"github.com/agenterr/agenterr/internal/store/sqlite"
+	"github.com/agenterr/agenterr/internal/store/enginestore"
 	"github.com/agenterr/agenterr/internal/web"
 )
 
@@ -84,24 +84,26 @@ func loadConfig() (config.Config, error) {
 	return config.Load(os.Args[1:], os.Getenv)
 }
 
-// openDB opens the sqlite store at cfg.DBPath. Migrations run inside
-// sqlite.Open itself, so there is nothing left to do here beyond
-// extracting the path from cfg.
-func openDB(cfg config.Config) (*sqlite.DB, error) {
-	return sqlite.Open(cfg.DBPath)
+// openDB opens the template storage engine at cfg.DBPath (metadata in
+// SQLite, log bodies in per-project WAL/segments). Migrations run inside
+// enginestore.Open itself, so there is nothing left to do here beyond
+// extracting the path from cfg. Options{} selects production defaults for
+// flush thresholds.
+func openDB(cfg config.Config) (*enginestore.Store, error) {
+	return enginestore.Open(cfg.DBPath, enginestore.Options{})
 }
 
-// asStore, asReader, asWriter, asAdmin each adapt the single *sqlite.DB
-// instance to a narrower store interface for consumers that only need
-// that slice of behavior. They all close over the same *sqlite.DB — dig
-// caches openDB's result, so this does not open the database more than
-// once.
-func asStore(db *sqlite.DB) store.Store           { return db }
-func asReader(db *sqlite.DB) store.Reader         { return db }
-func asWriter(db *sqlite.DB) store.Writer         { return db }
-func asAdmin(db *sqlite.DB) store.Admin           { return db }
-func asNoiseRules(db *sqlite.DB) store.NoiseRules { return db }
-func asAlertRules(db *sqlite.DB) store.AlertRules { return db }
+// asStore, asReader, asWriter, asAdmin each adapt the single
+// *enginestore.Store instance to a narrower store interface for consumers
+// that only need that slice of behavior. They all close over the same
+// *enginestore.Store — dig caches openDB's result, so this does not open
+// the database more than once.
+func asStore(db *enginestore.Store) store.Store           { return db }
+func asReader(db *enginestore.Store) store.Reader         { return db }
+func asWriter(db *enginestore.Store) store.Writer         { return db }
+func asAdmin(db *enginestore.Store) store.Admin           { return db }
+func asNoiseRules(db *enginestore.Store) store.NoiseRules { return db }
+func asAlertRules(db *enginestore.Store) store.AlertRules { return db }
 
 // asSessionAuth adapts *auth.Auth to the auth.SessionAuth interface
 // web.New depends on.
@@ -178,7 +180,7 @@ const settingAdminPasswordHash = "admin_password_hash"
 //  3. Neither: this is the very first boot. Generate a password, hash
 //     it, persist the hash, and return the plaintext so register can
 //     print it once.
-func newAuth(cfg config.Config, db *sqlite.DB) (*auth.Auth, generatedCreds, error) {
+func newAuth(cfg config.Config, db *enginestore.Store) (*auth.Auth, generatedCreds, error) {
 	ctx := context.Background()
 
 	if cfg.AdminPassword != "" {
