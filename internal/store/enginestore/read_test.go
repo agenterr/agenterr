@@ -186,6 +186,39 @@ func TestLogContextTiesIncludeTarget(t *testing.T) {
 	}
 }
 
+func TestPruneStraddlingSegment(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cutoff := old.Add(24 * time.Hour)
+	fresh := old.Add(48 * time.Hour)
+	if _, err := s.WriteBatch(ctx, []store.Entry{
+		logEntry(p.ID, "old one", "api", old),
+		logEntry(p.ID, "old two", "api", old.Add(time.Hour)),
+		logEntry(p.ID, "new one", "api", fresh),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil { // one segment straddles the cutoff
+		t.Fatal(err)
+	}
+	n, err := s.Prune(ctx, p.ID, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("pruned %d, want 2", n)
+	}
+	logs, _ := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID})
+	if len(logs) != 1 || logs[0].Body != "new one" {
+		t.Fatalf("after prune: %+v", logs)
+	}
+	segs, _ := s.DB.Segments(ctx, p.ID)
+	if len(segs) != 1 || segs[0].Count != 1 {
+		t.Fatalf("manifest after prune: %+v", segs)
+	}
+}
+
 // TestSearchLogsNoDuplicatesDuringConcurrentFlush guards the
 // collectRows/logByID coherence fix: a flush concurrent with a read must
 // never produce a result set where the same LogID appears twice (seen
