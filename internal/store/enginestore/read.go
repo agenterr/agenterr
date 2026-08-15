@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -533,6 +534,89 @@ func (s *Store) Issues(ctx context.Context, f store.IssueFilter) ([]core.Issue, 
 		}
 	}
 	return out, nil
+}
+
+// Aggregate groups a project's log volume by service, severity, hour,
+// or day — flushed rollups plus the unflushed memtable, so results are
+// exact and immediate. ProjectID must be non-zero.
+func (s *Store) Aggregate(ctx context.Context, f store.AggregateFilter) ([]store.AggregateRow, error) {
+	if f.ProjectID == 0 {
+		return nil, fmt.Errorf("enginestore: aggregate requires a project")
+	}
+	agg, err := s.RollupAggregate(ctx, f.ProjectID, f.Since, f.Until, f.GroupBy)
+	if err != nil {
+		return nil, err
+	}
+	buckets := map[string]sqlitestore.RollupAgg{}
+	for k, v := range agg {
+		buckets[k] = v
+	}
+	if ps := s.readProj(f.ProjectID); ps != nil {
+		sinceM, untilM := boundsMicros(f.Since, f.Until)
+		for _, r := range ps.mem.Snapshot() {
+			if r.TsMicros < sinceM || r.TsMicros > untilM {
+				continue
+			}
+			k, err := memKey(f.GroupBy, r)
+			if err != nil {
+				return nil, err
+			}
+			b := buckets[k]
+			b.Logs++
+			if r.IsEvent {
+				b.Events++
+			}
+			buckets[k] = b
+		}
+	}
+	return orderAggregate(f.GroupBy, buckets), nil
+}
+
+// memKey computes the same bucket key RollupAggregate's SQL uses, for a
+// single unflushed memtable row — service name, decimal severity, or an
+// hour/day formatted from the row's UTC timestamp.
+func memKey(groupBy string, r segment.Row) (string, error) {
+	switch groupBy {
+	case "service":
+		return r.Service, nil
+	case "severity":
+		return strconv.Itoa(r.Severity), nil
+	case "hour":
+		return time.UnixMicro(r.TsMicros).UTC().Format("2006-01-02T15"), nil
+	case "day":
+		return time.UnixMicro(r.TsMicros).UTC().Format("2006-01-02"), nil
+	default:
+		return "", fmt.Errorf("enginestore: unknown aggregate groupBy %q", groupBy)
+	}
+}
+
+// orderAggregate flattens buckets into rows in the ordering Aggregate
+// promises: service by Logs descending (ties by Key ascending); severity
+// by numeric Key descending (most severe first); hour/day by Key
+// ascending.
+func orderAggregate(groupBy string, buckets map[string]sqlitestore.RollupAgg) []store.AggregateRow {
+	out := make([]store.AggregateRow, 0, len(buckets))
+	for k, v := range buckets {
+		out = append(out, store.AggregateRow{Key: k, Logs: v.Logs, Events: v.Events})
+	}
+	switch groupBy {
+	case "service":
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].Logs != out[j].Logs {
+				return out[i].Logs > out[j].Logs
+			}
+			return out[i].Key < out[j].Key
+		})
+	case "severity":
+		sort.Slice(out, func(i, j int) bool {
+			a, _ := strconv.Atoi(out[i].Key)
+			b, _ := strconv.Atoi(out[j].Key)
+			return a > b
+		})
+	default: // "hour", "day"
+		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	}
+	return out
 }
 
 // maxIssueScan bounds the unfiltered fetch Issues performs before

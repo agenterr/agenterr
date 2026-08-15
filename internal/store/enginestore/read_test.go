@@ -3,6 +3,7 @@ package enginestore
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -461,5 +462,51 @@ func TestReadsCreateNoEngineState(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(dir, "engine", "wal"))
 	if len(entries) != 0 {
 		t.Fatalf("wal dir not empty after pure reads: %v", entries)
+	}
+}
+
+func TestAggregate(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	at := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	if _, err := s.WriteBatch(ctx, []store.Entry{
+		logEntry(p.ID, "a one", "api", at),
+		logEntry(p.ID, "a two", "api", at.Add(30*time.Minute)),
+		logEntry(p.ID, "b one", "web", at.Add(2*time.Hour)),
+		{Log: core.Log{ProjectID: p.ID, Time: at.Add(3 * time.Hour), Severity: core.SeverityError,
+			Body: "boom", Service: "api"}, IsEvent: true, Fingerprint: "f", Title: "boom"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Split flushed/unflushed to prove the merge.
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "late", "api", at.Add(4*time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.Aggregate(ctx, store.AggregateFilter{ProjectID: p.ID, Since: at.Add(-time.Hour), GroupBy: "service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Key != "api" || rows[0].Logs != 4 || rows[0].Events != 1 || rows[1].Key != "web" {
+		t.Fatalf("service: %+v", rows)
+	}
+	byHour, _ := s.Aggregate(ctx, store.AggregateFilter{ProjectID: p.ID, Since: at.Add(-time.Hour), GroupBy: "hour"})
+	if len(byHour) != 4 || byHour[0].Key != "2026-01-01T10" || byHour[0].Logs != 2 {
+		t.Fatalf("hour: %+v", byHour)
+	}
+	bySev, _ := s.Aggregate(ctx, store.AggregateFilter{ProjectID: p.ID, Since: at.Add(-time.Hour), GroupBy: "severity"})
+	// core.Severity is an internal int8 enum (SeverityError = 4), not the
+	// OTLP wire encoding — the most-severe bucket sorts first.
+	if bySev[0].Key != strconv.Itoa(int(core.SeverityError)) || bySev[0].Logs != 1 {
+		t.Fatalf("severity ordering: %+v", bySev)
+	}
+	if _, err := s.Aggregate(ctx, store.AggregateFilter{ProjectID: p.ID, GroupBy: "nope"}); err == nil {
+		t.Error("unknown groupBy must error")
+	}
+	if _, err := s.Aggregate(ctx, store.AggregateFilter{ProjectID: 0, GroupBy: "service"}); err == nil {
+		t.Error("ProjectID 0 must error (documented)")
 	}
 }

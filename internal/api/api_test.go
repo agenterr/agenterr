@@ -164,6 +164,11 @@ func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]st
 	return f.serviceCounts, nil
 }
 
+// Aggregate is unused in these tests.
+func (f *fakeStore) Aggregate(_ context.Context, _ store.AggregateFilter) ([]store.AggregateRow, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) NoiseRules(_ context.Context, projectID int64) ([]store.NoiseRuleRow, error) {
 	ids := make([]int64, 0, len(f.rules))
 	for id := range f.rules {

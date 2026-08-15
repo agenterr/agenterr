@@ -62,6 +62,11 @@ func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]st
 	return nil, nil
 }
 
+// Aggregate is unused in these tests.
+func (f *fakeStore) Aggregate(_ context.Context, _ store.AggregateFilter) ([]store.AggregateRow, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	return core.Project{}, errors.New("unused")
 }
