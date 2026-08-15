@@ -3,6 +3,7 @@ package enginestore
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -144,6 +145,50 @@ func TestCompactSkipsCurrentHour(t *testing.T) {
 	}
 	if segs, _ := s.Segments(ctx, p.ID); len(segs) != 2 {
 		t.Errorf("current-hour segments must not compact: %+v", segs)
+	}
+}
+
+// TestCompactAllStopsBetweenBuckets is M5's regression case: CompactAll
+// must notice s.stop closing partway through a multi-bucket pass and
+// return promptly (nil, not an error) instead of grinding through every
+// remaining project/bucket first — otherwise Close() (which waits on the
+// compaction goroutine via s.wg) could be delayed by an arbitrarily long
+// pass.
+func TestCompactAllStopsBetweenBuckets(t *testing.T) {
+	// Opened directly (not via openStore/t.Cleanup): this test closes
+	// s.stop itself to simulate a shutdown already in progress, and
+	// Close() would double-close that same channel and panic. Leaving the
+	// store's files open past the end of the test is harmless — they live
+	// under t.TempDir() and are never reopened.
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "agenterr.db"), Options{CompactEvery: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Several distinct past-day buckets, each with 2+ segments, so a full
+	// pass has multiple buckets to work through.
+	for day := 2; day <= 4; day++ {
+		p, _ := s.CreateProject(ctx, "p", 30)
+		base := time.Now().UTC().AddDate(0, 0, -day).Truncate(24 * time.Hour).Add(6 * time.Hour)
+		for i := 0; i < 2; i++ {
+			if _, err := s.WriteBatch(context.Background(), []store.Entry{
+				logEntry(p.ID, "row", "api", base.Add(time.Duration(i)*time.Minute)),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.FlushAll(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Simulate Close() having already signaled shutdown: close s.stop
+	// directly (Close itself would also flush/close WALs, which would
+	// interfere with the segments this test just wrote).
+	close(s.stop)
+
+	if err := s.CompactAll(ctx); err != nil {
+		t.Fatalf("CompactAll after stop closed: %v", err)
 	}
 }
 
