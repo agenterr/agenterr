@@ -19,7 +19,16 @@ import (
 // old files are removed only after commit. Reads stay coherent: the
 // swap and removals run under the project's ps.mu, mirroring flush and
 // prune. Reading the old (immutable) segments happens outside the lock.
+//
+// CompactAll is serialized on s.compactMu: the compaction loop is a
+// single goroutine, but CompactAll is also exported for tests and any
+// other caller, and two concurrent runs would race on the same
+// candidate buckets (and, worse, could pick colliding output paths).
+// Concurrent calls simply run back-to-back — fine at the hourly cadence
+// this is meant for.
 func (s *Store) CompactAll(ctx context.Context) error {
+	s.compactMu.Lock()
+	defer s.compactMu.Unlock()
 	segs, err := s.Segments(ctx, 0)
 	if err != nil {
 		return err
@@ -116,6 +125,13 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 		return err
 	}
 	for _, m := range members {
+		if m.Path == meta.Path {
+			// Should be unreachable now that the output name is unique per
+			// generation (see buildMergedSegment), but this is the file the
+			// new manifest row points at — removing it would strand the
+			// swap we just committed, so skip as a belt-and-braces guard.
+			continue
+		}
 		if err := os.Remove(s.segPath(m.Path)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("enginestore: remove old segment %s: %w", m.Path, err)
 		}
@@ -125,12 +141,26 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 
 // buildMergedSegment reads every member segment (outside any lock — they
 // are immutable) and writes their concatenated rows to a new segment
-// file at segments/<pid>/c-<bucket>-<minLogID>.seg, returning the
-// manifest row ready for ReplaceSegments.
+// file at segments/<pid>/c-<bucket>-<minLogID>-<maxMemberID>.seg,
+// returning the manifest row ready for ReplaceSegments.
+//
+// The name includes both the minimum member LogID and the maximum
+// member MANIFEST id (not LogID): bucket+minLogID alone is a pure
+// function of the bucket's original contents, so when a later,
+// backdated write lands a new segment in an ALREADY-compacted bucket,
+// re-compacting it would recompute the very same minLogID (the earlier
+// merge's own MinLogID, since it is still the smallest) and collide with
+// — i.e. get renamed over — the live, manifest-referenced output of the
+// prior generation, outside ps.mu. Manifest ids are monotonic and every
+// re-compaction includes at least one member (the earlier merged
+// segment, or the new arrival) with a higher id than any previous
+// generation used, so appending the max member id makes the name unique
+// per generation and never equal to a current member's path.
 func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlitestore.SegmentMeta) (sqlitestore.SegmentMeta, error) {
 	var rows []segment.Row
 	var rawRows int64
 	minLogID := members[0].MinLogID
+	maxMemberID := members[0].ID
 	for _, m := range members {
 		_, rs, err := segment.Read(s.segPath(m.Path))
 		if err != nil {
@@ -141,9 +171,12 @@ func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlite
 		if m.MinLogID < minLogID {
 			minLogID = m.MinLogID
 		}
+		if m.ID > maxMemberID {
+			maxMemberID = m.ID
+		}
 	}
 
-	rel := filepath.Join("segments", fmt.Sprintf("%d", projectID), fmt.Sprintf("c-%s-%d.seg", key, minLogID))
+	rel := filepath.Join("segments", fmt.Sprintf("%d", projectID), fmt.Sprintf("c-%s-%d-%d.seg", key, minLogID, maxMemberID))
 	abs := s.segPath(rel)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return sqlitestore.SegmentMeta{}, fmt.Errorf("enginestore: mkdir segment dir: %w", err)

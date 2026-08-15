@@ -63,6 +63,70 @@ func TestCompactMergesPastDayBuckets(t *testing.T) {
 	}
 }
 
+// TestCompactRecompactionAfterLateArrival is the regression case for the
+// filename-collision bug: a past-day bucket compacts once, then a
+// late/backdated write lands a NEW segment in that same already-compacted
+// bucket, and a second compaction must merge them into a fresh file
+// rather than colliding with (and deleting) the live merged segment from
+// the first generation. Before the fix, both generations computed the
+// same "c-<bucket>-<minLogID>.seg" name (min member LogID is unchanged
+// across generations — the first generation's own MinLogID is still the
+// smallest), so the second compaction's segment.Write renamed over the
+// manifest-referenced file from the first generation, and the post-swap
+// removal loop then deleted that very same path out from under the new
+// manifest row.
+func TestCompactRecompactionAfterLateArrival(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{CompactEvery: -1})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	yesterdayBatches(t, s, p.ID)
+	if err := s.CompactAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := s.Segments(ctx, p.ID)
+	if len(segs) != 1 {
+		t.Fatalf("precondition: expected 1 merged segment, got %+v", segs)
+	}
+
+	// A late/backdated write lands one more segment in the SAME past day.
+	late := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour).Add(6*time.Hour + 30*time.Minute)
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "late row", "api", late)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAll(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.CompactAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	segs, err := s.Segments(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) != 1 {
+		t.Fatalf("after re-compaction: expected 1 segment, got %+v", segs)
+	}
+	if _, err := os.Stat(s.segPath(segs[0].Path)); err != nil {
+		t.Errorf("manifest-referenced merged file missing on disk: %v", err)
+	}
+
+	logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 4 {
+		t.Fatalf("post-recompaction read: got %d logs, want 4", len(logs))
+	}
+	seen := map[int64]bool{}
+	for _, l := range logs {
+		if seen[l.ID] {
+			t.Fatalf("duplicate log %d after re-compaction", l.ID)
+		}
+		seen[l.ID] = true
+	}
+}
+
 func TestCompactSkipsCurrentHour(t *testing.T) {
 	s := openStore(t, t.TempDir(), Options{CompactEvery: -1})
 	p, _ := s.CreateProject(ctx, "p", 30)

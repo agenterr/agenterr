@@ -46,6 +46,12 @@ type Store struct {
 	mu       sync.Mutex
 	projects map[int64]*projState
 
+	// compactMu serializes CompactAll: the scheduled compactLoop is a
+	// single goroutine, but CompactAll is exported and callable directly
+	// (tests do this), so a lock is still needed to keep two concurrent
+	// runs from picking colliding bucket/output state.
+	compactMu sync.Mutex
+
 	nextLogID atomic.Int64
 
 	stop      chan struct{}
