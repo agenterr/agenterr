@@ -238,8 +238,8 @@ func (s *Store) LogContext(ctx context.Context, logID int64, n int) ([]core.Log,
 	sort.Slice(before, func(i, j int) bool { return rowLess(before[j], before[i]) })
 	// after: (ts, id) ASC.
 	sort.Slice(after, func(i, j int) bool { return rowLess(after[i], after[j]) })
-	if len(before) > n {
-		before = before[:n]
+	if len(before) > n+1 { // +1: the target itself occupies before[0]
+		before = before[:n+1]
 	}
 	if len(after) > n {
 		after = after[:n]
@@ -372,6 +372,49 @@ func (s *Store) ServiceCounts(ctx context.Context, projectID int64, since time.T
 	}
 	return out, nil
 }
+
+// Issues returns issues matching f, sorted by last_seen descending. Every
+// filter but Environment is delegated to the embedded SQLite store
+// unchanged; Environment is handled here via issue_events instead, since
+// the embedded implementation's environment filter matches against the
+// legacy logs table, which the engine write path never populates.
+func (s *Store) Issues(ctx context.Context, f store.IssueFilter) ([]core.Issue, error) {
+	env := f.Environment
+	if env == "" {
+		return s.DB.Issues(ctx, f)
+	}
+	limit := f.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	unfiltered := f
+	unfiltered.Environment = ""
+	unfiltered.Limit = maxIssueScan
+	issues, err := s.DB.Issues(ctx, unfiltered)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := s.DB.IssueIDsInEnvironment(ctx, f.ProjectID, env)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.Issue, 0, limit)
+	for _, iss := range issues {
+		if !ids[iss.ID] {
+			continue
+		}
+		out = append(out, iss)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// maxIssueScan bounds the unfiltered fetch Issues performs before
+// applying its own Environment filter — generous enough that no
+// realistic project truncates before the filter runs.
+const maxIssueScan = 1_000_000
 
 // Issue returns the issue plus its retained events, newest first, with
 // each event's log resolved from the engine. A ref whose log has been

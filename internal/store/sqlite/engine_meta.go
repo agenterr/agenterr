@@ -294,6 +294,31 @@ DELETE FROM issue_events WHERE issue_id = ? AND id NOT IN (
 	}, nil
 }
 
+// IssueIDsInEnvironment returns the set of issue ids in projectID with at
+// least one retained event sample recorded in environment. It is the
+// engine's substitute for the legacy Issues environment filter, which
+// matches against the logs table — a table the engine write path never
+// populates (log bodies live in segments, not sqlite); issue_events is
+// the engine's own per-event environment record instead.
+func (db *DB) IssueIDsInEnvironment(ctx context.Context, projectID int64, environment string) (map[int64]bool, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT DISTINCT issue_id FROM issue_events WHERE project_id = ? AND environment = ?`,
+		projectID, environment)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: issue ids in environment: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("sqlite: scan issue id: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 // EventRef is one retained event sample: the issue/log linkage without
 // the log body (the engine resolves bodies by LogID).
 type EventRef struct {
