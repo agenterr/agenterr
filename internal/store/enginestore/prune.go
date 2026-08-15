@@ -85,6 +85,17 @@ func (s *Store) dropSegment(ctx context.Context, m sqlitestore.SegmentMeta) erro
 // rewriteSegment replaces m with a copy holding only rows at/after
 // cutoff, returning how many rows were dropped. If nothing survives the
 // filter the segment is simply dropped.
+//
+// The manifest swap (delete m's row, insert the "-pruned" replacement's
+// row) goes through sqlitestore.SwapSegment — one transaction — instead
+// of a separate InsertSegment then DeleteSegment: two separate commits
+// left a crash-between-them window where BOTH manifest rows survived
+// (double-reading whatever rows the rewrite kept, permanently, since the
+// old row was never cleaned up) and wedged retention on retry (see
+// SwapSegment's doc comment). Only the old *file* is removed
+// post-commit, same as dropSegment: a removal failure there is a
+// harmless orphan file with no manifest row pointing at it, not a
+// correctness problem.
 func (s *Store) rewriteSegment(ctx context.Context, m sqlitestore.SegmentMeta, cutoff int64) (int64, error) {
 	_, rows, err := segment.Read(s.segPath(m.Path))
 	if err != nil {
@@ -111,9 +122,12 @@ func (s *Store) rewriteSegment(ctx context.Context, m sqlitestore.SegmentMeta, c
 		MinLogID: foot.MinLogID, MaxLogID: foot.MaxLogID,
 		Count: int64(foot.Count), Events: foot.Events, Services: foot.Services,
 	}
-	if _, err := s.DB.InsertSegment(ctx, meta); err != nil {
+	if _, err := s.DB.SwapSegment(ctx, m.ID, meta); err != nil {
 		_ = os.Remove(s.segPath(rel))
 		return 0, err
 	}
-	return dropped, s.dropSegment(ctx, m)
+	if err := os.Remove(s.segPath(m.Path)); err != nil && !os.IsNotExist(err) {
+		return dropped, fmt.Errorf("enginestore: remove segment: %w", err)
+	}
+	return dropped, nil
 }

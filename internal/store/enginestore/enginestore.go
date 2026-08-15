@@ -9,6 +9,7 @@ package enginestore
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -94,9 +95,19 @@ func Open(dbPath string, opts Options) (*Store, error) {
 	return s, nil
 }
 
-// recover seeds nextLogID from the manifest and replays every WAL file
-// (listed from the directory, never the manifest, so an orphaned WAL is
-// never skipped), deduping rows whose LogID the manifest already covers.
+// recover seeds nextLogID from the manifest, issue_events, and every WAL
+// file (listed from the directory, never the manifest, so an orphaned
+// WAL is never skipped), deduping rows whose LogID the manifest already
+// covers.
+//
+// issue_events is consulted alongside the manifest because pruning can
+// take a project's manifest and WAL both to empty (every segment
+// dropped, WAL reset) while issue_events still holds refs to LogIDs
+// older than any surviving segment — event refs deliberately outlive
+// bodies (spec). Seeding nextLogID from the manifest/WAL alone would let
+// it restart low enough to reissue one of those still-referenced LogIDs
+// to a brand new log, after which the old issue_events row would
+// resolve to the WRONG body.
 func (s *Store) recover(ctx context.Context) error {
 	segs, err := s.DB.Segments(ctx, 0)
 	if err != nil {
@@ -110,6 +121,13 @@ func (s *Store) recover(ctx context.Context) error {
 		if m.MaxLogID > s.nextLogID.Load() {
 			s.nextLogID.Store(m.MaxLogID)
 		}
+	}
+	maxEventLogID, err := s.DB.MaxIssueEventLogID(ctx)
+	if err != nil {
+		return err
+	}
+	if maxEventLogID > s.nextLogID.Load() {
+		s.nextLogID.Store(maxEventLogID)
 	}
 	walFiles, err := filepath.Glob(filepath.Join(s.dir, "wal", "*.wal"))
 	if err != nil {
@@ -168,7 +186,15 @@ func (s *Store) flushLoop() {
 		case <-s.stop:
 			return
 		case <-t.C:
-			_ = s.FlushAll() // errors are logged inside flushProject
+			// FlushAll logs a per-project rollup-update failure itself
+			// (flushProject) but returns the first hard flush error (WAL
+			// reset, segment write, manifest insert) to its caller instead
+			// of logging it — so this ticker path must log it here, or a
+			// recurring flush failure (e.g. a full disk) would run silently
+			// forever.
+			if err := s.FlushAll(); err != nil {
+				slog.Error("enginestore: periodic flush failed", "error", err)
+			}
 		}
 	}
 }

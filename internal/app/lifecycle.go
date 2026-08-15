@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -299,23 +300,32 @@ func retentionTick(ctx context.Context, cfg config.Config, st store.Store) {
 	}
 }
 
-// enforceMaxDBBytes is a last-resort guardrail: if the database file has
-// grown past cfg.MaxDBBytes despite normal per-project retention, prune
-// everything older than a day, across every project, and warn loudly.
-// This is a coarse safety valve, not a precise size target — getting the
-// file back under the cap exactly would require knowing how much space
-// pruning actually frees, which SQLite doesn't reclaim without a VACUUM.
+// enforceMaxDBBytes is a last-resort guardrail: if the database file plus
+// the engine's segment/WAL directory have together grown past
+// cfg.MaxDBBytes despite normal per-project retention, prune everything
+// older than a day, across every project, and warn loudly. This is a
+// coarse safety valve, not a precise size target — getting the total back
+// under the cap exactly would require knowing how much space pruning
+// actually frees, which SQLite doesn't reclaim without a VACUUM, and
+// segment deletion only frees space once the underlying files are
+// removed.
+//
+// The size checked is cfg.DBPath plus the engine data directory
+// (<dir(DBPath)>/engine, matching enginestore.Open's own layout) walked
+// recursively: log bodies live in the engine's segments, not in the
+// SQLite file, so measuring DBPath alone would silently stop guarding
+// against exactly the data this cap exists to bound.
 func enforceMaxDBBytes(ctx context.Context, cfg config.Config, st store.Store, projects []core.Project) {
-	fi, err := os.Stat(cfg.DBPath)
+	total, err := dbAndEngineBytes(cfg.DBPath)
 	if err != nil {
-		return // best-effort: nothing to guard if we can't stat the file
+		return // best-effort: nothing to guard if we can't stat the files
 	}
-	if fi.Size() <= cfg.MaxDBBytes {
+	if total <= cfg.MaxDBBytes {
 		return
 	}
 
 	slog.Warn("app: database exceeds max-db-bytes, pruning oldest day across all projects",
-		"size_bytes", fi.Size(), "max_bytes", cfg.MaxDBBytes)
+		"size_bytes", total, "max_bytes", cfg.MaxDBBytes)
 
 	cutoff := time.Now().UTC().Add(-guardrailWindow)
 	for _, p := range projects {
@@ -323,4 +333,44 @@ func enforceMaxDBBytes(ctx context.Context, cfg config.Config, st store.Store, p
 			slog.Error("app: retention guardrail prune", "project", p.ID, "err", err)
 		}
 	}
+}
+
+// dbAndEngineBytes returns the combined size of the SQLite file at dbPath
+// and every file under its sibling engine data directory
+// (<dir(dbPath)>/engine — segments and WALs), the same layout
+// enginestore.Open constructs. A missing dbPath is an error (nothing to
+// guard); a missing or not-yet-created engine directory is not (a
+// freshly bootstrapped store may not have written anything yet).
+func dbAndEngineBytes(dbPath string) (int64, error) {
+	fi, err := os.Stat(dbPath)
+	if err != nil {
+		return 0, err
+	}
+	total := fi.Size()
+
+	engineDir := filepath.Join(filepath.Dir(dbPath), "engine")
+	err = filepath.WalkDir(engineDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	return total, nil
 }
