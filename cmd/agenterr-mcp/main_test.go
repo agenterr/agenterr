@@ -183,12 +183,12 @@ func TestProxy_ListToolsAndCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 17 {
+	if len(tools.Tools) != 18 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 17: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 18: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -310,8 +310,8 @@ func TestProxy_RemoteErrorPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools after a remote error: %v", err)
 	}
-	if len(tools.Tools) != 17 {
-		t.Fatalf("got %d tools after a remote error, want 17", len(tools.Tools))
+	if len(tools.Tools) != 18 {
+		t.Fatalf("got %d tools after a remote error, want 18", len(tools.Tools))
 	}
 
 	_ = cs.Close()

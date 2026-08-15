@@ -20,12 +20,21 @@ type dayCountDTO struct {
 	Events int64  `json:"events"`
 }
 
+type engineStatsDTO struct {
+	Segments  int64 `json:"segments"`
+	Rows      int64 `json:"rows"`
+	RawRows   int64 `json:"raw_rows"`
+	SizeBytes int64 `json:"size_bytes"`
+	MemRows   int64 `json:"mem_rows"`
+}
+
 type statsDTO struct {
-	Logs       int64         `json:"logs"`
-	Events     int64         `json:"events"`
-	OpenIssues int64         `json:"open_issues"`
-	Dropped    int64         `json:"dropped"`
-	PerDay     []dayCountDTO `json:"per_day"`
+	Logs       int64           `json:"logs"`
+	Events     int64           `json:"events"`
+	OpenIssues int64           `json:"open_issues"`
+	Dropped    int64           `json:"dropped"`
+	PerDay     []dayCountDTO   `json:"per_day"`
+	Engine     *engineStatsDTO `json:"engine,omitempty"`
 }
 
 func toStatsDTO(s store.Stats, dropped int64) statsDTO {
@@ -84,5 +93,23 @@ func (s *Stats) Get(w http.ResponseWriter, r *http.Request) {
 		dropped += rr.DroppedCount
 	}
 
-	respond(w, http.StatusOK, toStatsDTO(stats, dropped))
+	dto := toStatsDTO(stats, dropped)
+	// EngineMetrics is optional (only the template-storage-engine backend
+	// implements it — see store.EngineMetrics's doc comment); any other
+	// Reader, or an EngineStats call that itself fails, just omits the
+	// field rather than failing a request that otherwise already
+	// succeeded.
+	if em, ok := s.Reader.(store.EngineMetrics); ok {
+		if es, err := em.EngineStats(r.Context(), f.ProjectID); err == nil {
+			dto.Engine = &engineStatsDTO{
+				Segments:  es.Segments,
+				Rows:      es.Rows,
+				RawRows:   es.RawRows,
+				SizeBytes: es.SizeBytes,
+				MemRows:   es.MemRows,
+			}
+		}
+	}
+
+	respond(w, http.StatusOK, dto)
 }

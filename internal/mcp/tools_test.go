@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,9 @@ type fakeStore struct {
 	stats map[int64]store.Stats // keyed by projectID
 
 	serviceCounts map[int64][]store.ServiceCount // keyed by projectID
+
+	aggregateRows       map[int64][]store.AggregateRow // keyed by projectID
+	lastAggregateFilter store.AggregateFilter
 
 	noiseRules      map[int64]store.NoiseRuleRow // keyed by rule ID
 	nextNoiseRuleID int64
@@ -73,6 +77,7 @@ func newFakeStore() *fakeStore {
 		issueEvents:   make(map[int64][]core.Event),
 		stats:         make(map[int64]store.Stats),
 		serviceCounts: make(map[int64][]store.ServiceCount),
+		aggregateRows: make(map[int64][]store.AggregateRow),
 		noiseRules:    make(map[int64]store.NoiseRuleRow),
 		alertRules:    make(map[int64]store.AlertRuleRow),
 	}
@@ -125,9 +130,9 @@ func (f *fakeStore) ServiceCounts(_ context.Context, projectID int64, _ time.Tim
 	return f.serviceCounts[projectID], nil
 }
 
-// Aggregate is unused in these tests.
-func (f *fakeStore) Aggregate(_ context.Context, _ store.AggregateFilter) ([]store.AggregateRow, error) {
-	return nil, nil
+func (f *fakeStore) Aggregate(_ context.Context, filter store.AggregateFilter) ([]store.AggregateRow, error) {
+	f.lastAggregateFilter = filter
+	return f.aggregateRows[filter.ProjectID], nil
 }
 
 func (f *fakeStore) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
@@ -887,6 +892,158 @@ func TestGetStats_ProjectKey_IgnoresProjectInput(t *testing.T) {
 	}
 	if fs.lastStatsFilter.ProjectID != 1 {
 		t.Errorf("filter.ProjectID = %d, want 1", fs.lastStatsFilter.ProjectID)
+	}
+}
+
+// fakeEngineStore embeds fakeStore and additionally implements
+// store.EngineMetrics, so get_stats's optional engine block can be
+// tested without touching fakeStore itself — every other test relies on
+// fakeStore staying a plain store.Reader so the "engine block omitted"
+// degrade-gracefully path stays covered too.
+type fakeEngineStore struct {
+	*fakeStore
+	engineStats map[int64]store.EngineStats
+}
+
+func (f *fakeEngineStore) EngineStats(_ context.Context, projectID int64) (store.EngineStats, error) {
+	return f.engineStats[projectID], nil
+}
+
+func TestGetStats_EngineMetrics_AppendsEngineBlock(t *testing.T) {
+	fs := newFakeStore()
+	fs.stats[1] = store.Stats{Logs: 100, Events: 10, OpenIssues: 2}
+	es := &fakeEngineStore{
+		fakeStore: fs,
+		engineStats: map[int64]store.EngineStats{
+			1: {Segments: 3, Rows: 1000, RawRows: 50, SizeBytes: 204800, MemRows: 25},
+		},
+	}
+	engine := rules.New(es, es)
+	alertsEngine := alerts.New(es, nil)
+	s := New(es, es, es, engine, es, alertsEngine)
+	s.clock = fixedClock
+
+	res, _, err := s.getStats(apiCtx(1), nil, getStatsInput{})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	want := "logs: 100  events: 10  open issues: 2\n" +
+		"engine: segments=3 stored_rows=1000 raw_fallback=5.0% bytes_per_record=204.8 unflushed_rows=25"
+	if text != want {
+		t.Errorf("got:\n%s\nwant:\n%s", text, want)
+	}
+}
+
+func TestGetStats_NoEngineMetrics_OmitsEngineBlock(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.stats[1] = store.Stats{Logs: 100, Events: 10, OpenIssues: 2}
+
+	res, _, err := s.getStats(apiCtx(1), nil, getStatsInput{})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	text := textOf(t, res)
+	if strings.Contains(text, "engine:") {
+		t.Errorf("got:\n%s\nwant no engine block (fakeStore doesn't implement store.EngineMetrics)", text)
+	}
+}
+
+// ---- aggregate_logs ----
+
+func TestAggregateLogsTool_RendersKeysCountsAndSeverityNames(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.aggregateRows[1] = []store.AggregateRow{
+		{Key: strconv.Itoa(int(core.SeverityError)), Logs: 120, Events: 45},
+		{Key: strconv.Itoa(int(core.SeverityWarn)), Logs: 80, Events: 2},
+	}
+
+	res, _, err := s.aggregateLogs(apiCtx(1), nil, aggregateLogsInput{GroupBy: "severity"})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	text := textOf(t, res)
+	want := "2 rows (group_by=severity):\n" +
+		"KEY LOGS EVENTS\n" +
+		"ERROR 120 45\n" +
+		"WARN 80 2"
+	if text != want {
+		t.Errorf("got:\n%s\nwant:\n%s", text, want)
+	}
+}
+
+func TestAggregateLogsTool_ProjectKey_IgnoresProjectInput(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.aggregateRows[1] = []store.AggregateRow{{Key: "api", Logs: 10, Events: 0}}
+
+	res, _, err := s.aggregateLogs(apiCtx(1), nil, aggregateLogsInput{GroupBy: "service", Project: 999})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	if fs.lastAggregateFilter.ProjectID != 1 {
+		t.Errorf("filter.ProjectID = %d, want 1 (caller's own project, not the input's 999)", fs.lastAggregateFilter.ProjectID)
+	}
+}
+
+func TestAggregateLogsTool_AdminKey_UsesProjectInput(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.aggregateRows[7] = []store.AggregateRow{{Key: "api", Logs: 3, Events: 1}}
+
+	res, _, err := s.aggregateLogs(adminCtx(), nil, aggregateLogsInput{GroupBy: "service", Project: 7})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	if fs.lastAggregateFilter.ProjectID != 7 {
+		t.Errorf("filter.ProjectID = %d, want 7", fs.lastAggregateFilter.ProjectID)
+	}
+}
+
+func TestAggregateLogsTool_AdminKey_MissingProject_Errors(t *testing.T) {
+	s, _ := newTestMCPServer()
+
+	res, _, err := s.aggregateLogs(adminCtx(), nil, aggregateLogsInput{GroupBy: "service"})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) != "project: required for admin keys" {
+		t.Errorf("got IsError=%v text=%q, want the required-project rejection", res.IsError, textOf(t, res))
+	}
+}
+
+func TestAggregateLogsTool_BadGroupBy_Errors(t *testing.T) {
+	s, _ := newTestMCPServer()
+
+	res, _, err := s.aggregateLogs(apiCtx(1), nil, aggregateLogsInput{GroupBy: "bogus"})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true")
+	}
+}
+
+func TestAggregateLogsTool_DefaultSince(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	_, _, err := s.aggregateLogs(apiCtx(1), nil, aggregateLogsInput{GroupBy: "day"})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	wantSince := fixedNow.Add(-24 * time.Hour)
+	if !fs.lastAggregateFilter.Since.Equal(wantSince) {
+		t.Errorf("filter.Since = %v, want %v (default 24h)", fs.lastAggregateFilter.Since, wantSince)
 	}
 }
 
@@ -1725,12 +1882,12 @@ func TestMCP_OverTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 17 {
+	if len(tools.Tools) != 18 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 17: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 18: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{

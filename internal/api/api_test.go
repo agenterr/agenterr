@@ -39,6 +39,9 @@ type fakeStore struct {
 	stats         store.Stats
 	serviceCounts []store.ServiceCount
 
+	aggregateRows       []store.AggregateRow
+	lastAggregateFilter store.AggregateFilter
+
 	rules      map[int64]store.NoiseRuleRow
 	nextRuleID int64
 	dropCalls  []map[int64]int64
@@ -164,9 +167,9 @@ func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]st
 	return f.serviceCounts, nil
 }
 
-// Aggregate is unused in these tests.
-func (f *fakeStore) Aggregate(_ context.Context, _ store.AggregateFilter) ([]store.AggregateRow, error) {
-	return nil, nil
+func (f *fakeStore) Aggregate(_ context.Context, filter store.AggregateFilter) ([]store.AggregateRow, error) {
+	f.lastAggregateFilter = filter
+	return f.aggregateRows, nil
 }
 
 func (f *fakeStore) NoiseRules(_ context.Context, projectID int64) ([]store.NoiseRuleRow, error) {
@@ -1014,6 +1017,189 @@ func TestStats_AdminKey_UsesProjectParam(t *testing.T) {
 	}
 	if fs.lastStatsFilter.ProjectID != 9 {
 		t.Errorf("filter.ProjectID = %d, want 9", fs.lastStatsFilter.ProjectID)
+	}
+}
+
+// fakeEngineStore embeds fakeStore and additionally implements
+// store.EngineMetrics, so /api/v1/stats's optional "engine" field can be
+// tested without touching fakeStore itself — every other test relies on
+// fakeStore staying a plain store.Reader so the "engine field omitted"
+// degrade-gracefully path stays covered too.
+type fakeEngineStore struct {
+	*fakeStore
+	engineStats store.EngineStats
+}
+
+func (f *fakeEngineStore) EngineStats(_ context.Context, _ int64) (store.EngineStats, error) {
+	return f.engineStats, nil
+}
+
+func newTestServerEngine(es *fakeEngineStore) *httptest.Server {
+	es.keys[validAPIKey] = struct {
+		projectID int64
+		kind      string
+	}{projectID: 1, kind: "api"}
+	es.keys[adminKey] = struct {
+		projectID int64
+		kind      string
+	}{projectID: 0, kind: "admin"}
+
+	a := auth.New(es, []byte{})
+	rulesEngine := rules.New(es, es)
+	alertsEngine := alerts.New(es, nil)
+	if err := alertsEngine.Load(context.Background()); err != nil {
+		panic(err)
+	}
+	api := New(es, es, es, rulesEngine, es, alertsEngine)
+	mux := http.NewServeMux()
+	api.Mount(mux, a)
+	return httptest.NewServer(mux)
+}
+
+func TestStats_EngineMetrics_PopulatesEngineField(t *testing.T) {
+	fs := newFakeStore()
+	fs.stats = store.Stats{Logs: 100, Events: 10, OpenIssues: 2}
+	es := &fakeEngineStore{
+		fakeStore:   fs,
+		engineStats: store.EngineStats{Segments: 3, Rows: 1000, RawRows: 50, SizeBytes: 204800, MemRows: 25},
+	}
+	srv := newTestServerEngine(es)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/stats", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Engine *struct {
+			Segments  int64 `json:"segments"`
+			Rows      int64 `json:"rows"`
+			RawRows   int64 `json:"raw_rows"`
+			SizeBytes int64 `json:"size_bytes"`
+			MemRows   int64 `json:"mem_rows"`
+		} `json:"engine"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Engine == nil {
+		t.Fatalf("engine field missing")
+	}
+	if got.Engine.Segments != 3 || got.Engine.Rows != 1000 || got.Engine.RawRows != 50 ||
+		got.Engine.SizeBytes != 204800 || got.Engine.MemRows != 25 {
+		t.Errorf("got %+v", got.Engine)
+	}
+}
+
+func TestStats_NoEngineMetrics_OmitsEngineField(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/stats", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if bytes.Contains(body, []byte(`"engine"`)) {
+		t.Errorf("got body containing \"engine\" field, want it omitted: %s", body)
+	}
+}
+
+func TestAggregate_HappyPath_Shape(t *testing.T) {
+	fs := newFakeStore()
+	fs.aggregateRows = []store.AggregateRow{
+		{Key: "api", Logs: 120, Events: 4},
+		{Key: "worker", Logs: 30, Events: 0},
+	}
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/aggregate?group_by=service&since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00Z", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got []struct {
+		Key    string `json:"key"`
+		Logs   int64  `json:"logs"`
+		Events int64  `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 2 || got[0].Key != "api" || got[0].Logs != 120 || got[0].Events != 4 {
+		t.Errorf("got %+v", got)
+	}
+
+	f := fs.lastAggregateFilter
+	if f.ProjectID != 1 {
+		t.Errorf("filter.ProjectID = %d, want 1", f.ProjectID)
+	}
+	if f.GroupBy != "service" {
+		t.Errorf("filter.GroupBy = %q, want service", f.GroupBy)
+	}
+	if !f.Until.Equal(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("filter.Until = %v", f.Until)
+	}
+}
+
+func TestAggregate_BadGroupBy_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/aggregate?group_by=bogus", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAggregate_AdminKey_MissingProject_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/aggregate?group_by=service", adminKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestAggregate_APIKey_IgnoresProjectParam(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/aggregate?group_by=service&project=999", validAPIKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if fs.lastAggregateFilter.ProjectID != 1 {
+		t.Errorf("filter.ProjectID = %d, want 1 (caller's own project)", fs.lastAggregateFilter.ProjectID)
+	}
+}
+
+func TestAggregate_AdminKey_UsesProjectParam(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodGet, "/api/v1/aggregate?group_by=service&project=7", adminKey, nil)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if fs.lastAggregateFilter.ProjectID != 7 {
+		t.Errorf("filter.ProjectID = %d, want 7", fs.lastAggregateFilter.ProjectID)
 	}
 }
 
