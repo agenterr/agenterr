@@ -18,7 +18,7 @@ import (
 	"github.com/agenterr/agenterr/internal/pipeline"
 	"github.com/agenterr/agenterr/internal/rules"
 	"github.com/agenterr/agenterr/internal/store"
-	"github.com/agenterr/agenterr/internal/store/sqlite"
+	"github.com/agenterr/agenterr/internal/store/enginestore"
 )
 
 // retentionInterval is how often the retention job walks every project
@@ -48,7 +48,7 @@ const shutdownServerBudget = 7 * time.Second
 // caller of its IssueEvent, see the OnStop body below), then store — so
 // nothing is torn down out from under a request, or a notification, still
 // in flight.
-func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *sqlite.DB, engine *rules.Engine, alertsEngine *alerts.Engine, pipe *pipeline.Pipeline, srv *http.Server, creds generatedCreds) {
+func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *enginestore.Store, engine *rules.Engine, alertsEngine *alerts.Engine, pipe *pipeline.Pipeline, srv *http.Server, creds generatedCreds) {
 	pipeCtx, cancelPipe := context.WithCancel(context.Background())
 	retentionCtx, cancelRetention := context.WithCancel(context.Background())
 	flushCtx, cancelFlush := context.WithCancel(context.Background())
@@ -189,7 +189,7 @@ func boundedShutdownCtx(parent context.Context, budget time.Duration) (context.C
 // file-only restore of the database — Litestream or a plain copy,
 // carrying the existing admin key row with it — correctly prints
 // nothing instead of minting and printing a redundant key.
-func bootstrap(ctx context.Context, cfg config.Config, db *sqlite.DB, creds generatedCreds) error {
+func bootstrap(ctx context.Context, cfg config.Config, db *enginestore.Store, creds generatedCreds) error {
 	has, err := db.HasAdminKey(ctx)
 	if err != nil {
 		return fmt.Errorf("check admin key: %w", err)

@@ -24,12 +24,13 @@ import (
 // while still TRANS_NONE, and by the time the writer-lock attempt happens
 // the tx has already entered TRANS_READ.
 //
-// This mirrors the two real colliding writers: (*DB).WriteBatch (pipeline
-// batch flush) and (*DB).AddNoiseDrops (noise drop-counter flush), both
-// hammered concurrently from tight loops for ~2s, plus a third writer
-// (Prune) to widen the collision window. It must fail deterministically
-// pre-fix (bare deferred BEGIN) and pass deterministically post-fix
-// (_txlock=immediate in the DSN).
+// This mirrors the two real colliding writers: (*DB).UpsertIssues (engine
+// batch flush's issue accounting) and (*DB).AddNoiseDrops (noise
+// drop-counter flush), both hammered concurrently from tight loops for
+// ~2s, plus a third writer (DeleteIssueEventsBefore) to widen the
+// collision window. It must fail deterministically pre-fix (bare deferred
+// BEGIN) and pass deterministically post-fix (_txlock=immediate in the
+// DSN).
 func TestConcurrentWritersDoNotBusyFail(t *testing.T) {
 	db, err := sqlite.Open(filepath.Join(t.TempDir(), "concurrent.db"))
 	if err != nil {
@@ -66,25 +67,20 @@ func TestConcurrentWritersDoNotBusyFail(t *testing.T) {
 		firstErr.CompareAndSwap(nil, msg)
 	}
 
-	// Writer 1: pipeline WriteBatch shape — small batches of log inserts,
-	// one of which is an event (issue upsert + event insert + trim).
+	// Writer 1: engine UpsertIssues shape — a batch with one event entry
+	// (issue upsert + issue_events insert + trim). Log.ID is set directly,
+	// standing in for the monotonic id the engine assigns before calling
+	// UpsertIssues (see enginestore.Store.WriteBatch).
+	var nextLogID int64
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; time.Now().Before(deadline); i++ {
+			logID := atomic.AddInt64(&nextLogID, 1)
 			entries := []store.Entry{
 				{
 					Log: core.Log{
-						ProjectID:   project.ID,
-						Time:        time.Now().UTC(),
-						Severity:    core.SeverityInfo,
-						Body:        fmt.Sprintf("writebatch info %d", i),
-						Service:     "svc-a",
-						Environment: "test",
-					},
-				},
-				{
-					Log: core.Log{
+						ID:          logID,
 						ProjectID:   project.ID,
 						Time:        time.Now().UTC(),
 						Severity:    core.SeverityWarn,
@@ -97,8 +93,8 @@ func TestConcurrentWritersDoNotBusyFail(t *testing.T) {
 					Title:       "concurrent issue",
 				},
 			}
-			if _, err := db.WriteBatch(ctx, entries); err != nil {
-				recordErr(fmt.Sprintf("WriteBatch: %v", err))
+			if _, err := db.UpsertIssues(ctx, entries); err != nil {
+				recordErr(fmt.Sprintf("UpsertIssues: %v", err))
 			}
 		}
 	}()
@@ -122,8 +118,8 @@ func TestConcurrentWritersDoNotBusyFail(t *testing.T) {
 		defer wg.Done()
 		cutoff := time.Now().Add(-time.Hour)
 		for time.Now().Before(deadline) {
-			if _, err := db.Prune(ctx, project.ID, cutoff); err != nil {
-				recordErr(fmt.Sprintf("Prune: %v", err))
+			if err := db.DeleteIssueEventsBefore(ctx, project.ID, cutoff); err != nil {
+				recordErr(fmt.Sprintf("DeleteIssueEventsBefore: %v", err))
 			}
 		}
 	}()
