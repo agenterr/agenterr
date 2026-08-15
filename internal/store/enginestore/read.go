@@ -24,6 +24,13 @@ func (s *Store) segPath(rel string) string {
 // collectRows returns all rows for a project across the memtable and
 // every manifest segment overlapping [since, until] (zero times = no
 // bound), optionally filtered by service via segment footers.
+//
+// The manifest query and the memtable snapshot are taken together under
+// ps.mu so a concurrent flushProject (which holds ps.mu across
+// InsertSegment → wal.Reset → mem.Reset) cannot be observed mid-flight:
+// callers either see the pre-flush state (new segment absent, memtable
+// still holding its rows) or the post-flush state (new segment present,
+// memtable already reset) — never a mix that duplicates or drops rows.
 func (s *Store) collectRows(ctx context.Context, projectID int64, since, until time.Time, service string) ([]segment.Row, error) {
 	var out []segment.Row
 	sinceM, untilM := int64(-1<<62), int64(1<<62)
@@ -33,10 +40,19 @@ func (s *Store) collectRows(ctx context.Context, projectID int64, since, until t
 	if !until.IsZero() {
 		untilM = until.UTC().UnixMicro()
 	}
-	segs, err := s.DB.Segments(ctx, projectID)
+	ps, err := s.proj(projectID)
 	if err != nil {
 		return nil, err
 	}
+	ps.mu.Lock()
+	segs, err := s.DB.Segments(ctx, projectID)
+	if err != nil {
+		ps.mu.Unlock()
+		return nil, err
+	}
+	memRows := ps.mem.Snapshot()
+	ps.mu.Unlock()
+
 	for _, m := range segs {
 		if m.MaxTs < sinceM || m.MinTs > untilM {
 			continue
@@ -54,16 +70,23 @@ func (s *Store) collectRows(ctx context.Context, projectID int64, since, until t
 			}
 		}
 	}
-	ps, err := s.proj(projectID)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range ps.mem.Snapshot() {
+	for _, r := range memRows {
 		if r.TsMicros >= sinceM && r.TsMicros <= untilM {
 			out = append(out, r)
 		}
 	}
 	return out, nil
+}
+
+// rowLess reports whether a sorts strictly before b in the (TsMicros,
+// LogID) total order — LogIDs are unique and monotonic, so this breaks
+// exact-timestamp ties deterministically (unlike comparing TsMicros
+// alone, which is not a total order over rows sharing an instant).
+func rowLess(a, b segment.Row) bool {
+	if a.TsMicros != b.TsMicros {
+		return a.TsMicros < b.TsMicros
+	}
+	return a.LogID < b.LogID
 }
 
 // contains reports whether ss contains s.
@@ -144,20 +167,25 @@ func (s *Store) SearchLogs(ctx context.Context, f store.LogFilter) ([]core.Log, 
 }
 
 // logByID locates one row by log id within a project (memtable first,
-// then manifest segments whose id range covers it).
+// then manifest segments whose id range covers it). The memtable
+// snapshot and the manifest query are taken together under ps.mu — see
+// collectRows for why that is required to avoid racing flushProject.
 func (s *Store) logByID(ctx context.Context, projectID, logID int64) (segment.Row, bool, error) {
 	ps, err := s.proj(projectID)
 	if err != nil {
 		return segment.Row{}, false, err
 	}
-	for _, r := range ps.mem.Snapshot() {
+	ps.mu.Lock()
+	memRows := ps.mem.Snapshot()
+	segs, err := s.DB.Segments(ctx, projectID)
+	ps.mu.Unlock()
+	if err != nil {
+		return segment.Row{}, false, err
+	}
+	for _, r := range memRows {
 		if r.LogID == logID {
 			return r, true, nil
 		}
-	}
-	segs, err := s.DB.Segments(ctx, projectID)
-	if err != nil {
-		return segment.Row{}, false, err
 	}
 	for _, m := range segs {
 		if logID < m.MinLogID || logID > m.MaxLogID {
@@ -178,6 +206,13 @@ func (s *Store) logByID(ctx context.Context, projectID, logID int64) (segment.Ro
 
 // LogContext returns up to n logs at-or-before the target (inclusive)
 // and n after it, same project and service, ascending in time.
+//
+// "At-or-before"/"after" and each half's ordering use the total order
+// (TsMicros, LogID) rather than TsMicros alone: with ties on timestamp,
+// TsMicros-only ordering is not stable across rows sharing the target's
+// exact instant, and could truncate the target itself out of `before`
+// before take-n. Under (ts, id) the target is always the maximum
+// element of `before`, so it survives any n >= 1.
 func (s *Store) LogContext(ctx context.Context, logID int64, n int) ([]core.Log, error) {
 	target, projectID, err := s.findLog(ctx, logID)
 	if err != nil {
@@ -192,14 +227,17 @@ func (s *Store) LogContext(ctx context.Context, logID int64, n int) ([]core.Log,
 		if r.Service != target.Service {
 			continue
 		}
-		if r.TsMicros <= target.TsMicros {
-			before = append(before, r)
-		} else {
+		if rowLess(target, r) {
 			after = append(after, r)
+		} else {
+			before = append(before, r)
 		}
 	}
-	sort.Slice(before, func(i, j int) bool { return before[i].TsMicros > before[j].TsMicros }) // newest first
-	sort.Slice(after, func(i, j int) bool { return after[i].TsMicros < after[j].TsMicros })    // oldest first
+	// before: (ts, id) DESC — target is the max element under this
+	// total order, so it is always index 0 and survives take-n below.
+	sort.Slice(before, func(i, j int) bool { return rowLess(before[j], before[i]) })
+	// after: (ts, id) ASC.
+	sort.Slice(after, func(i, j int) bool { return rowLess(after[i], after[j]) })
 	if len(before) > n {
 		before = before[:n]
 	}

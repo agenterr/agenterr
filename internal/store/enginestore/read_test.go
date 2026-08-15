@@ -2,6 +2,8 @@ package enginestore
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,5 +145,103 @@ func TestStatsAndServiceCounts(t *testing.T) {
 	}
 	if len(sc) != 2 || sc[0].Service != "api" || sc[0].Logs != 4 {
 		t.Fatalf("service counts = %+v", sc)
+	}
+}
+
+// TestLogContextTiesIncludeTarget guards against a non-total-order sort
+// (TsMicros only) silently truncating the target out of `before` when
+// several rows share its exact timestamp.
+func TestLogContextTiesIncludeTarget(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	entries := []store.Entry{
+		logEntry(p.ID, "tie a", "svc", at),
+		logEntry(p.ID, "tie b", "svc", at),
+		logEntry(p.ID, "tie c", "svc", at),
+		logEntry(p.ID, "tie d", "svc", at),
+	}
+	if _, err := s.WriteBatch(ctx, entries); err != nil {
+		t.Fatal(err)
+	}
+
+	logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID, Query: "tie c"})
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("seed lookup: err=%v logs=%+v", err, logs)
+	}
+	target := logs[0]
+
+	nbrs, err := s.LogContext(ctx, target.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, l := range nbrs {
+		if l.ID == target.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("target id %d missing from context result %+v", target.ID, nbrs)
+	}
+}
+
+// TestSearchLogsNoDuplicatesDuringConcurrentFlush guards the
+// collectRows/logByID coherence fix: a flush concurrent with a read must
+// never produce a result set where the same LogID appears twice (seen
+// once pre-flush via the memtable, once post-flush via the new
+// segment), nor drop rows.
+func TestSearchLogsNoDuplicatesDuringConcurrentFlush(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	stop := make(chan struct{})
+	var writeErr atomic.Value
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			entries := []store.Entry{
+				logEntry(p.ID, "race row", "svc", at.Add(time.Duration(i)*time.Microsecond)),
+				logEntry(p.ID, "race row", "svc", at.Add(time.Duration(i+1)*time.Microsecond)),
+			}
+			if _, err := s.WriteBatch(ctx, entries); err != nil {
+				writeErr.Store(err)
+				return
+			}
+			if err := s.FlushAll(); err != nil {
+				writeErr.Store(err)
+				return
+			}
+			i += 2
+		}
+	}()
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID, Limit: 100000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := make(map[int64]bool, len(logs))
+		for _, l := range logs {
+			if seen[l.ID] {
+				t.Fatalf("duplicate log id %d in result set of %d logs", l.ID, len(logs))
+			}
+			seen[l.ID] = true
+		}
+	}
+	close(stop)
+	wg.Wait()
+	if v := writeErr.Load(); v != nil {
+		t.Fatalf("writer error: %v", v)
 	}
 }
