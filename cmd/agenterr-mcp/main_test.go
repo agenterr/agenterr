@@ -62,6 +62,11 @@ func (f *fakeStore) ServiceCounts(_ context.Context, _ int64, _ time.Time) ([]st
 	return nil, nil
 }
 
+// Aggregate is unused in these tests.
+func (f *fakeStore) Aggregate(_ context.Context, _ store.AggregateFilter) ([]store.AggregateRow, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) CreateProject(_ context.Context, _ string, _ int) (core.Project, error) {
 	return core.Project{}, errors.New("unused")
 }
@@ -178,12 +183,12 @@ func TestProxy_ListToolsAndCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 17 {
+	if len(tools.Tools) != 18 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 17: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 18: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -305,8 +310,8 @@ func TestProxy_RemoteErrorPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools after a remote error: %v", err)
 	}
-	if len(tools.Tools) != 17 {
-		t.Fatalf("got %d tools after a remote error, want 17", len(tools.Tools))
+	if len(tools.Tools) != 18 {
+		t.Fatalf("got %d tools after a remote error, want 18", len(tools.Tools))
 	}
 
 	_ = cs.Close()

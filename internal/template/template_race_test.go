@@ -21,7 +21,7 @@ func TestExtractConcurrent(t *testing.T) {
 					t.Errorf("extract: ok=%v err=%v", ok, err)
 					return
 				}
-				if got, ok2 := e.Reconstruct(int64(g%3+1), id, vars); !ok2 || got != body {
+				if got, ok2, err2 := e.Reconstruct(int64(g%3+1), id, vars); err2 != nil || !ok2 || got != body {
 					t.Errorf("round trip: %q", got)
 					return
 				}

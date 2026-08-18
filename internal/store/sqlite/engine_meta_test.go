@@ -106,16 +106,19 @@ func TestSwapSegmentAtomicReplace(t *testing.T) {
 
 	replacement := SegmentMeta{ProjectID: p.ID, Path: "segments/1/000001-pruned.seg",
 		MinTs: 150, MaxTs: 200, MinLogID: 30, MaxLogID: 50, Count: 20, Services: []string{"api"}}
-	// Note: SQLite may legitimately reuse oldID's rowid for the
-	// replacement here — segment_manifest's id is a plain rowid alias
-	// (no AUTOINCREMENT), so once the table's only row is deleted within
-	// the same transaction, the next insert's default rowid selection can
-	// land back on 1. That is not a correctness problem for the swap: the
-	// assertion that matters is the row's content (Path/Count below), not
-	// whether the id number happens to be reused.
+	// Note: segment_manifest.id is AUTOINCREMENT (migration 0010), so
+	// even though this swap deletes the table's only row within the same
+	// transaction, the replacement's id is guaranteed to be strictly
+	// greater than oldID — SQLite tracks the high-water mark in
+	// sqlite_sequence rather than reusing a freed rowid. See
+	// TestSegmentManifestIDsNeverReused for a test that pins this
+	// specifically.
 	newID, err := db.SwapSegment(ctx, oldID, replacement)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if newID <= oldID {
+		t.Errorf("newID = %d, want strictly greater than oldID %d (AUTOINCREMENT must never reuse)", newID, oldID)
 	}
 
 	got, err := db.Segments(ctx, p.ID)
@@ -139,6 +142,50 @@ func TestSwapSegmentAtomicReplace(t *testing.T) {
 	got2, err := db.Segments(ctx, p.ID)
 	if err != nil || len(got2) != 2 {
 		t.Fatalf("segments after missing-oldID swap = %+v, err %v", got2, err)
+	}
+}
+
+// TestSegmentManifestIDsNeverReused pins the property compaction's
+// generation-unique output naming (enginestore.buildMergedSegment)
+// depends on: segment_manifest.id is AUTOINCREMENT (migration 0010), so
+// deleting the current-max-id row and inserting a new one never lands
+// the new row back on the freed id. Without AUTOINCREMENT (a plain
+// rowid alias), SQLite assigns max(existing)+1 — deleting the max row
+// makes that id available again, and a compaction re-run over the same
+// bucket could recompute the same "c-<bucket>-<minLogID>-<maxMemberID>"
+// name and collide with a live, manifest-referenced file.
+func TestSegmentManifestIDsNeverReused(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	p := mustProj(ctx, t, db)
+
+	id1, err := db.InsertSegment(ctx, SegmentMeta{ProjectID: p.ID, Path: "a.seg",
+		MinTs: 1, MaxTs: 2, MinLogID: 1, MaxLogID: 10, Count: 10, Services: []string{"api"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := db.InsertSegment(ctx, SegmentMeta{ProjectID: p.ID, Path: "b.seg",
+		MinTs: 3, MaxTs: 4, MinLogID: 11, MaxLogID: 20, Count: 10, Services: []string{"api"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 <= id1 {
+		t.Fatalf("precondition: id2 (%d) must be greater than id1 (%d)", id2, id1)
+	}
+
+	// Delete the higher-id row — the one whose id a non-AUTOINCREMENT
+	// rowid table would offer back up to the very next insert.
+	if err := db.DeleteSegment(ctx, id2); err != nil {
+		t.Fatal(err)
+	}
+
+	id3, err := db.InsertSegment(ctx, SegmentMeta{ProjectID: p.ID, Path: "c.seg",
+		MinTs: 5, MaxTs: 6, MinLogID: 21, MaxLogID: 30, Count: 10, Services: []string{"api"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id3 <= id2 {
+		t.Errorf("id3 = %d, want strictly greater than deleted id2 %d (AUTOINCREMENT must never reuse)", id3, id2)
 	}
 }
 
@@ -300,5 +347,94 @@ func TestIssueEventsTrimTo50(t *testing.T) {
 	}
 	if len(refs) != 50 || refs[0].LogID != 55 {
 		t.Errorf("refs len=%d first=%d, want 50 newest (first logID 55)", len(refs), refs[0].LogID)
+	}
+}
+
+func TestReplaceSegmentsAtomicAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	p := mustProj(ctx, t, db)
+	mk := func(path string, minLog, maxLog int64) int64 {
+		id, err := db.InsertSegment(ctx, SegmentMeta{ProjectID: p.ID, Path: path,
+			MinTs: 1, MaxTs: 2, MinLogID: minLog, MaxLogID: maxLog, Count: maxLog - minLog + 1,
+			RawRows: 1, SizeBytes: 100, Services: []string{"api"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	a, b := mk("a.seg", 1, 10), mk("b.seg", 11, 20)
+	merged := SegmentMeta{ProjectID: p.ID, Path: "ab.seg", MinTs: 1, MaxTs: 2,
+		MinLogID: 1, MaxLogID: 20, Count: 20, RawRows: 2, SizeBytes: 180, Services: []string{"api"}}
+	if _, err := db.ReplaceSegments(ctx, []int64{a, b}, merged); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := db.Segments(ctx, p.ID)
+	if len(segs) != 1 || segs[0].Path != "ab.seg" || segs[0].RawRows != 2 || segs[0].SizeBytes != 180 {
+		t.Fatalf("after replace: %+v", segs)
+	}
+	// Idempotent retry: old ids already gone, unique path collision must not occur on same meta re-insert…
+	// (retry semantics: missing oldIDs tolerated; re-inserting the same path errors on UNIQUE — callers
+	// only retry after a crash BEFORE commit, when neither delete nor insert happened.)
+	if _, err := db.ReplaceSegments(ctx, []int64{a, b}, SegmentMeta{ProjectID: p.ID, Path: "ab2.seg",
+		MinTs: 1, MaxTs: 2, MinLogID: 1, MaxLogID: 20, Count: 20, Services: []string{"api"}}); err != nil {
+		t.Fatalf("missing oldIDs must be tolerated: %v", err)
+	}
+}
+
+func TestRollupAggregate(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	p := mustProj(ctx, t, db)
+	add := map[RollupKey]RollupAdd{
+		{ProjectID: p.ID, Service: "api", Severity: 9, Hour: "2026-01-01T10"}:  {Logs: 5, Events: 0},
+		{ProjectID: p.ID, Service: "api", Severity: 17, Hour: "2026-01-01T11"}: {Logs: 2, Events: 2},
+		{ProjectID: p.ID, Service: "web", Severity: 9, Hour: "2026-01-02T10"}:  {Logs: 3, Events: 0},
+	}
+	if err := db.AddRollups(ctx, add); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	bySvc, err := db.RollupAggregate(ctx, p.ID, since, time.Time{}, "service")
+	if err != nil || bySvc["api"].Logs != 7 || bySvc["api"].Events != 2 || bySvc["web"].Logs != 3 {
+		t.Fatalf("service: %+v err %v", bySvc, err)
+	}
+	bySev, _ := db.RollupAggregate(ctx, p.ID, since, time.Time{}, "severity")
+	if bySev["17"].Logs != 2 || bySev["9"].Logs != 8 {
+		t.Fatalf("severity: %+v", bySev)
+	}
+	byDay, _ := db.RollupAggregate(ctx, p.ID, since, time.Time{}, "day")
+	if byDay["2026-01-01"].Logs != 7 || byDay["2026-01-02"].Logs != 3 {
+		t.Fatalf("day: %+v", byDay)
+	}
+	byHour, _ := db.RollupAggregate(ctx, p.ID, since,
+		time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC), "hour")
+	if len(byHour) != 2 || byHour["2026-01-01T10"].Logs != 5 {
+		t.Fatalf("hour with until: %+v", byHour)
+	}
+	if _, err := db.RollupAggregate(ctx, p.ID, since, time.Time{}, "bogus"); err == nil {
+		t.Error("unknown groupBy must error")
+	}
+}
+
+func TestEngineTotals(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	p := mustProj(ctx, t, db)
+	for i, m := range []SegmentMeta{
+		{ProjectID: p.ID, Path: "t1.seg", MinTs: 1, MaxTs: 2, MinLogID: 1, MaxLogID: 5, Count: 5, RawRows: 1, SizeBytes: 50, Services: []string{"a"}},
+		{ProjectID: p.ID, Path: "t2.seg", MinTs: 3, MaxTs: 4, MinLogID: 6, MaxLogID: 8, Count: 3, RawRows: 0, SizeBytes: 30, Services: []string{"a"}},
+	} {
+		if _, err := db.InsertSegment(ctx, m); err != nil {
+			t.Fatalf("seg %d: %v", i, err)
+		}
+	}
+	segs, rows, raw, size, err := db.EngineTotals(ctx, p.ID)
+	if err != nil || segs != 2 || rows != 8 || raw != 1 || size != 80 {
+		t.Fatalf("totals: %d %d %d %d err %v", segs, rows, raw, size, err)
+	}
+	if segs, _, _, _, _ := db.EngineTotals(ctx, 0); segs != 2 {
+		t.Errorf("projectID 0 = all")
 	}
 }

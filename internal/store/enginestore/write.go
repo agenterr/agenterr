@@ -135,11 +135,22 @@ func (s *Store) flushProject(projectID int64) error {
 	if err != nil {
 		return fmt.Errorf("enginestore: write segment: %w", err)
 	}
+	var rawRows int64
+	for _, r := range rows {
+		if r.TemplateID == 0 {
+			rawRows++
+		}
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("enginestore: stat segment: %w", err)
+	}
 	meta := sqlitestore.SegmentMeta{
 		ProjectID: projectID, Path: rel,
 		MinTs: foot.MinTs, MaxTs: foot.MaxTs,
 		MinLogID: foot.MinLogID, MaxLogID: foot.MaxLogID,
 		Count: int64(foot.Count), Events: foot.Events, Services: foot.Services,
+		RawRows: rawRows, SizeBytes: fi.Size(),
 	}
 	if _, err := s.InsertSegment(context.Background(), meta); err != nil {
 		// The file exists but the manifest doesn't know it: remove the

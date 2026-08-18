@@ -69,6 +69,8 @@ type SegmentMeta struct {
 	Count     int64
 	Events    int64
 	Services  []string
+	RawRows   int64
+	SizeBytes int64
 }
 
 // InsertSegment records a freshly written segment and returns its
@@ -79,10 +81,10 @@ func (db *DB) InsertSegment(ctx context.Context, m SegmentMeta) (int64, error) {
 		return 0, fmt.Errorf("sqlite: marshal services: %w", err)
 	}
 	res, err := db.sql.ExecContext(ctx, `
-INSERT INTO segment_manifest (project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO segment_manifest (project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services, raw_rows, size_bytes, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ProjectID, m.Path, m.MinTs, m.MaxTs, m.MinLogID, m.MaxLogID, m.Count, m.Events,
-		string(svc), time.Now().UTC().Format(time.RFC3339Nano))
+		string(svc), m.RawRows, m.SizeBytes, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: insert segment: %w", err)
 	}
@@ -96,7 +98,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 // Segments lists the manifest for one project (0 = all projects),
 // ordered by ascending MinTs.
 func (db *DB) Segments(ctx context.Context, projectID int64) ([]SegmentMeta, error) {
-	q := `SELECT id, project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services
+	q := `SELECT id, project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services, raw_rows, size_bytes
 FROM segment_manifest`
 	var args []any
 	if projectID != 0 {
@@ -114,7 +116,7 @@ FROM segment_manifest`
 		var m SegmentMeta
 		var svc string
 		if err := rows.Scan(&m.ID, &m.ProjectID, &m.Path, &m.MinTs, &m.MaxTs,
-			&m.MinLogID, &m.MaxLogID, &m.Count, &m.Events, &svc); err != nil {
+			&m.MinLogID, &m.MaxLogID, &m.Count, &m.Events, &svc, &m.RawRows, &m.SizeBytes); err != nil {
 			return nil, fmt.Errorf("sqlite: scan segment: %w", err)
 		}
 		if err := json.Unmarshal([]byte(svc), &m.Services); err != nil {
@@ -156,35 +158,7 @@ func (db *DB) DeleteSegment(ctx context.Context, id int64) error {
 // outcome — the alternative (checking rows-affected and erroring) would
 // only turn a harmless retry into a hard failure.
 func (db *DB) SwapSegment(ctx context.Context, oldID int64, m SegmentMeta) (int64, error) {
-	svc, err := json.Marshal(m.Services)
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: marshal services: %w", err)
-	}
-	tx, err := db.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: swap segment begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM segment_manifest WHERE id = ?`, oldID); err != nil {
-		return 0, fmt.Errorf("sqlite: swap segment delete: %w", err)
-	}
-	res, err := tx.ExecContext(ctx, `
-INSERT INTO segment_manifest (project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.ProjectID, m.Path, m.MinTs, m.MaxTs, m.MinLogID, m.MaxLogID, m.Count, m.Events,
-		string(svc), time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: swap segment insert: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: swap segment id: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("sqlite: swap segment commit: %w", err)
-	}
-	return id, nil
+	return db.ReplaceSegments(ctx, []int64{oldID}, m)
 }
 
 // RollupKey identifies one hourly rollup bucket. Hour is UTC,
@@ -456,4 +430,108 @@ func (db *DB) DeleteIssueEventsBefore(ctx context.Context, projectID int64, befo
 		return fmt.Errorf("sqlite: delete issue events: %w", err)
 	}
 	return nil
+}
+
+// RollupAgg is one aggregation bucket's totals (sqlite-side shape;
+// enginestore adapts it to store.AggregateRow).
+type RollupAgg struct {
+	Logs   int64
+	Events int64
+}
+
+// ReplaceSegments atomically deletes every manifest row in oldIDs and
+// inserts m, in one transaction — the crash-atomic primitive behind
+// prune rewrites and compaction. Missing oldIDs are tolerated
+// (idempotent retry after a pre-commit crash). Returns the new row id.
+func (db *DB) ReplaceSegments(ctx context.Context, oldIDs []int64, m SegmentMeta) (int64, error) {
+	svc, err := json.Marshal(m.Services)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: marshal services: %w", err)
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: replace segments begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, id := range oldIDs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM segment_manifest WHERE id = ?`, id); err != nil {
+			return 0, fmt.Errorf("sqlite: replace segments delete %d: %w", id, err)
+		}
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO segment_manifest (project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services, raw_rows, size_bytes, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ProjectID, m.Path, m.MinTs, m.MaxTs, m.MinLogID, m.MaxLogID, m.Count, m.Events,
+		string(svc), m.RawRows, m.SizeBytes, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: replace segments insert: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: replace segments id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("sqlite: replace segments commit: %w", err)
+	}
+	return id, nil
+}
+
+// RollupAggregate groups flushed rollups for a project by service,
+// severity (decimal string), hour ("2006-01-02T15"), or day
+// ("2006-01-02"), between since (truncated down to the hour — rollup
+// granularity) and until (zero = unbounded, else truncated to the hour,
+// inclusive).
+func (db *DB) RollupAggregate(ctx context.Context, projectID int64, since, until time.Time, groupBy string) (map[string]RollupAgg, error) {
+	var keyExpr string
+	switch groupBy {
+	case "service":
+		keyExpr = "service"
+	case "severity":
+		keyExpr = "CAST(severity AS TEXT)"
+	case "hour":
+		keyExpr = "hour"
+	case "day":
+		keyExpr = "substr(hour, 1, 10)"
+	default:
+		return nil, fmt.Errorf("sqlite: unknown aggregate groupBy %q", groupBy)
+	}
+	q := `SELECT ` + keyExpr + ` AS k, SUM(logs), SUM(events) FROM log_rollups WHERE project_id = ? AND hour >= ?`
+	args := []any{projectID, since.UTC().Truncate(time.Hour).Format("2006-01-02T15")}
+	if !until.IsZero() {
+		q += ` AND hour <= ?`
+		args = append(args, until.UTC().Truncate(time.Hour).Format("2006-01-02T15"))
+	}
+	q += ` GROUP BY k`
+	rows, err := db.sql.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: rollup aggregate: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]RollupAgg{}
+	for rows.Next() {
+		var k string
+		var a RollupAgg
+		if err := rows.Scan(&k, &a.Logs, &a.Events); err != nil {
+			return nil, fmt.Errorf("sqlite: scan aggregate: %w", err)
+		}
+		out[k] = a
+	}
+	return out, rows.Err()
+}
+
+// EngineTotals sums manifest-level engine metrics for a project
+// (0 = all projects): segment count, stored rows, raw-fallback rows,
+// and on-disk segment bytes.
+func (db *DB) EngineTotals(ctx context.Context, projectID int64) (segments, rows, rawRows, sizeBytes int64, err error) {
+	q := `SELECT COUNT(*), COALESCE(SUM(count),0), COALESCE(SUM(raw_rows),0), COALESCE(SUM(size_bytes),0) FROM segment_manifest`
+	var args []any
+	if projectID != 0 {
+		q += ` WHERE project_id = ?`
+		args = append(args, projectID)
+	}
+	err = db.sql.QueryRowContext(ctx, q, args...).Scan(&segments, &rows, &rawRows, &sizeBytes)
+	if err != nil {
+		err = fmt.Errorf("sqlite: engine totals: %w", err)
+	}
+	return segments, rows, rawRows, sizeBytes, err
 }

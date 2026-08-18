@@ -116,7 +116,14 @@ func (e *Extractor) Extract(ctx context.Context, projectID int64, body string) (
 // Reconstruct rebuilds the original body from a (projectID, id, vars)
 // triple previously returned by Extract on this or any prior process
 // over the same Store.
-func (e *Extractor) Reconstruct(projectID, id int64, vars []string) (string, bool) {
+//
+// The three return states are distinct: ("", false, nil) means the
+// template id is genuinely absent (never minted, or a corrupt/mismatched
+// vars count); ("", false, err) means the lazy load of the project's
+// templates from the store failed — a transient store error, NOT
+// "missing" — and callers must not treat it as such; (body, true, nil)
+// is success.
+func (e *Extractor) Reconstruct(projectID, id int64, vars []string) (string, bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	p, ok := e.projects[projectID]
@@ -126,12 +133,12 @@ func (e *Extractor) Reconstruct(projectID, id int64, vars []string) (string, boo
 		var err error
 		p, err = e.load(context.Background(), projectID)
 		if err != nil {
-			return "", false
+			return "", false, err
 		}
 	}
 	t, ok := p.byID[id]
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
 	vi := 0
 	for _, tok := range t.tokens {
@@ -140,9 +147,9 @@ func (e *Extractor) Reconstruct(projectID, id int64, vars []string) (string, boo
 		}
 	}
 	if vi != len(vars) {
-		return "", false
+		return "", false, nil
 	}
-	return substitute(t.tokens, vars), true
+	return substitute(t.tokens, vars), true, nil
 }
 
 // Count reports the in-memory template count for a project (0 when the

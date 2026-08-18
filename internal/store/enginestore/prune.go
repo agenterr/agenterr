@@ -112,15 +112,27 @@ func (s *Store) rewriteSegment(ctx context.Context, m sqlitestore.SegmentMeta, c
 		return dropped, s.dropSegment(ctx, m)
 	}
 	rel := strings.TrimSuffix(m.Path, ".seg") + "-pruned.seg"
-	foot, err := segment.Write(s.segPath(rel), keep)
+	abs := s.segPath(rel)
+	foot, err := segment.Write(abs, keep)
 	if err != nil {
 		return 0, err
+	}
+	var rawRows int64
+	for _, r := range keep {
+		if r.TemplateID == 0 {
+			rawRows++
+		}
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return 0, fmt.Errorf("enginestore: stat pruned segment: %w", err)
 	}
 	meta := sqlitestore.SegmentMeta{
 		ProjectID: m.ProjectID, Path: rel,
 		MinTs: foot.MinTs, MaxTs: foot.MaxTs,
 		MinLogID: foot.MinLogID, MaxLogID: foot.MaxLogID,
 		Count: int64(foot.Count), Events: foot.Events, Services: foot.Services,
+		RawRows: rawRows, SizeBytes: fi.Size(),
 	}
 	if _, err := s.SwapSegment(ctx, m.ID, meta); err != nil {
 		_ = os.Remove(s.segPath(rel))
