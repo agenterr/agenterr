@@ -29,7 +29,7 @@ import (
 // from the fresh manifest too means legitimately replaced, and since the
 // replacement (merged) segment is not part of the snapshot the reader is
 // mid-pass on, the reader abandons that pass and restarts from a brand
-// new snapshot (readSegmentRowsWithRestart/readSegmentFileWithRestart,
+// new snapshot (readSegmentRowsWithRestart/findInSegmentWithRestart,
 // bounded by maxSegmentSetRestarts) rather than silently returning a
 // result missing that segment's rows; still present in the fresh manifest
 // means real corruption (propagate). Reading the old (immutable) segments

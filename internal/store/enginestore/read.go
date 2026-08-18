@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/core"
@@ -85,29 +84,9 @@ func (s *Store) collectRows(ctx context.Context, projectID int64, since, until t
 // collectRows for what restart=true means and why a partial result is
 // never returned in that case.
 func (s *Store) collectRowsOnce(ctx context.Context, projectID int64, sinceM, untilM int64, service string) ([]segment.Row, bool, error) {
-	ps := s.readProj(projectID)
-
-	var segs []sqlitestore.SegmentMeta
-	var memRows []segment.Row
-	var err error
-	if ps == nil {
-		// No projState for this project: no flush can be running for it
-		// (flushProject only ever runs against a projState reached via
-		// proj()), so the manifest query needs no ps.mu coherence lock —
-		// there is nothing racing it.
-		segs, err = s.Segments(ctx, projectID)
-		if err != nil {
-			return nil, false, err
-		}
-	} else {
-		ps.mu.Lock()
-		segs, err = s.Segments(ctx, projectID)
-		if err != nil {
-			ps.mu.Unlock()
-			return nil, false, err
-		}
-		memRows = ps.mem.Snapshot()
-		ps.mu.Unlock()
+	segs, memRows, err := s.snapshotProject(ctx, projectID)
+	if err != nil {
+		return nil, false, err
 	}
 
 	var out []segment.Row
@@ -164,29 +143,21 @@ func (s *Store) freshSegmentByID(ctx context.Context, projectID, segID int64) (s
 	return sqlitestore.SegmentMeta{}, false, nil
 }
 
-// readSegmentRowsWithRestart is collectRowsOnce's ENOENT handler: m's
-// file disappeared (compaction or prune removed it) between the manifest
-// snapshot that produced m and this read. It re-fetches the manifest via
-// freshSegmentByID to distinguish the two ways that can happen:
-//
-//   - Row gone from the fresh manifest too: the segment was legitimately
-//     replaced — compaction folded it into a merged segment covering the
-//     same rows (which is NOT among the segments this attempt is
-//     iterating), or prune dropped it outright. Either way, this attempt
-//     cannot see the true current state and must not return a partial
-//     result: restart=true, err=nil, telling the caller to abandon this
-//     pass and re-snapshot from scratch.
-//   - Row still present in the fresh manifest but the file is still
-//     missing: that combination is not explainable by compaction or
-//     prune (both remove the manifest row before the file), so it is real
-//     corruption and must propagate as an error naming the path.
-func (s *Store) readSegmentRowsWithRestart(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta, sinceM, untilM int64, service string) (rows []segment.Row, restart bool, err error) {
-	rows, err = s.readSegmentRows(m, sinceM, untilM, service)
+// openScanWithRestart opens m as a filtered Scan, mapping a vanished
+// file to the restart/corruption split this engine's reads use
+// everywhere: row gone from a fresh manifest → the segment was
+// legitimately replaced (compacted or pruned) and the caller must
+// restart its whole attempt from a fresh snapshot; row still present
+// but file missing → real corruption, loud error naming the path. After
+// OpenScan returns, the scan holds the file's bytes in memory, so no
+// later stage of a query can hit ENOENT.
+func (s *Store) openScanWithRestart(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta, f segment.ScanFilter) (*segment.Scan, bool, error) {
+	sc, err := segment.OpenScan(s.segPath(m.Path), f)
 	if err == nil {
-		return rows, false, nil
+		return sc, false, nil
 	}
 	if !isSegmentNotExist(err) {
-		return nil, false, err
+		return nil, false, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
 	}
 	fresh, found, ferr := s.freshSegmentByID(ctx, projectID, m.ID)
 	if ferr != nil {
@@ -195,44 +166,54 @@ func (s *Store) readSegmentRowsWithRestart(ctx context.Context, projectID int64,
 	if !found {
 		return nil, true, nil
 	}
-	rows, err = s.readSegmentRows(fresh, sinceM, untilM, service)
+	sc, err = segment.OpenScan(s.segPath(fresh.Path), f)
 	if err != nil {
 		if isSegmentNotExist(err) {
 			return nil, false, fmt.Errorf("enginestore: segment %s missing but manifest row %d still present: %w", fresh.Path, fresh.ID, err)
 		}
-		return nil, false, err
+		return nil, false, fmt.Errorf("enginestore: read segment %s: %w", fresh.Path, err)
 	}
-	return rows, false, nil
+	return sc, false, nil
 }
 
-// readSegmentFileWithRestart is logByIDOnce's counterpart to
-// readSegmentRowsWithRestart: it fully decodes segment m (no time/service
-// filtering — logByID scans every row for a matching LogID), applying the
-// same restart-on-legitimate-replacement, error-on-corruption discipline.
-// See readSegmentRowsWithRestart for what restart=true vs an error mean.
-func (s *Store) readSegmentFileWithRestart(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta) (rows []segment.Row, restart bool, err error) {
-	_, rows, err = segment.Read(s.segPath(m.Path))
-	if err == nil {
-		return rows, false, nil
+// readSegmentRowsWithRestart returns m's rows within [sinceM, untilM]
+// (optionally service-filtered), skipping the file entirely when the
+// manifest row already rules it out, with the standard
+// restart-on-replacement discipline (see openScanWithRestart).
+func (s *Store) readSegmentRowsWithRestart(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta, sinceM, untilM int64, service string) ([]segment.Row, bool, error) {
+	if m.MaxTs < sinceM || m.MinTs > untilM {
+		return nil, false, nil
 	}
-	if !isSegmentNotExist(err) {
-		return nil, false, err
+	if service != "" && !contains(m.Services, service) {
+		return nil, false, nil
 	}
-	fresh, found, ferr := s.freshSegmentByID(ctx, projectID, m.ID)
-	if ferr != nil {
-		return nil, false, ferr
+	sc, restart, err := s.openScanWithRestart(ctx, projectID, m, segment.ScanFilter{SinceM: sinceM, UntilM: untilM, Service: service})
+	if err != nil || restart {
+		return nil, restart, err
 	}
-	if !found {
-		return nil, true, nil
+	rows, err := sc.Rows(sc.Match)
+	return rows, false, err
+}
+
+// findInSegmentWithRestart looks up logID in segment m without
+// materializing any other row: only the cheap id column is decoded
+// unless the id is found. Same restart/corruption discipline as
+// openScanWithRestart.
+func (s *Store) findInSegmentWithRestart(ctx context.Context, projectID int64, m sqlitestore.SegmentMeta, logID int64) (segment.Row, bool, bool, error) {
+	sc, restart, err := s.openScanWithRestart(ctx, projectID, m, segment.ScanFilter{})
+	if err != nil || restart {
+		return segment.Row{}, false, restart, err
 	}
-	_, rows, err = segment.Read(s.segPath(fresh.Path))
-	if err != nil {
-		if isSegmentNotExist(err) {
-			return nil, false, fmt.Errorf("enginestore: segment %s missing but manifest row %d still present: %w", fresh.Path, fresh.ID, err)
+	for i := 0; i < sc.Len(); i++ {
+		if sc.LogID(i) == logID {
+			r, err := sc.Row(i)
+			if err != nil {
+				return segment.Row{}, false, false, err
+			}
+			return r, true, false, nil
 		}
-		return nil, false, err
 	}
-	return rows, false, nil
+	return segment.Row{}, false, false, nil
 }
 
 // boundsMicros converts a [since, until] time range (a zero Time meaning
@@ -248,24 +229,6 @@ func boundsMicros(since, until time.Time) (sinceM, untilM int64) {
 	return sinceM, untilM
 }
 
-// readSegmentRows reads one manifest segment's rows and returns those
-// within [sinceM, untilM]. It skips the file read entirely (returning nil,
-// nil) when the segment's own time range or recorded service set already
-// rules it out.
-func (s *Store) readSegmentRows(m sqlitestore.SegmentMeta, sinceM, untilM int64, service string) ([]segment.Row, error) {
-	if m.MaxTs < sinceM || m.MinTs > untilM {
-		return nil, nil
-	}
-	if service != "" && !contains(m.Services, service) {
-		return nil, nil
-	}
-	_, rows, err := segment.Read(s.segPath(m.Path))
-	if err != nil {
-		return nil, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
-	}
-	return filterRowsByTime(rows, sinceM, untilM), nil
-}
-
 // filterRowsByTime returns the subset of rows with TsMicros within
 // [sinceM, untilM].
 func filterRowsByTime(rows []segment.Row, sinceM, untilM int64) []segment.Row {
@@ -276,73 +239,6 @@ func filterRowsByTime(rows []segment.Row, sinceM, untilM int64) []segment.Row {
 		}
 	}
 	return out
-}
-
-// pairedRow bundles a row with the project it belongs to. Needed only
-// when scanning across every project (ProjectID == 0 — "all projects",
-// used by the web /search page, the admin-key /api/v1/logs endpoint, and
-// the MCP search_logs tool): rowToLog/Reconstruct both key off the row's
-// true project, which a single filter value cannot supply once rows from
-// multiple projects are merged into one slice.
-type pairedRow struct {
-	ProjectID int64
-	Row       segment.Row
-}
-
-// collectRowsAllProjects merges collectRows across every project this
-// Store has ever opened a projState for. It deliberately does not call
-// proj() for a new id purely to satisfy a read — s.mu is only used to
-// enumerate the existing s.projects map, matching findLog's convention
-// elsewhere in this file. This is complete: every project with a
-// manifest segment has one because flushProject can only ever produce a
-// segment via proj(), and proj() opens (and never removes) that
-// project's WAL file, which recover() globs and replays for every
-// project on every Open — so any project with segments or WAL rows
-// already has a projState by the time this runs.
-//
-// Each project's (segments, memtable) pair is still read through
-// collectRows, so it keeps that function's ps.mu coherence guarantee
-// against a concurrent flushProject on that same project — this only
-// adds a loop across projects, not a new locking discipline.
-func (s *Store) collectRowsAllProjects(ctx context.Context, since, until time.Time, service string) ([]pairedRow, error) {
-	s.mu.Lock()
-	pids := make([]int64, 0, len(s.projects))
-	for pid := range s.projects {
-		pids = append(pids, pid)
-	}
-	s.mu.Unlock()
-
-	var out []pairedRow
-	for _, pid := range pids {
-		rows, err := s.collectRows(ctx, pid, since, until, service)
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range rows {
-			out = append(out, pairedRow{ProjectID: pid, Row: r})
-		}
-	}
-	return out, nil
-}
-
-// collectPairedRows is collectRows tagged with each row's project: for a
-// single project (projectID != 0) it just wraps collectRows's result; for
-// projectID == 0 ("all projects") it delegates to collectRowsAllProjects.
-// SearchLogs is the only caller — factored out mainly to keep that
-// function's branching count down.
-func (s *Store) collectPairedRows(ctx context.Context, projectID int64, since, until time.Time, service string) ([]pairedRow, error) {
-	if projectID == 0 {
-		return s.collectRowsAllProjects(ctx, since, until, service)
-	}
-	single, err := s.collectRows(ctx, projectID, since, until, service)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]pairedRow, len(single))
-	for i, r := range single {
-		out[i] = pairedRow{ProjectID: projectID, Row: r}
-	}
-	return out, nil
 }
 
 // rowLess reports whether a sorts strictly before b in the (TsMicros,
@@ -390,52 +286,6 @@ func (s *Store) rowToLog(projectID int64, r segment.Row) (core.Log, error) {
 		Service: r.Service, Environment: r.Environment,
 		Release: r.Release, TraceID: r.TraceID, Attrs: attrs,
 	}, nil
-}
-
-// SearchLogs returns logs matching f, most recent first (ties broken by
-// descending id, matching the legacy store), capped at f.Limit (0 → 50).
-// Query is a SUBSTRING match on the reconstructed body — no tokenizer
-// exists anywhere in this engine (spec §5).
-func (s *Store) SearchLogs(ctx context.Context, f store.LogFilter) ([]core.Log, error) {
-	limit := f.Limit
-	if limit == 0 {
-		limit = 50
-	}
-	rows, err := s.collectPairedRows(ctx, f.ProjectID, f.Since, f.Until, f.Service)
-	if err != nil {
-		return nil, err
-	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Row.TsMicros != rows[j].Row.TsMicros {
-			return rows[i].Row.TsMicros > rows[j].Row.TsMicros
-		}
-		return rows[i].Row.LogID > rows[j].Row.LogID
-	})
-	out := make([]core.Log, 0, limit)
-	for _, pr := range rows {
-		r := pr.Row
-		if f.Service != "" && r.Service != f.Service {
-			continue
-		}
-		if f.Environment != "" && r.Environment != f.Environment {
-			continue
-		}
-		if r.Severity < int(f.MinSeverity) {
-			continue
-		}
-		l, err := s.rowToLog(pr.ProjectID, r)
-		if err != nil {
-			return nil, err
-		}
-		if f.Query != "" && !strings.Contains(l.Body, f.Query) {
-			continue
-		}
-		out = append(out, l)
-		if len(out) == limit {
-			break
-		}
-	}
-	return out, nil
 }
 
 // logByID locates one row by log id within a project (memtable first,
@@ -492,17 +342,15 @@ func (s *Store) logByIDOnce(ctx context.Context, projectID, logID int64) (row se
 		if logID < m.MinLogID || logID > m.MaxLogID {
 			continue
 		}
-		rows, restart, err := s.readSegmentFileWithRestart(ctx, projectID, m)
+		r, ok, restart, err := s.findInSegmentWithRestart(ctx, projectID, m, logID)
 		if err != nil {
 			return segment.Row{}, false, false, err
 		}
 		if restart {
 			return segment.Row{}, false, true, nil
 		}
-		for _, r := range rows {
-			if r.LogID == logID {
-				return r, true, false, nil
-			}
+		if ok {
+			return r, true, false, nil
 		}
 	}
 	return segment.Row{}, false, false, nil
