@@ -112,6 +112,16 @@ func runAgenterr(corpus, dir string) {
 		log.Fatal(err)
 	}
 
+	ingestAgenterr(ctx, s, p.ID, recs)
+	queryAgenterr(ctx, s, p.ID)
+
+	if err := s.Close(); err != nil {
+		log.Fatal(err)
+	}
+	reportAgenterrDisk(dir, len(recs))
+}
+
+func ingestAgenterr(ctx context.Context, s *enginestore.Store, projectID int64, recs []rec) {
 	t0 := time.Now()
 	batch := make([]store.Entry, 0, 500)
 	flush := func() {
@@ -131,7 +141,7 @@ func runAgenterr(corpus, dir string) {
 		var attrs map[string]string
 		_ = json.Unmarshal([]byte(r.Attrs), &attrs)
 		body, _ := normalize.StripANSI(r.Body)
-		l := core.Log{ProjectID: p.ID, Time: t, Severity: core.Severity(r.Severity),
+		l := core.Log{ProjectID: projectID, Time: t, Severity: core.Severity(r.Severity),
 			Body: body, Service: r.Service, Attrs: attrs}
 		e := store.Entry{Log: l}
 		if core.IsEvent(l) {
@@ -149,20 +159,22 @@ func runAgenterr(corpus, dir string) {
 	if err := s.FlushAll(); err != nil {
 		log.Fatal(err)
 	}
-	segsBefore, _ := s.Segments(ctx, p.ID)
+	segsBefore, _ := s.Segments(ctx, projectID)
 	tC := time.Now()
 	if err := s.CompactAll(ctx); err != nil {
 		log.Fatal(err)
 	}
 	compactDur := time.Since(tC)
-	segsAfter, _ := s.Segments(ctx, p.ID)
+	segsAfter, _ := s.Segments(ctx, projectID)
 
 	fmt.Printf("== agenterr (real engine, in-process) ==\n")
 	fmt.Printf("ingest: %d logs in %s (%.0f logs/s)\n", len(recs), ingest.Round(time.Millisecond), float64(len(recs))/ingest.Seconds())
 	fmt.Printf("segments: %d -> %d after compaction (%s)\n", len(segsBefore), len(segsAfter), compactDur.Round(time.Millisecond))
+}
 
+func queryAgenterr(ctx context.Context, s *enginestore.Store, projectID int64) {
 	timeIt("Q1 scoped substring search", func() int {
-		logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID, Service: "connect_api",
+		logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: projectID, Service: "connect_api",
 			Query: "record not found", Since: dayStart, Until: dayEnd, Limit: 50})
 		if err != nil {
 			log.Fatal(err)
@@ -170,7 +182,7 @@ func runAgenterr(corpus, dir string) {
 		return len(logs)
 	})
 	timeIt("Q2 unscoped substring search", func() int {
-		logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID,
+		logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: projectID,
 			Query: "invalid signature", Since: dayStart, Until: dayEnd, Limit: 50})
 		if err != nil {
 			log.Fatal(err)
@@ -178,17 +190,16 @@ func runAgenterr(corpus, dir string) {
 		return len(logs)
 	})
 	timeIt("Q3 aggregate by service", func() int {
-		rows, err := s.Aggregate(ctx, store.AggregateFilter{ProjectID: p.ID,
+		rows, err := s.Aggregate(ctx, store.AggregateFilter{ProjectID: projectID,
 			Since: dayStart, Until: dayEnd, GroupBy: "service"})
 		if err != nil {
 			log.Fatal(err)
 		}
 		return len(rows)
 	})
+}
 
-	if err := s.Close(); err != nil {
-		log.Fatal(err)
-	}
+func reportAgenterrDisk(dir string, nrecs int) {
 	var db, seg int64
 	sum := func(root string, out *int64) {
 		_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
@@ -209,7 +220,7 @@ func runAgenterr(corpus, dir string) {
 	}
 	total := db + seg
 	fmt.Printf("disk: engine=%d B, metadata=%d B, TOTAL=%d B -> %.1f B/record\n",
-		seg, db, total, float64(total)/float64(len(recs)))
+		seg, db, total, float64(total)/float64(nrecs))
 }
 
 // ---- o2 side ----
