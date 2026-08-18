@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/agenterr/agenterr/internal/core"
 	"github.com/agenterr/agenterr/internal/segment"
@@ -121,7 +123,7 @@ func (s *Store) searchProjectOnce(ctx context.Context, projectID int64, f store.
 		Service: f.Service, Environment: f.Environment,
 		MinSeverity: int(f.MinSeverity),
 	}
-	var out []matchRef
+	var cands []sqlitestore.SegmentMeta
 	for _, m := range segs {
 		if m.MaxTs < sinceM || m.MinTs > untilM {
 			continue
@@ -129,18 +131,11 @@ func (s *Store) searchProjectOnce(ctx context.Context, projectID int64, f store.
 		if f.Service != "" && !contains(m.Services, f.Service) {
 			continue
 		}
-		sc, restart, err := s.openScanWithRestart(ctx, projectID, m, filter)
-		if err != nil {
-			return nil, false, err
-		}
-		if restart {
-			return nil, true, nil
-		}
-		ms, err := searchScanRange(sc, projectID, f.Query, always, tmpls, limit, 0, len(sc.Match))
-		if err != nil {
-			return nil, false, err
-		}
-		out = append(out, ms...)
+		cands = append(cands, m)
+	}
+	out, restart, err := s.searchSegments(ctx, projectID, cands, filter, f.Query, always, tmpls, limit)
+	if err != nil || restart {
+		return nil, restart, err
 	}
 	mm, err := s.searchMemRows(projectID, memRows, f, sinceM, untilM)
 	if err != nil {
@@ -166,6 +161,110 @@ func (s *Store) snapshotProject(ctx context.Context, projectID int64) ([]sqlites
 		return nil, nil, err
 	}
 	return segs, ps.mem.Snapshot(), nil
+}
+
+// searchChunkRows is the Match-count above which one segment's match
+// pass is split into parallel chunks. Chunks are independent because
+// searchScanRange takes an explicit [lo, hi) range and per-chunk caps
+// are safe: the global cut keeps at most `limit` rows, and any row a
+// chunk's cap discards is outranked by `limit` rows from that same
+// chunk.
+const searchChunkRows = 32_768
+
+// segSearchResult carries one segment's outcome across the fan-out.
+type segSearchResult struct {
+	ms      []matchRef
+	restart bool
+	err     error
+}
+
+// searchSegments scans and matches every candidate segment with bounded
+// parallelism (one goroutine per segment, GOMAXPROCS at a time), each
+// segment further chunk-parallelized by searchScanChunked.
+func (s *Store) searchSegments(ctx context.Context, projectID int64, segs []sqlitestore.SegmentMeta, filter segment.ScanFilter, q string, always map[int64]bool, tmpls map[int64][]string, limit int) ([]matchRef, bool, error) {
+	results := make([]segSearchResult, len(segs))
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+	var wg sync.WaitGroup
+	for si := range segs {
+		wg.Add(1)
+		go func(si int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			sc, restart, err := s.openScanWithRestart(ctx, projectID, segs[si], filter)
+			if err != nil || restart {
+				results[si] = segSearchResult{restart: restart, err: err}
+				return
+			}
+			ms, err := searchScanChunked(sc, projectID, q, always, tmpls, limit)
+			results[si] = segSearchResult{ms: ms, err: err}
+		}(si)
+	}
+	wg.Wait()
+	var out []matchRef
+	for _, r := range results {
+		if r.err != nil {
+			return nil, false, r.err
+		}
+		if r.restart {
+			return nil, true, nil
+		}
+		out = append(out, r.ms...)
+	}
+	return out, false, nil
+}
+
+// searchScanChunked splits one segment's Match set into contiguous
+// chunks matched in parallel, then merges the per-chunk results in
+// global descending order, applying the same limit+boundary-tie rule
+// searchScanRange uses within a chunk.
+func searchScanChunked(sc *segment.Scan, projectID int64, q string, always map[int64]bool, tmpls map[int64][]string, limit int) ([]matchRef, error) {
+	n := len(sc.Match)
+	if n <= searchChunkRows {
+		return searchScanRange(sc, projectID, q, always, tmpls, limit, 0, n)
+	}
+	if q != "" {
+		if err := sc.EnsureBodies(); err != nil {
+			return nil, err
+		}
+	}
+	nChunks := (n + searchChunkRows - 1) / searchChunkRows
+	chunks := make([][]matchRef, nChunks)
+	errs := make([]error, nChunks)
+	var wg sync.WaitGroup
+	for c := 0; c < nChunks; c++ {
+		wg.Add(1)
+		go func(c int) {
+			defer wg.Done()
+			lo := c * searchChunkRows
+			hi := lo + searchChunkRows
+			if hi > n {
+				hi = n
+			}
+			chunks[c], errs[c] = searchScanRange(sc, projectID, q, always, tmpls, limit, lo, hi)
+		}(c)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Chunks cover ascending index ranges; each chunk's matches are
+	// (ts, id)-descending within it. Consuming chunks from last to
+	// first yields global descending order (segment rows are
+	// ts-ascending by construction), so apply the limit+tie rule on
+	// the concatenation.
+	var out []matchRef
+	for c := nChunks - 1; c >= 0; c-- {
+		for _, m := range chunks[c] {
+			if len(out) >= limit && m.ts != out[len(out)-1].ts {
+				return out, nil
+			}
+			out = append(out, m)
+		}
+	}
+	return out, nil
 }
 
 // searchScanRange matches sc.Match[lo:hi] against q in reverse
