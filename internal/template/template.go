@@ -266,3 +266,81 @@ func substitute(ttoks, vars []string) string {
 	}
 	return strings.Join(out, " ")
 }
+
+// Snapshot returns a copy of projectID's current id→tokens table for
+// lock-free read use (search matching). The token slices are shared
+// with the extractor and must be treated as read-only — safe because
+// templates are append-only and a minted template's tokens never
+// mutate. The map itself is a copy, so later mints do not race with
+// readers of the snapshot.
+func (e *Extractor) Snapshot(projectID int64) (map[int64][]string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	p, ok := e.projects[projectID]
+	if !ok {
+		var err error
+		p, err = e.load(context.Background(), projectID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	out := make(map[int64][]string, len(p.byID))
+	for id, t := range p.byID {
+		out[id] = t.tokens
+	}
+	return out, nil
+}
+
+// AppendSubstitute appends tokens joined by single spaces, with Wild
+// slots filled from vars in order, to dst — the zero-allocation
+// counterpart of Reconstruct for callers that already hold the token
+// list. ok=false (dst returned unchanged) when the var count does not
+// match the token list's Wild count.
+func AppendSubstitute(dst []byte, tokens []string, vars [][]byte) ([]byte, bool) {
+	wilds := 0
+	for _, tok := range tokens {
+		if tok == Wild {
+			wilds++
+		}
+	}
+	if wilds != len(vars) {
+		return dst, false
+	}
+	out := dst
+	vi := 0
+	for i, tok := range tokens {
+		if i > 0 {
+			out = append(out, ' ')
+		}
+		if tok == Wild {
+			out = append(out, vars[vi]...)
+			vi++
+		} else {
+			out = append(out, tok...)
+		}
+	}
+	return out, true
+}
+
+// AlwaysContaining reports which templates in tmpls are guaranteed to
+// contain q in every possible reconstruction: q lies wholly inside one
+// of the template's static runs (the Wild-free stretches of its text).
+// Sound but deliberately not complete — an id absent from the result
+// can still match via variable values or across a run boundary, and
+// callers must verify those rows by reconstruction.
+func AlwaysContaining(tmpls map[int64][]string, q string) map[int64]bool {
+	out := map[int64]bool{}
+	if q == "" {
+		return out
+	}
+	for id, tokens := range tmpls {
+		text := strings.Join(tokens, " ")
+		for _, run := range strings.Split(text, Wild) {
+			if strings.Contains(run, q) {
+				out[id] = true
+				break
+			}
+		}
+	}
+	return out
+}
