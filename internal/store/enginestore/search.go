@@ -231,11 +231,21 @@ func searchScanChunked(sc *segment.Scan, projectID int64, q string, always map[i
 	nChunks := (n + searchChunkRows - 1) / searchChunkRows
 	chunks := make([][]matchRef, nChunks)
 	errs := make([]error, nChunks)
+	// A compacted segment has no size cap (CompactAll can merge a full
+	// day into one segment), so nChunks is unbounded — gate it with a
+	// GOMAXPROCS(0)-sized semaphore, same as searchSegments. This can
+	// briefly stack with the outer segment-level semaphore (a segment
+	// goroutine holds its slot while its own chunk goroutines acquire
+	// theirs), which is safe: inner acquires never wait on an outer
+	// release, so the two levels can't deadlock each other.
+	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 	var wg sync.WaitGroup
 	for c := 0; c < nChunks; c++ {
 		wg.Add(1)
 		go func(c int) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			lo := c * searchChunkRows
 			hi := lo + searchChunkRows
 			if hi > n {
