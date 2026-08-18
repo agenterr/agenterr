@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -12,12 +13,13 @@ import (
 	"github.com/agenterr/agenterr/internal/store"
 )
 
-// registerTools binds each of the seventeen tools to the underlying MCP
+// registerTools binds each of the eighteen tools to the underlying MCP
 // server. Every tool = an input schema struct + a handler that calls the
-// store + a small pure render function (see render.go). The eight
-// original tools are registered here; the five noise-control tools are
-// registered by registerNoiseTools (see noise.go), and the four
-// alert-rule tools by registerAlertTools (see alert.go).
+// store + a small pure render function (see render.go). The nine
+// original tools (including aggregate_logs) are registered here; the
+// five noise-control tools are registered by registerNoiseTools (see
+// noise.go), and the four alert-rule tools by registerAlertTools (see
+// alert.go).
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "list_projects",
@@ -58,6 +60,11 @@ func (s *Server) registerTools() {
 		Name:        "get_stats",
 		Description: "Log/event volume and open-issue counts, with a per-day breakdown.",
 	}, s.getStats)
+
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+		Name:        "aggregate_logs",
+		Description: "Aggregate log volume grouped by service, severity, hour, or day — counts of logs and error events per bucket.",
+	}, s.aggregateLogs)
 
 	s.registerNoiseTools()
 	s.registerAlertTools()
@@ -342,5 +349,74 @@ func (s *Server) getStats(ctx context.Context, _ *mcpsdk.CallToolRequest, in get
 	if err != nil {
 		return errorResult(toolErr(err)), nil, nil
 	}
-	return textResult(renderStats(st)), nil, nil
+
+	text := renderStats(st)
+	// EngineMetrics is optional (only the template-storage-engine backend
+	// implements it — see store.EngineMetrics's doc comment); a plain
+	// store.Reader degrades gracefully by simply omitting the block, and
+	// an EngineStats failure is treated the same way rather than failing
+	// a request that otherwise already succeeded.
+	if em, ok := s.reader.(store.EngineMetrics); ok {
+		if es, err := em.EngineStats(ctx, f.ProjectID); err == nil {
+			text += "\n" + renderEngineBlock(es)
+		}
+	}
+	return textResult(text), nil, nil
+}
+
+// ---- aggregate_logs ----
+
+type aggregateLogsInput struct {
+	GroupBy string `json:"group_by" jsonschema:"Group by: service, severity, hour, or day"`
+	Since   string `json:"since,omitempty" jsonschema:"Duration like 24h or 7d, or an RFC3339 timestamp (default 24h)"`
+	Until   string `json:"until,omitempty" jsonschema:"Duration like 24h or 7d, or an RFC3339 timestamp"`
+	Project int64  `json:"project,omitempty" jsonschema:"Project ID; admin keys only, required (Aggregate has no all-projects mode)"`
+}
+
+func (s *Server) aggregateLogs(ctx context.Context, _ *mcpsdk.CallToolRequest, in aggregateLogsInput) (*mcpsdk.CallToolResult, any, error) {
+	switch in.GroupBy {
+	case "service", "severity", "hour", "day":
+	default:
+		return errorResult(errors.New("group_by: must be service, severity, hour, or day")), nil, nil
+	}
+
+	callerProjectID, isAdmin := callerScope(ctx)
+	var projectID int64
+	if isAdmin {
+		if in.Project == 0 {
+			return errorResult(errors.New("project: required for admin keys")), nil, nil
+		}
+		projectID = in.Project
+	} else {
+		projectID = callerProjectID
+	}
+
+	now := s.clock()
+	since := now.Add(-24 * time.Hour)
+	if in.Since != "" {
+		t, err := parseSince(in.Since, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		since = t
+	}
+	var until time.Time
+	if in.Until != "" {
+		t, err := parseSince(in.Until, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		until = t
+	}
+
+	rows, err := s.reader.Aggregate(ctx, store.AggregateFilter{
+		ProjectID: projectID,
+		Since:     since,
+		Until:     until,
+		GroupBy:   in.GroupBy,
+	})
+	if err != nil {
+		return errorResult(toolErr(err)), nil, nil
+	}
+	return textResult(renderAggregate(rows, in.GroupBy)), nil, nil
 }

@@ -20,6 +20,7 @@ type API struct {
 	issues     *handlers.Issues
 	logs       *handlers.Logs
 	stats      *handlers.Stats
+	aggregate  *handlers.Aggregate
 	noiseRules *handlers.NoiseRules
 	alertRules *handlers.AlertRules
 }
@@ -36,6 +37,7 @@ func New(reader store.Reader, admin store.Admin, nr store.NoiseRules, rulesEngin
 		issues:     &handlers.Issues{Reader: reader, Admin: admin},
 		logs:       &handlers.Logs{Reader: reader},
 		stats:      &handlers.Stats{Reader: reader, NR: nr},
+		aggregate:  &handlers.Aggregate{Reader: reader},
 		noiseRules: &handlers.NoiseRules{NR: nr, Reader: reader, Engine: rulesEngine},
 		alertRules: &handlers.AlertRules{AR: ar, Engine: alertsEngine},
 	}
@@ -73,6 +75,7 @@ func (a *API) Mount(mux *http.ServeMux, keys auth.KeyAuth) {
 	mux.Handle("GET /api/v1/logs/{id}/context", wrap(a.logs.Context))
 
 	mux.Handle("GET /api/v1/stats", wrap(a.stats.Get))
+	mux.Handle("GET /api/v1/aggregate", wrap(a.aggregate.Get))
 
 	mux.Handle("GET /api/v1/projects/{id}/noise-rules", wrap(a.noiseRules.List))
 	mux.Handle("POST /api/v1/projects/{id}/noise-rules", wrap(a.noiseRules.Create))

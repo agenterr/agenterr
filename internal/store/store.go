@@ -93,6 +93,15 @@ type Reader interface {
 	// ServiceCounts returns the top 20 services by log count for
 	// projectID since the given time, ordered descending by count.
 	ServiceCounts(ctx context.Context, projectID int64, since time.Time) ([]ServiceCount, error)
+	// Aggregate groups a project's log volume by service, severity,
+	// hour, or day (f.GroupBy), covering both flushed and unflushed
+	// data. f.ProjectID must be non-zero; there is no "all projects"
+	// mode. Windows are hour-granular: Since/Until are truncated to the
+	// hour (Until inclusive of its full hour) — the rollup bucket size.
+	// Ordering: service by Logs descending (ties by Key ascending);
+	// severity by numeric Key descending (most severe first); hour/day
+	// by Key ascending.
+	Aggregate(ctx context.Context, f AggregateFilter) ([]AggregateRow, error)
 }
 
 // ServiceCount is one service's log volume, used to build the noise
@@ -100,6 +109,50 @@ type Reader interface {
 type ServiceCount struct {
 	Service string
 	Logs    int64
+}
+
+// AggregateFilter narrows an Aggregate query. GroupBy must be one of
+// "service", "severity", "hour", or "day"; any other value errors.
+// ProjectID must be non-zero — Aggregate has no "all projects" mode.
+type AggregateFilter struct {
+	ProjectID    int64
+	Since, Until time.Time
+	GroupBy      string
+}
+
+// AggregateRow is one group-by bucket's log/event volume. Key's shape
+// depends on GroupBy: the service name, the severity as a decimal string,
+// or an hour ("2006-01-02T15") / day ("2006-01-02") in UTC.
+type AggregateRow struct {
+	Key    string
+	Logs   int64
+	Events int64
+}
+
+// EngineStats summarizes a template-storage-engine backend's segment and
+// row bookkeeping for a project: how much data lives in immutable
+// segments (Segments, Rows, RawRows, SizeBytes — all manifest totals) and
+// how much is still sitting in the unflushed memtable (MemRows). Rate and
+// per-record derivations (raw-fallback %, bytes/record) are computed by
+// presentation layers from these raw fields, not stored here.
+type EngineStats struct {
+	Segments  int64
+	Rows      int64
+	RawRows   int64
+	SizeBytes int64
+	MemRows   int64
+}
+
+// EngineMetrics is an optional capability a Reader backend may implement
+// to expose engine-level storage metrics (segment counts, raw-template
+// fallback rows, on-disk bytes, unflushed rows). Only the template
+// storage engine backend (enginestore) implements it; callers that need
+// this data (the MCP get_stats tool, the REST /api/v1/stats route) do a
+// checked type assertion against store.Reader and simply omit the block
+// when it's absent, rather than requiring every Reader implementation
+// (including test fakes) to carry it.
+type EngineMetrics interface {
+	EngineStats(ctx context.Context, projectID int64) (EngineStats, error)
 }
 
 // Admin manages projects, issue status, and API keys.

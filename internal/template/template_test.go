@@ -12,6 +12,7 @@ type fakeStore struct {
 	rows       map[int64][]Row // projectID → rows
 	nextID     int64
 	failInsert error
+	failLoad   error
 	inserts    int
 }
 
@@ -28,6 +29,9 @@ func (f *fakeStore) InsertTemplate(_ context.Context, projectID int64, text stri
 }
 
 func (f *fakeStore) LoadTemplates(_ context.Context, projectID int64) ([]Row, error) {
+	if f.failLoad != nil {
+		return nil, f.failLoad
+	}
 	return append([]Row(nil), f.rows[projectID]...), nil
 }
 
@@ -61,9 +65,9 @@ func TestExtractRoundTripAppendOnly(t *testing.T) {
 		}
 	}
 	for _, s := range all { // every triple reconstructs forever (append-only)
-		got, ok := e.Reconstruct(1, s.id, s.vars)
-		if !ok || got != s.body {
-			t.Errorf("round trip broke:\n got %q\nwant %q", got, s.body)
+		got, ok, err := e.Reconstruct(1, s.id, s.vars)
+		if err != nil || !ok || got != s.body {
+			t.Errorf("round trip broke:\n got %q\nwant %q err=%v", got, s.body, err)
 		}
 	}
 }
@@ -75,7 +79,7 @@ func TestProjectIsolation(t *testing.T) {
 	if id1 == id2 {
 		t.Errorf("projects share template ids: %d == %d", id1, id2)
 	}
-	if _, ok := e.Reconstruct(2, id1, nil); ok && id1 != id2 {
+	if _, ok, _ := e.Reconstruct(2, id1, nil); ok && id1 != id2 {
 		t.Error("project 2 can reconstruct project 1's template id")
 	}
 }
@@ -129,9 +133,9 @@ func TestLoadFromStoreSurvivesRestart(t *testing.T) {
 	}
 	// "Restart": fresh extractor over the same store.
 	e2 := NewExtractor(fs, 0)
-	got, ok2 := e2.Reconstruct(1, id, vars)
-	if !ok2 || got != "req 123 done in 45ms" {
-		t.Errorf("after reload: got %q ok=%v", got, ok2)
+	got, ok2, err2 := e2.Reconstruct(1, id, vars)
+	if err2 != nil || !ok2 || got != "req 123 done in 45ms" {
+		t.Errorf("after reload: got %q ok=%v err=%v", got, ok2, err2)
 	}
 	// New extraction reuses loaded templates rather than re-minting.
 	before := fs.inserts
@@ -150,6 +154,28 @@ func TestRawFallbacks(t *testing.T) {
 		if id, _, ok, err := e.Extract(ctx, 1, body); ok || id != RawID || err != nil {
 			t.Errorf("%q: want raw fallback, got id=%d ok=%v err=%v", body, id, ok, err)
 		}
+	}
+}
+
+func TestReconstructSurfacesLoadError(t *testing.T) {
+	fs := newFakeStore()
+	e1 := NewExtractor(fs, 0)
+	id, vars, ok, _ := e1.Extract(ctx, 1, "alpha beta gamma")
+	if !ok {
+		t.Fatal("should template")
+	}
+	// Fresh extractor whose store now fails loads: error, not "missing".
+	fs.failLoad = errors.New("disk exploded")
+	e2 := NewExtractor(fs, 0)
+	if _, ok, err := e2.Reconstruct(1, id, vars); ok || err == nil {
+		t.Errorf("want load error surfaced, got ok=%v err=%v", ok, err)
+	}
+	fs.failLoad = nil
+	if got, ok, err := e2.Reconstruct(1, id, vars); !ok || err != nil || got != "alpha beta gamma" {
+		t.Errorf("after recovery: %q ok=%v err=%v", got, ok, err)
+	}
+	if _, ok, err := e2.Reconstruct(1, 9999, nil); ok || err != nil {
+		t.Errorf("genuinely missing: want (false, nil), got ok=%v err=%v", ok, err)
 	}
 }
 
