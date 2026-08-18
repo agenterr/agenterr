@@ -109,7 +109,10 @@ type ScanFilter struct {
 // Concurrency: Row/Rows and EnsureBodies are safe for concurrent use.
 // The lock-free accessors (Ts, LogID, SeverityAt; TemplateID,
 // AppendVars, RawBytes after EnsureBodies) are safe for concurrent use
-// once their data is built.
+// once their data is built. The unsynchronized writes to sc.svc/sc.env
+// in computeMatch are safe because they occur inside OpenScan before the
+// *Scan is returned to the caller; buildMeta's writes are serialized by
+// metaOnce.
 type Scan struct {
 	// Foot is the segment's footer, CRC-verified at open.
 	Foot Footer
@@ -257,51 +260,79 @@ func dictOrdinal(d *dictCol, value string) (uint64, bool) {
 	return 0, false
 }
 
+// filterRef loads and caches a dictionary column if not already cached,
+// then resolves value to its ordinal. Returns the ordinal, whether the
+// value exists in the dictionary, and any error. Used to consolidate
+// Service/Environment filter resolution in computeMatch.
+func (sc *Scan) filterRef(dictName, refName, value string, cached **dictCol) (uint64, bool, error) {
+	if *cached == nil {
+		var err error
+		*cached, err = sc.dict(dictName, refName)
+		if err != nil {
+			return 0, false, err
+		}
+	}
+	ordinal, ok := dictOrdinal(*cached, value)
+	return ordinal, ok, nil
+}
+
+// admitRow checks whether row i passes all filter criteria (time, severity,
+// service, environment). The filter values svcRef and envRef must be
+// pre-resolved; they are ignored if f.Service/f.Environment are empty.
+func (sc *Scan) admitRow(i int, f ScanFilter, svcRef, envRef uint64) bool {
+	if sc.ts[i] < f.SinceM || sc.ts[i] > f.UntilM {
+		return false
+	}
+	if int(sc.sevs[i]) < f.MinSeverity {
+		return false
+	}
+	if f.Service != "" && sc.svc.refs[i] != svcRef {
+		return false
+	}
+	if f.Environment != "" && sc.env.refs[i] != envRef {
+		return false
+	}
+	return true
+}
+
 // computeMatch fills sc.Match with the rows f admits, comparing
 // dictionary REFS (small ints), never per-row strings.
-func (sc *Scan) computeMatch(f ScanFilter) error { //nolint:gocyclo
+func (sc *Scan) computeMatch(f ScanFilter) error {
 	if f.SinceM == 0 && f.UntilM == 0 {
 		f.SinceM, f.UntilM = MinTsBound, MaxTsBound
 	}
-	var svcRef, envRef uint64
+
+	// Resolve service filter if present.
+	var svcRef uint64
 	if f.Service != "" {
-		var err error
-		if sc.svc == nil {
-			if sc.svc, err = sc.dict("service_dict", "service_refs"); err != nil {
-				return err
-			}
+		ref, ok, err := sc.filterRef("service_dict", "service_refs", f.Service, &sc.svc)
+		if err != nil {
+			return err
 		}
-		var ok bool
-		if svcRef, ok = dictOrdinal(sc.svc, f.Service); !ok {
+		if !ok {
 			return nil // service absent from segment: Match stays empty
 		}
+		svcRef = ref
 	}
+
+	// Resolve environment filter if present.
+	var envRef uint64
 	if f.Environment != "" {
-		var err error
-		if sc.env == nil {
-			if sc.env, err = sc.dict("env_dict", "env_refs"); err != nil {
-				return err
-			}
+		ref, ok, err := sc.filterRef("env_dict", "env_refs", f.Environment, &sc.env)
+		if err != nil {
+			return err
 		}
-		var ok bool
-		if envRef, ok = dictOrdinal(sc.env, f.Environment); !ok {
+		if !ok {
 			return nil
 		}
+		envRef = ref
 	}
+
+	// Admit rows matching all filter criteria.
 	for i := range sc.ts {
-		if sc.ts[i] < f.SinceM || sc.ts[i] > f.UntilM {
-			continue
+		if sc.admitRow(i, f, svcRef, envRef) {
+			sc.Match = append(sc.Match, i)
 		}
-		if int(sc.sevs[i]) < f.MinSeverity {
-			continue
-		}
-		if f.Service != "" && sc.svc.refs[i] != svcRef {
-			continue
-		}
-		if f.Environment != "" && sc.env.refs[i] != envRef {
-			continue
-		}
-		sc.Match = append(sc.Match, i)
 	}
 	return nil
 }
