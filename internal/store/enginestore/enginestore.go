@@ -115,6 +115,9 @@ func Open(dbPath string, opts Options) (*Store, error) {
 	if err := s.recover(context.Background()); err != nil {
 		return nil, err
 	}
+	if err := s.sweepOrphanSegments(context.Background()); err != nil {
+		return nil, err
+	}
 
 	s.wg.Add(1)
 	go s.flushLoop()
@@ -187,6 +190,50 @@ func (s *Store) recover(ctx context.Context) error {
 			return err
 		}
 		ps.mem.Append(keep)
+	}
+	return nil
+}
+
+// sweepOrphanSegments removes *.seg and *.seg.tmp files under
+// <dir>/segments/ that no manifest row references. Crash windows in
+// compaction (buildMergedSegments writes shard files before the manifest
+// swap) and prune (rewriteSegment) can leave such files behind: they are
+// inert but leak disk forever if nothing ever cleans them up.
+//
+// Must run after recover and before flushLoop/compactLoop start: at that
+// point the manifest (queried fresh here, not reused from recover) is the
+// sole source of truth and nothing else can be mid-write, so no locking
+// is needed against concurrent flush/compact.
+func (s *Store) sweepOrphanSegments(ctx context.Context) error {
+	segs, err := s.Segments(ctx, 0)
+	if err != nil {
+		return err
+	}
+	referenced := make(map[string]bool, len(segs))
+	for _, m := range segs {
+		referenced[filepath.Clean(m.Path)] = true
+	}
+	pattern := filepath.Join(s.dir, "segments", "*", "*.seg*")
+	files, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("enginestore: list segment files: %w", err)
+	}
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".seg") && !strings.HasSuffix(f, ".seg.tmp") {
+			continue
+		}
+		rel, err := filepath.Rel(s.dir, f)
+		if err != nil {
+			return fmt.Errorf("enginestore: rel %s: %w", f, err)
+		}
+		if strings.HasSuffix(f, ".seg") && referenced[filepath.Clean(rel)] {
+			continue
+		}
+		if err := os.Remove(f); err != nil {
+			slog.Warn("enginestore: orphan segment sweep: remove failed", "path", f, "error", err)
+			continue
+		}
+		slog.Info("enginestore: removed orphan segment file", "path", f)
 	}
 	return nil
 }
