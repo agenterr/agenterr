@@ -15,17 +15,21 @@ import (
 // Every method takes the same mutex so concurrent engine tests exercise
 // realistic contention.
 type fakeStore struct {
-	mu         sync.Mutex
-	rules      map[int64]store.NoiseRuleRow
-	nextRuleID int64
-	projects   map[int64]core.Project
-	nextProjID int64
-	dropCalls  []map[int64]int64
+	mu            sync.Mutex
+	rules         map[int64]store.NoiseRuleRow
+	nextRuleID    int64
+	sevRules      map[int64]store.SeverityRuleRow
+	nextSevRuleID int64
+	projects      map[int64]core.Project
+	nextProjID    int64
+	dropCalls     []map[int64]int64
+	liftCalls     []map[int64]int64
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		rules:    map[int64]store.NoiseRuleRow{},
+		sevRules: map[int64]store.SeverityRuleRow{},
 		projects: map[int64]core.Project{},
 	}
 }
@@ -43,6 +47,20 @@ func (f *fakeStore) seedRule(r core.NoiseRule) store.NoiseRuleRow {
 	r.ID = f.nextRuleID
 	row := store.NoiseRuleRow{NoiseRule: r}
 	f.rules[r.ID] = row
+	return row
+}
+
+// seedSeverityRule inserts r directly into the fake store's map, bypassing
+// the real store's upsert validation — used by tests that need to seed a
+// row the validating path would reject, e.g. a corrupt regexp pattern to
+// exercise Load's skip-and-warn behavior.
+func (f *fakeStore) seedSeverityRule(r core.SeverityRule) store.SeverityRuleRow {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextSevRuleID++
+	r.ID = f.nextSevRuleID
+	row := store.SeverityRuleRow{SeverityRule: r}
+	f.sevRules[r.ID] = row
 	return row
 }
 
@@ -104,6 +122,67 @@ func (f *fakeStore) AddNoiseDrops(_ context.Context, counts map[int64]int64) err
 		}
 	}
 	f.dropCalls = append(f.dropCalls, cp)
+	return nil
+}
+
+func (f *fakeStore) SeverityRules(_ context.Context, projectID int64) ([]store.SeverityRuleRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ids := make([]int64, 0, len(f.sevRules))
+	for id := range f.sevRules {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var out []store.SeverityRuleRow
+	for _, id := range ids {
+		r := f.sevRules[id]
+		if projectID == 0 || r.ProjectID == projectID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertSeverityRule(_ context.Context, r core.SeverityRule) (store.SeverityRuleRow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r.ID == 0 {
+		f.nextSevRuleID++
+		r.ID = f.nextSevRuleID
+	} else if _, ok := f.sevRules[r.ID]; !ok {
+		return store.SeverityRuleRow{}, store.ErrNotFound
+	}
+	row := store.SeverityRuleRow{SeverityRule: r}
+	if existing, ok := f.sevRules[r.ID]; ok {
+		row.LiftedCount = existing.LiftedCount
+		row.CreatedAt = existing.CreatedAt
+	}
+	f.sevRules[r.ID] = row
+	return row, nil
+}
+
+func (f *fakeStore) DeleteSeverityRule(_ context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.sevRules[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.sevRules, id)
+	return nil
+}
+
+func (f *fakeStore) AddSeverityLifts(_ context.Context, counts map[int64]int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make(map[int64]int64, len(counts))
+	for id, n := range counts {
+		cp[id] = n
+		if row, ok := f.sevRules[id]; ok {
+			row.LiftedCount += n
+			f.sevRules[id] = row
+		}
+	}
+	f.liftCalls = append(f.liftCalls, cp)
 	return nil
 }
 

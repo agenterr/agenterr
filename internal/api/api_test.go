@@ -46,6 +46,10 @@ type fakeStore struct {
 	nextRuleID int64
 	dropCalls  []map[int64]int64
 
+	sevRules      map[int64]store.SeverityRuleRow
+	nextSevRuleID int64
+	liftCalls     []map[int64]int64
+
 	alertRules      map[int64]store.AlertRuleRow
 	nextAlertRuleID int64
 	recordCalls     []recordAlertCall
@@ -68,6 +72,7 @@ func newFakeStore() *fakeStore {
 		issues:      make(map[int64]core.Issue),
 		issueEvents: make(map[int64][]core.Event),
 		rules:       make(map[int64]store.NoiseRuleRow),
+		sevRules:    make(map[int64]store.SeverityRuleRow),
 		alertRules:  make(map[int64]store.AlertRuleRow),
 	}
 }
@@ -225,6 +230,59 @@ func (f *fakeStore) AddNoiseDrops(_ context.Context, counts map[int64]int64) err
 	return nil
 }
 
+func (f *fakeStore) SeverityRules(_ context.Context, projectID int64) ([]store.SeverityRuleRow, error) {
+	ids := make([]int64, 0, len(f.sevRules))
+	for id := range f.sevRules {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var out []store.SeverityRuleRow
+	for _, id := range ids {
+		row := f.sevRules[id]
+		if projectID == 0 || row.ProjectID == projectID {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertSeverityRule(_ context.Context, r core.SeverityRule) (store.SeverityRuleRow, error) {
+	if r.ID == 0 {
+		f.nextSevRuleID++
+		r.ID = f.nextSevRuleID
+	} else if _, ok := f.sevRules[r.ID]; !ok {
+		return store.SeverityRuleRow{}, store.ErrNotFound
+	}
+	row := store.SeverityRuleRow{SeverityRule: r}
+	if existing, ok := f.sevRules[r.ID]; ok {
+		row.LiftedCount = existing.LiftedCount
+		row.CreatedAt = existing.CreatedAt
+	}
+	f.sevRules[r.ID] = row
+	return row, nil
+}
+
+func (f *fakeStore) DeleteSeverityRule(_ context.Context, id int64) error {
+	if _, ok := f.sevRules[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.sevRules, id)
+	return nil
+}
+
+func (f *fakeStore) AddSeverityLifts(_ context.Context, counts map[int64]int64) error {
+	cp := make(map[int64]int64, len(counts))
+	for id, n := range counts {
+		cp[id] = n
+		if row, ok := f.sevRules[id]; ok {
+			row.LiftedCount += n
+			f.sevRules[id] = row
+		}
+	}
+	f.liftCalls = append(f.liftCalls, cp)
+	return nil
+}
+
 func (f *fakeStore) SetProjectParseBodies(_ context.Context, projectID int64, on bool) error {
 	p, ok := f.projects[projectID]
 	if !ok {
@@ -296,7 +354,7 @@ func newTestServer(fs *fakeStore) *httptest.Server {
 	}{projectID: 0, kind: "admin"}
 
 	a := auth.New(fs, []byte{})
-	rulesEngine := rules.New(fs, fs)
+	rulesEngine := rules.New(fs, fs, fs)
 	alertsEngine := alerts.New(fs, nil)
 	// Load once up front so rules the test seeded directly into fs (rather
 	// than via the Create endpoint) are visible to List/Delete/Test —
@@ -304,7 +362,7 @@ func newTestServer(fs *fakeStore) *httptest.Server {
 	if err := alertsEngine.Load(context.Background()); err != nil {
 		panic(err)
 	}
-	api := New(fs, fs, fs, rulesEngine, fs, alertsEngine)
+	api := New(fs, fs, fs, fs, rulesEngine, fs, alertsEngine)
 	mux := http.NewServeMux()
 	api.Mount(mux, a)
 	return httptest.NewServer(mux)
@@ -1045,12 +1103,12 @@ func newTestServerEngine(es *fakeEngineStore) *httptest.Server {
 	}{projectID: 0, kind: "admin"}
 
 	a := auth.New(es, []byte{})
-	rulesEngine := rules.New(es, es)
+	rulesEngine := rules.New(es, es, es)
 	alertsEngine := alerts.New(es, nil)
 	if err := alertsEngine.Load(context.Background()); err != nil {
 		panic(err)
 	}
-	api := New(es, es, es, rulesEngine, es, alertsEngine)
+	api := New(es, es, es, es, rulesEngine, es, alertsEngine)
 	mux := http.NewServeMux()
 	api.Mount(mux, a)
 	return httptest.NewServer(mux)
@@ -1270,6 +1328,90 @@ func TestNoiseRules_CreateListDelete_RoundTrip(t *testing.T) {
 	}
 	if len(listed2) != 0 {
 		t.Errorf("listed2 = %+v, want empty after delete", listed2)
+	}
+}
+
+func TestSeverityRules_CreateListDelete_RoundTrip(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/severity-rules", validAPIKey,
+		[]byte(`{"service":"api","pattern":"record not found","severity":"warn","enabled":true}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var created struct {
+		ID       int64  `json:"id"`
+		Pattern  string `json:"pattern"`
+		Severity string `json:"severity"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.ID == 0 || created.Pattern != "record not found" || created.Severity != "warn" {
+		t.Errorf("created = %+v", created)
+	}
+
+	listResp := doReq(t, srv, http.MethodGet, "/api/v1/projects/1/severity-rules", validAPIKey, nil)
+	defer func() { _ = listResp.Body.Close() }()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", listResp.StatusCode)
+	}
+	var listed []struct {
+		ID          int64 `json:"id"`
+		LiftedCount int64 `json:"lifted_count"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("listed = %+v, want single rule with id %d", listed, created.ID)
+	}
+
+	delResp := doReq(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/severity-rules/%d", created.ID), validAPIKey, nil)
+	defer func() { _ = delResp.Body.Close() }()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204", delResp.StatusCode)
+	}
+
+	listResp2 := doReq(t, srv, http.MethodGet, "/api/v1/projects/1/severity-rules", validAPIKey, nil)
+	defer func() { _ = listResp2.Body.Close() }()
+	var listed2 []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(listResp2.Body).Decode(&listed2); err != nil {
+		t.Fatalf("decode list2: %v", err)
+	}
+	if len(listed2) != 0 {
+		t.Errorf("listed2 = %+v, want empty after delete", listed2)
+	}
+}
+
+func TestSeverityRules_SeverityAtOrBelowInfo_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/severity-rules", validAPIKey,
+		[]byte(`{"pattern":"record not found","severity":"info"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestSeverityRules_InvalidPattern_Returns400(t *testing.T) {
+	fs := newFakeStore()
+	srv := newTestServer(fs)
+	defer srv.Close()
+
+	resp := doReq(t, srv, http.MethodPost, "/api/v1/projects/1/severity-rules", validAPIKey,
+		[]byte(`{"pattern":"[","severity":"warn"}`))
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
 }
 
