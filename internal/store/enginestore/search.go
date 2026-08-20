@@ -27,6 +27,27 @@ type matchRef struct {
 	memRow    segment.Row
 }
 
+// materializeMatches converts every sc-backed matchRef in ms to carry its
+// row by value (memRow, sc=nil), in place. Called once per segment right
+// after its match set is final (≤limit+ties rows), so the *segment.Scan
+// (file bytes plus decompressed columns) is not pinned by these refs any
+// longer than that segment's own goroutine runs.
+func materializeMatches(ms []matchRef) error {
+	for i := range ms {
+		if ms[i].sc == nil {
+			continue
+		}
+		r, err := ms[i].sc.Row(ms[i].idx)
+		if err != nil {
+			return err
+		}
+		ms[i].memRow = r
+		ms[i].sc = nil
+		ms[i].idx = 0
+	}
+	return nil
+}
+
 // SearchLogs returns logs matching f, most recent first (ties broken by
 // descending id), capped at f.Limit (0 → 50). Query is a SUBSTRING
 // match on the reconstructed body — no tokenizer exists anywhere in
@@ -191,13 +212,30 @@ func (s *Store) searchSegments(ctx context.Context, projectID int64, segs []sqli
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if err := ctx.Err(); err != nil {
+				results[si] = segSearchResult{err: err}
+				return
+			}
 			sc, restart, err := s.openScanWithRestart(ctx, projectID, segs[si], filter)
 			if err != nil || restart {
 				results[si] = segSearchResult{restart: restart, err: err}
 				return
 			}
-			ms, err := searchScanChunked(sc, projectID, q, always, tmpls, limit)
-			results[si] = segSearchResult{ms: ms, err: err}
+			ms, err := searchScanChunked(ctx, sc, projectID, q, always, tmpls, limit)
+			if err != nil {
+				results[si] = segSearchResult{err: err}
+				return
+			}
+			// Materialize eagerly (memRow by value, sc=nil) so the *segment.Scan
+			// — file bytes plus decompressed columns — becomes garbage as soon
+			// as this segment's goroutine returns, instead of staying pinned by
+			// every matchRef until SearchLogs' final loop runs. At most
+			// limit+ties rows per segment, so this is cheap.
+			if err := materializeMatches(ms); err != nil {
+				results[si] = segSearchResult{err: err}
+				return
+			}
+			results[si] = segSearchResult{ms: ms}
 		}(si)
 	}
 	wg.Wait()
@@ -218,7 +256,10 @@ func (s *Store) searchSegments(ctx context.Context, projectID int64, segs []sqli
 // chunks matched in parallel, then merges the per-chunk results in
 // global descending order, applying the same limit+boundary-tie rule
 // searchScanRange uses within a chunk.
-func searchScanChunked(sc *segment.Scan, projectID int64, q string, always map[int64]bool, tmpls map[int64][]string, limit int) ([]matchRef, error) {
+func searchScanChunked(ctx context.Context, sc *segment.Scan, projectID int64, q string, always map[int64]bool, tmpls map[int64][]string, limit int) ([]matchRef, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	n := len(sc.Match)
 	if n <= searchChunkRows {
 		return searchScanRange(sc, projectID, q, always, tmpls, limit, 0, n)
@@ -246,6 +287,10 @@ func searchScanChunked(sc *segment.Scan, projectID int64, q string, always map[i
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			if err := ctx.Err(); err != nil {
+				errs[c] = err
+				return
+			}
 			lo := c * searchChunkRows
 			hi := lo + searchChunkRows
 			if hi > n {
