@@ -2,6 +2,7 @@ package enginestore
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -123,5 +124,66 @@ func TestRecoveryReplaysWALAndDedupes(t *testing.T) {
 			t.Fatalf("duplicate log id %d after recovery", l.ID)
 		}
 		seen[l.ID] = true
+	}
+}
+
+func TestOpenSweepsOrphanSegmentFiles(t *testing.T) {
+	dir := t.TempDir()
+	s := openStore(t, dir, Options{FlushRows: 1})
+	p, err := s.CreateProject(ctx, "p", 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := s.WriteBatch(ctx, []store.Entry{logEntry(p.ID, "real segment row", "api", at)}); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := s.Segments(ctx, p.ID)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("segments = %v err %v", segs, err)
+	}
+	realSegPath := filepath.Join(dir, "engine", segs[0].Path)
+	if _, err := os.Stat(realSegPath); err != nil {
+		t.Fatalf("real segment missing before sweep: %v", err)
+	}
+
+	// Plant an orphan .seg and a stray .seg.tmp, as a crashed compact/prune
+	// would leave behind (manifest never references them).
+	segDir := filepath.Join(dir, "engine", "segments", filepath.Base(filepath.Dir(segs[0].Path)))
+	orphanSeg := filepath.Join(segDir, "orphan-999.seg")
+	orphanTmp := filepath.Join(segDir, "x.seg.tmp")
+	if err := os.WriteFile(orphanSeg, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(orphanTmp, []byte("tmp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s2, err := Open(filepath.Join(dir, "agenterr.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	if _, err := os.Stat(orphanSeg); !os.IsNotExist(err) {
+		t.Errorf("orphan .seg not removed by sweep: err=%v", err)
+	}
+	if _, err := os.Stat(orphanTmp); !os.IsNotExist(err) {
+		t.Errorf("orphan .seg.tmp not removed by sweep: err=%v", err)
+	}
+	if _, err := os.Stat(realSegPath); err != nil {
+		t.Errorf("real segment removed by sweep: %v", err)
+	}
+
+	logs, err := s2.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logs after reopen = %d, want 1", len(logs))
 	}
 }
