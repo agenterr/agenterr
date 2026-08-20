@@ -68,6 +68,14 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	t.Run("AlertRules/RecordAlertResultMissingIDNoOp", func(t *testing.T) { testAlertRulesRecordAlertResultMissingIDNoOp(t, open) })
 	t.Run("AlertRules/SeverityRoundTripsLowercase", func(t *testing.T) { testAlertRulesSeverityRoundTripsLowercase(t, open) })
 	t.Run("AlertRules/HeadersNilRoundTrips", func(t *testing.T) { testAlertRulesHeadersNilRoundTrips(t, open) })
+	t.Run("SeverityRules/UpsertInsertReturnsIDAndDefaults", func(t *testing.T) { testSeverityRulesUpsertInsertReturnsIDAndDefaults(t, open) })
+	t.Run("SeverityRules/UpsertUpdateRoundTripsFields", func(t *testing.T) { testSeverityRulesUpsertUpdateRoundTripsFields(t, open) })
+	t.Run("SeverityRules/UpsertUpdateMissingIDNotFound", func(t *testing.T) { testSeverityRulesUpsertUpdateMissingIDNotFound(t, open) })
+	t.Run("SeverityRules/DeleteThenNotFound", func(t *testing.T) { testSeverityRulesDeleteThenNotFound(t, open) })
+	t.Run("SeverityRules/ListScopedByProjectAndOrdered", func(t *testing.T) { testSeverityRulesListScopedByProjectAndOrdered(t, open) })
+	t.Run("SeverityRules/ListAllProjects", func(t *testing.T) { testSeverityRulesListAllProjects(t, open) })
+	t.Run("SeverityRules/AddLiftsAccumulatesAndSkipsUnknown", func(t *testing.T) { testSeverityRulesAddLiftsAccumulatesAndSkipsUnknown(t, open) })
+	t.Run("SeverityRules/SeverityRoundTripsLowercase", func(t *testing.T) { testSeverityRulesSeverityRoundTripsLowercase(t, open) })
 	t.Run("ServiceCounts/GroupsAndOrdersDescending", func(t *testing.T) { testServiceCountsGroupsAndOrdersDescending(t, open) })
 }
 

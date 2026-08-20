@@ -29,7 +29,7 @@ func TestDecide_SampleKeepsEveryNth(t *testing.T) {
 		ProjectID: 1, Kind: core.NoiseSample, Service: "api",
 		Severity: core.SeverityInfo, N: 3, Enabled: true,
 	})
-	e := New(fs, fs)
+	e := New(fs, fs, fs)
 	mustLoad(t, e)
 
 	var kept []string
@@ -69,7 +69,7 @@ func TestDecide_FirstDropWinsAscendingID(t *testing.T) {
 	if lowID.ID >= highID.ID {
 		t.Fatalf("test setup: expected lowID < highID, got %d, %d", lowID.ID, highID.ID)
 	}
-	e := New(fs, fs)
+	e := New(fs, fs, fs)
 	mustLoad(t, e)
 
 	// Matches both rules: the lower-ID drop_match rule must win.
@@ -89,7 +89,7 @@ func TestDecide_FirstDropWinsAscendingID(t *testing.T) {
 func TestDecide_NoRulesForProjectKept(t *testing.T) {
 	fs := newFakeStore()
 	fs.seedRule(core.NoiseRule{ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "x", Enabled: true})
-	e := New(fs, fs)
+	e := New(fs, fs, fs)
 	mustLoad(t, e)
 
 	drop, ruleID := e.Decide(core.Log{ProjectID: 999, Body: "x is here"})
@@ -102,7 +102,7 @@ func TestDecide_NoRulesForProjectKept(t *testing.T) {
 func TestDecide_UnloadedEngineFailsOpen(t *testing.T) {
 	fs := newFakeStore()
 	fs.seedRule(core.NoiseRule{ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true})
-	e := New(fs, fs) // Load never called
+	e := New(fs, fs, fs) // Load never called
 
 	drop, ruleID := e.Decide(core.Log{ProjectID: 1, Body: "boom"})
 	if drop {
@@ -115,7 +115,7 @@ func TestDecide_UnloadedEngineFailsOpen(t *testing.T) {
 func TestFlushDrops_PersistsAndResets(t *testing.T) {
 	fs := newFakeStore()
 	r := fs.seedRule(core.NoiseRule{ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true})
-	e := New(fs, fs)
+	e := New(fs, fs, fs)
 	mustLoad(t, e)
 
 	for i := 0; i < 5; i++ {
@@ -152,7 +152,7 @@ func TestParseBodies_DefaultTrueUnlessStoredFalse(t *testing.T) {
 	fs := newFakeStore()
 	fs.addProject(1, false)
 	fs.addProject(2, true)
-	e := New(fs, fs)
+	e := New(fs, fs, fs)
 	mustLoad(t, e)
 
 	if e.ParseBodies(1) {
@@ -170,7 +170,7 @@ func TestParseBodies_DefaultTrueUnlessStoredFalse(t *testing.T) {
 func TestMutations_VisibleImmediately(t *testing.T) {
 	fs := newFakeStore()
 	fs.addProject(1, true)
-	e := New(fs, fs)
+	e := New(fs, fs, fs)
 	mustLoad(t, e)
 
 	// Nothing dropped yet.
@@ -213,7 +213,7 @@ func TestConcurrency_NoLostDrops(t *testing.T) {
 	dropRule := fs.seedRule(core.NoiseRule{
 		ProjectID: 1, Kind: core.NoiseDropMatch, Pattern: "boom", Enabled: true,
 	})
-	e := New(fs, fs)
+	e := New(fs, fs, fs)
 	mustLoad(t, e)
 
 	const (
@@ -300,4 +300,180 @@ func TestConcurrency_NoLostDrops(t *testing.T) {
 	if got != decideWorkers*iterations {
 		t.Errorf("totalDropped = %d, want %d (every record matched)", got, decideWorkers*iterations)
 	}
+}
+
+// 9. Lift fires on a matching info-severity body, raising severity to the
+// rule's and reporting the winning rule ID.
+func TestLift_FiresOnMatchingInfoBody(t *testing.T) {
+	fs := newFakeStore()
+	r := fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Service: "api", Pattern: "boom", Severity: core.SeverityError, Enabled: true,
+	})
+	e := New(fs, fs, fs)
+	mustLoad(t, e)
+
+	l, ruleID := e.Lift(core.Log{ProjectID: 1, Service: "api", Severity: core.SeverityInfo, Body: "boom happened"})
+	if ruleID != r.ID {
+		t.Errorf("ruleID = %d, want %d", ruleID, r.ID)
+	}
+	if l.Severity != core.SeverityError {
+		t.Errorf("Severity = %v, want %v", l.Severity, core.SeverityError)
+	}
+}
+
+// 10. Lift never fires on a log whose severity is already above info —
+// lifting only ever raises the ingest default and below.
+func TestLift_DoesNotFireOnAlreadyMeaningfulSeverity(t *testing.T) {
+	fs := newFakeStore()
+	fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Pattern: "boom", Severity: core.SeverityError, Enabled: true,
+	})
+	e := New(fs, fs, fs)
+	mustLoad(t, e)
+
+	l, ruleID := e.Lift(core.Log{ProjectID: 1, Severity: core.SeverityError, Body: "boom happened"})
+	if ruleID != 0 || l.Severity != core.SeverityError {
+		t.Errorf("Lift = (%v, %d), want (unchanged, 0)", l, ruleID)
+	}
+}
+
+// 11. Lift does not fire on a disabled rule, a service mismatch, or a
+// non-matching body.
+func TestLift_DoesNotFireOnDisabledServiceOrBodyMismatch(t *testing.T) {
+	fs := newFakeStore()
+	fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Service: "api", Pattern: "boom", Severity: core.SeverityError, Enabled: false,
+	})
+	fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Service: "web", Pattern: "boom", Severity: core.SeverityError, Enabled: true,
+	})
+	fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Service: "api", Pattern: "nomatch", Severity: core.SeverityError, Enabled: true,
+	})
+	e := New(fs, fs, fs)
+	mustLoad(t, e)
+
+	l, ruleID := e.Lift(core.Log{ProjectID: 1, Service: "api", Severity: core.SeverityInfo, Body: "boom happened"})
+	if ruleID != 0 || l.Severity != core.SeverityInfo {
+		t.Errorf("Lift = (%v, %d), want (unchanged, 0)", l, ruleID)
+	}
+}
+
+// 12. First matching enabled rule by ascending ID wins.
+func TestLift_FirstMatchWinsAscendingID(t *testing.T) {
+	fs := newFakeStore()
+	lowID := fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Pattern: "boom", Severity: core.SeverityWarn, Enabled: true,
+	})
+	highID := fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Pattern: "boom", Severity: core.SeverityFatal, Enabled: true,
+	})
+	if lowID.ID >= highID.ID {
+		t.Fatalf("test setup: expected lowID < highID, got %d, %d", lowID.ID, highID.ID)
+	}
+	e := New(fs, fs, fs)
+	mustLoad(t, e)
+
+	l, ruleID := e.Lift(core.Log{ProjectID: 1, Severity: core.SeverityInfo, Body: "boom happened"})
+	if ruleID != lowID.ID || l.Severity != core.SeverityWarn {
+		t.Errorf("Lift = (%v, %d), want (Severity=%v, %d)", l, ruleID, core.SeverityWarn, lowID.ID)
+	}
+}
+
+// 13. A row with a pattern that fails to compile is skipped at Load
+// (logged, not an error) without disabling the other rules for the same
+// project.
+func TestLift_CorruptPatternRowSkippedWithoutDisablingOthers(t *testing.T) {
+	fs := newFakeStore()
+	// Seeded directly (bypassing UpsertSeverityRule's validation) to
+	// simulate a corrupt row predating validation.
+	fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Pattern: "([invalid", Severity: core.SeverityError, Enabled: true,
+	})
+	good := fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Pattern: "boom", Severity: core.SeverityWarn, Enabled: true,
+	})
+	e := New(fs, fs, fs)
+	mustLoad(t, e)
+
+	l, ruleID := e.Lift(core.Log{ProjectID: 1, Severity: core.SeverityInfo, Body: "boom happened"})
+	if ruleID != good.ID || l.Severity != core.SeverityWarn {
+		t.Errorf("Lift = (%v, %d), want (Severity=%v, %d)", l, ruleID, core.SeverityWarn, good.ID)
+	}
+}
+
+// 14. FlushLifts persists exact counts and resets; a second flush with no
+// new lifts is a no-op (no phantom counts).
+func TestFlushLifts_PersistsAndResets(t *testing.T) {
+	fs := newFakeStore()
+	r := fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Pattern: "boom", Severity: core.SeverityError, Enabled: true,
+	})
+	e := New(fs, fs, fs)
+	mustLoad(t, e)
+
+	for i := 0; i < 3; i++ {
+		if _, ruleID := e.Lift(core.Log{ProjectID: 1, Severity: core.SeverityInfo, Body: "boom happened"}); ruleID != r.ID {
+			t.Fatalf("expected lift on iteration %d", i)
+		}
+	}
+
+	if err := e.FlushLifts(context.Background()); err != nil {
+		t.Fatalf("FlushLifts: %v", err)
+	}
+	fs.mu.Lock()
+	if len(fs.liftCalls) != 1 || fs.liftCalls[0][r.ID] != 3 {
+		fs.mu.Unlock()
+		t.Fatalf("first flush = %+v, want [{%d: 3}]", fs.liftCalls, r.ID)
+	}
+	fs.mu.Unlock()
+
+	if err := e.FlushLifts(context.Background()); err != nil {
+		t.Fatalf("FlushLifts (2nd): %v", err)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.liftCalls) != 2 {
+		t.Fatalf("expected 2 flush calls, got %d", len(fs.liftCalls))
+	}
+	if len(fs.liftCalls[1]) != 0 {
+		t.Errorf("second flush counts = %+v, want empty (no phantom counts)", fs.liftCalls[1])
+	}
+}
+
+// 15. FlushLifts folds pending counts back in on a store error rather
+// than losing them.
+func TestFlushLifts_FoldsBackOnError(t *testing.T) {
+	fs := newFakeStore()
+	r := fs.seedSeverityRule(core.SeverityRule{
+		ProjectID: 1, Pattern: "boom", Severity: core.SeverityError, Enabled: true,
+	})
+	failing := &failingLiftStore{fakeStore: fs}
+	e := New(fs, failing, fs)
+	mustLoad(t, e)
+
+	if _, ruleID := e.Lift(core.Log{ProjectID: 1, Severity: core.SeverityInfo, Body: "boom happened"}); ruleID != r.ID {
+		t.Fatal("expected lift")
+	}
+
+	if err := e.FlushLifts(context.Background()); err == nil {
+		t.Fatal("expected error from failing store")
+	}
+
+	e.mu.Lock()
+	got := e.pendingLifts[r.ID]
+	e.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("pendingLifts[%d] = %d, want 1 (folded back after failed flush)", r.ID, got)
+	}
+}
+
+// failingLiftStore wraps a *fakeStore and fails every AddSeverityLifts
+// call, to exercise FlushLifts's fold-back-on-error path.
+type failingLiftStore struct {
+	*fakeStore
+}
+
+func (f *failingLiftStore) AddSeverityLifts(_ context.Context, _ map[int64]int64) error {
+	return fmt.Errorf("store unavailable")
 }

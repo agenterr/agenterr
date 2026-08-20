@@ -114,6 +114,26 @@ func (f *fakeStore) SetProjectParseBodies(_ context.Context, _ int64, _ bool) er
 	return errors.New("unused")
 }
 
+// ---- store.SeverityRules stubs: this proxy test exercises the
+// stdio<->HTTP plumbing, not severity-rule behavior, so these are unused
+// no-ops.
+
+func (f *fakeStore) SeverityRules(_ context.Context, _ int64) ([]store.SeverityRuleRow, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) UpsertSeverityRule(_ context.Context, _ core.SeverityRule) (store.SeverityRuleRow, error) {
+	return store.SeverityRuleRow{}, errors.New("unused")
+}
+
+func (f *fakeStore) DeleteSeverityRule(_ context.Context, _ int64) error {
+	return errors.New("unused")
+}
+
+func (f *fakeStore) AddSeverityLifts(_ context.Context, _ map[int64]int64) error {
+	return nil
+}
+
 // ---- store.AlertRules stubs: this proxy test exercises the stdio<->HTTP
 // plumbing, not alert-rule behavior, so these are unused no-ops.
 
@@ -147,9 +167,9 @@ func newTestServer(t *testing.T) (url string, apiKey string) {
 		projects: []core.Project{{ID: 1, Name: "demo", Slug: "demo"}},
 	}
 	a := auth.New(fs, []byte{})
-	engine := rules.New(fs, fs)
+	engine := rules.New(fs, fs, fs)
 	alertsEngine := alerts.New(fs, nil)
-	srv := agmcp.New(fs, fs, fs, engine, fs, alertsEngine)
+	srv := agmcp.New(fs, fs, fs, fs, engine, fs, alertsEngine)
 	mux := http.NewServeMux()
 	srv.Mount(mux, a)
 	httpSrv := httptest.NewServer(mux)
@@ -183,12 +203,12 @@ func TestProxy_ListToolsAndCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 18 {
+	if len(tools.Tools) != 21 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 18: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 21: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -310,8 +330,8 @@ func TestProxy_RemoteErrorPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools after a remote error: %v", err)
 	}
-	if len(tools.Tools) != 18 {
-		t.Fatalf("got %d tools after a remote error, want 18", len(tools.Tools))
+	if len(tools.Tools) != 21 {
+		t.Fatalf("got %d tools after a remote error, want 21", len(tools.Tools))
 	}
 
 	_ = cs.Close()

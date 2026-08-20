@@ -58,6 +58,7 @@ var Module = fx.Options(
 		asWriter,
 		asAdmin,
 		asNoiseRules,
+		asSeverityRules,
 		asAlertRules,
 		newGrouper,
 		asNotifier,
@@ -98,12 +99,13 @@ func openDB(cfg config.Config) (*enginestore.Store, error) {
 // that only need that slice of behavior. They all close over the same
 // *enginestore.Store — dig caches openDB's result, so this does not open
 // the database more than once.
-func asStore(db *enginestore.Store) store.Store           { return db }
-func asReader(db *enginestore.Store) store.Reader         { return db }
-func asWriter(db *enginestore.Store) store.Writer         { return db }
-func asAdmin(db *enginestore.Store) store.Admin           { return db }
-func asNoiseRules(db *enginestore.Store) store.NoiseRules { return db }
-func asAlertRules(db *enginestore.Store) store.AlertRules { return db }
+func asStore(db *enginestore.Store) store.Store                 { return db }
+func asReader(db *enginestore.Store) store.Reader               { return db }
+func asWriter(db *enginestore.Store) store.Writer               { return db }
+func asAdmin(db *enginestore.Store) store.Admin                 { return db }
+func asNoiseRules(db *enginestore.Store) store.NoiseRules       { return db }
+func asSeverityRules(db *enginestore.Store) store.SeverityRules { return db }
+func asAlertRules(db *enginestore.Store) store.AlertRules       { return db }
 
 // asSessionAuth adapts *auth.Auth to the auth.SessionAuth interface
 // web.New depends on.

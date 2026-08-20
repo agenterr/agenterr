@@ -1,10 +1,11 @@
-// Package mcp is Agenterr's MCP edge — eighteen token-frugal tools served
+// Package mcp is Agenterr's MCP edge — twenty-one token-frugal tools served
 // over Streamable HTTP at /mcp. It reads via store.Reader and administers
 // via store.Admin (issue status transitions, project listing),
-// store.NoiseRules (rule listing), and store.AlertRules (rule listing);
-// noise-rule and parse-bodies mutations go through rules.Engine, alert-rule
-// mutations (and the synchronous test-fire) go through alerts.Engine. It
-// never touches store.Writer.
+// store.NoiseRules (rule listing), store.SeverityRules (rule listing), and
+// store.AlertRules (rule listing); noise-rule, severity-rule, and
+// parse-bodies mutations go through rules.Engine, alert-rule mutations
+// (and the synchronous test-fire) go through alerts.Engine. It never
+// touches store.Writer.
 //
 // Every tool renders compact plain text designed for agent consumption:
 // lists lead with a count line, rows are one line each, and long lists are
@@ -49,6 +50,7 @@ type Server struct {
 	reader       store.Reader
 	admin        store.Admin
 	nr           store.NoiseRules
+	sr           store.SeverityRules
 	engine       *rules.Engine
 	ar           store.AlertRules
 	alertsEngine *alerts.Engine
@@ -60,18 +62,20 @@ type Server struct {
 }
 
 // New constructs a Server reading via r and administering via a. Noise
-// rules are read straight from nr (a plain store read, same as any other
-// list) but always mutated through engine — never nr's write methods
-// directly — so the pipeline's cached view of rules stays fresh the
-// moment a tool changes them (mirrors the REST edge's rule; see
-// internal/api/handlers/noiserules.go). ar and alertsEngine are the
-// alert-rule analog (see internal/alerts.Engine), which additionally
-// backs the synchronous test-fire tool.
-func New(r store.Reader, a store.Admin, nr store.NoiseRules, engine *rules.Engine, ar store.AlertRules, alertsEngine *alerts.Engine) *Server {
+// rules and severity rules are read straight from nr and sr (plain store
+// reads, same as any other list) but always mutated through engine —
+// never nr's/sr's write methods directly — so the pipeline's cached view
+// of rules stays fresh the moment a tool changes them (mirrors the REST
+// edge's rule; see internal/api/handlers/noiserules.go and
+// severityrules.go). ar and alertsEngine are the alert-rule analog (see
+// internal/alerts.Engine), which additionally backs the synchronous
+// test-fire tool.
+func New(r store.Reader, a store.Admin, nr store.NoiseRules, sr store.SeverityRules, engine *rules.Engine, ar store.AlertRules, alertsEngine *alerts.Engine) *Server {
 	s := &Server{
 		reader:       r,
 		admin:        a,
 		nr:           nr,
+		sr:           sr,
 		engine:       engine,
 		ar:           ar,
 		alertsEngine: alertsEngine,
