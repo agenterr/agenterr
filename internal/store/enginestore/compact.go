@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/agenterr/agenterr/internal/segment"
@@ -63,7 +64,7 @@ func (s *Store) CompactAll(ctx context.Context) error {
 	now := time.Now().UTC()
 	var firstErr error
 	for pid, pidSegs := range byProject {
-		for key, members := range bucketSegments(pidSegs, now) {
+		for key, members := range bucketSegments(pidSegs, now, s.opts.CompactShardRows) {
 			select {
 			case <-s.stop:
 				return nil
@@ -91,9 +92,15 @@ func bucketKey(minTsMicros int64, now time.Time) string {
 }
 
 // bucketSegments groups segs by bucketKey, drops the still-filling
-// current-hour bucket, and returns only buckets with 2+ members — the
-// ones CompactAll will actually merge.
-func bucketSegments(segs []sqlitestore.SegmentMeta, now time.Time) map[string][]sqlitestore.SegmentMeta {
+// current-hour bucket, and returns only the buckets CompactAll will
+// actually merge: 2+ members AND more members than the minimum shard
+// count the bucket's total rows allow under shardRows. The second
+// condition is the anti-rechurn guard: a bucket that a prior pass
+// already merged into ceil(rows/shardRows) shards is at its floor —
+// re-merging it would rewrite the same bytes into the same number of
+// segments every pass, forever. A later (backdated) flush adds a member
+// above the floor and makes the bucket eligible again.
+func bucketSegments(segs []sqlitestore.SegmentMeta, now time.Time, shardRows int) map[string][]sqlitestore.SegmentMeta {
 	currentHour := now.Format("2006-01-02T15")
 	buckets := map[string][]sqlitestore.SegmentMeta{}
 	for _, m := range segs {
@@ -104,25 +111,44 @@ func bucketSegments(segs []sqlitestore.SegmentMeta, now time.Time) map[string][]
 		buckets[k] = append(buckets[k], m)
 	}
 	for k, ms := range buckets {
-		if len(ms) < 2 {
+		if len(ms) < 2 || len(ms) <= minShardCount(ms, shardRows) {
 			delete(buckets, k)
 		}
 	}
 	return buckets
 }
 
-// compactBucket merges one project's bucket of segments into a single
-// new segment. The old segments are read outside ps.mu (they are
-// immutable once flushed); the new file is written outside the lock too.
-// Only the manifest swap and old-file removal run under ps.mu, after
-// re-verifying every member still exists in the manifest — a concurrent
-// Prune may have dropped or rewritten one while this bucket's rows were
-// being read. If that happened, the bucket is skipped and the orphan new
-// file is removed.
+// minShardCount is the fewest segments a bucket's rows can occupy under
+// the shard cap: ceil(totalRows / shardRows), at least 1.
+func minShardCount(members []sqlitestore.SegmentMeta, shardRows int) int {
+	var total int64
+	for _, m := range members {
+		total += m.Count
+	}
+	n := int((total + int64(shardRows) - 1) / int64(shardRows))
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// compactBucket merges one project's bucket of segments into
+// ceil(rows/CompactShardRows) ts-ordered shard segments. The old
+// segments are read outside ps.mu (they are immutable once flushed); the
+// new files are written outside the lock too. Only the manifest swap and
+// old-file removal run under ps.mu, after re-verifying every member
+// still exists in the manifest — a concurrent Prune may have dropped or
+// rewritten one while this bucket's rows were being read. If that
+// happened, the bucket is skipped and the orphan new files are removed.
 func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, members []sqlitestore.SegmentMeta) error {
-	meta, err := s.buildMergedSegment(projectID, key, members)
+	metas, err := s.buildMergedSegments(projectID, key, members)
 	if err != nil {
 		return err
+	}
+	removeNew := func() {
+		for _, m := range metas {
+			_ = os.Remove(s.segPath(m.Path))
+		}
 	}
 
 	// s.proj() (not readProj) is deliberate here: compaction is a write-side
@@ -133,7 +159,7 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 	// queries, not to this maintenance write.
 	ps, err := s.proj(projectID)
 	if err != nil {
-		_ = os.Remove(s.segPath(meta.Path))
+		removeNew()
 		return err
 	}
 
@@ -142,28 +168,33 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 
 	current, err := s.Segments(ctx, projectID)
 	if err != nil {
-		_ = os.Remove(s.segPath(meta.Path))
+		removeNew()
 		return err
 	}
 	oldIDs, ok := memberIDsUnchanged(current, members)
 	if !ok {
 		// A concurrent Prune changed the manifest under us; skip this
 		// bucket (it will be retried on the next compaction pass) and
-		// clean up the orphan file this attempt produced.
-		_ = os.Remove(s.segPath(meta.Path))
+		// clean up the orphan files this attempt produced.
+		removeNew()
 		return nil
 	}
 
-	if _, err := s.ReplaceSegments(ctx, oldIDs, meta); err != nil {
-		_ = os.Remove(s.segPath(meta.Path))
+	if _, err := s.ReplaceSegmentsMulti(ctx, oldIDs, metas); err != nil {
+		removeNew()
 		return err
 	}
+	newPaths := make(map[string]bool, len(metas))
+	for _, m := range metas {
+		newPaths[m.Path] = true
+	}
 	for _, m := range members {
-		if m.Path == meta.Path {
-			// Should be unreachable now that the output name is unique per
-			// generation (see buildMergedSegment), but this is the file the
-			// new manifest row points at — removing it would strand the
-			// swap we just committed, so skip as a belt-and-braces guard.
+		if newPaths[m.Path] {
+			// Should be unreachable now that output names are unique per
+			// generation (see buildMergedSegments), but these are the files
+			// the new manifest rows point at — removing one would strand
+			// the swap we just committed, so skip as a belt-and-braces
+			// guard.
 			continue
 		}
 		if err := os.Remove(s.segPath(m.Path)); err != nil && !os.IsNotExist(err) {
@@ -173,13 +204,19 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 	return nil
 }
 
-// buildMergedSegment reads every member segment (outside any lock — they
-// are immutable) and writes their concatenated rows to a new segment
-// file at segments/<pid>/c-<bucket>-<minLogID>-<maxMemberID>.seg,
-// returning the manifest row ready for ReplaceSegments.
+// buildMergedSegments reads every member segment (outside any lock —
+// they are immutable), sorts the concatenated rows into one global
+// (TsMicros, LogID) order, and writes them as ceil(n/CompactShardRows)
+// shard segments at segments/<pid>/c-<bucket>-<minLogID>-<maxMemberID>-<shard>.seg,
+// returning the manifest rows ready for ReplaceSegmentsMulti. The global
+// sort matters: segment.Write sorts within one file, but shard files are
+// cut from the concatenation, so without it shards could overlap in time
+// and defeat manifest-level ts pruning. Sharding (rather than one merged
+// file) is what lets the parallel search path divide a big bucket's
+// column decompression across cores.
 //
 // RawRows and SizeBytes are computed from ground truth here — RawRows by
-// counting TemplateID==0 over the concatenated rows actually in memory,
+// counting TemplateID==0 over the shard's rows actually in memory,
 // SizeBytes by os.Stat on the file just written — rather than summed from
 // member metadata. A member's own RawRows/SizeBytes can be zero even
 // though it holds raw rows (e.g. a straddling segment rewritten by an
@@ -197,22 +234,22 @@ func (s *Store) compactBucket(ctx context.Context, projectID int64, key string, 
 // prior generation, outside ps.mu. segment_manifest.id is an
 // AUTOINCREMENT primary key (migration 0010): SQLite tracks the
 // high-water mark in sqlite_sequence and never reissues an id, even one
-// freed by ReplaceSegments deleting the current max row — a plain
+// freed by ReplaceSegmentsMulti deleting the current max row — a plain
 // INTEGER PRIMARY KEY rowid alias would not have this guarantee, since
 // SQLite would then assign max(existing)+1 and could reuse a deleted
 // max id. With AUTOINCREMENT, every re-compaction includes at least one
-// member (the earlier merged segment, or the new arrival) with a higher
+// member (an earlier merged shard, or the new arrival) with a higher
 // id than any previous generation used, so appending the max member id
-// makes the name unique per generation and never equal to a current
-// member's path.
-func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlitestore.SegmentMeta) (sqlitestore.SegmentMeta, error) {
+// (plus the shard index) makes every name unique per generation and
+// never equal to a current member's path.
+func (s *Store) buildMergedSegments(projectID int64, key string, members []sqlitestore.SegmentMeta) ([]sqlitestore.SegmentMeta, error) {
 	var rows []segment.Row
 	minLogID := members[0].MinLogID
 	maxMemberID := members[0].ID
 	for _, m := range members {
 		_, rs, err := segment.Read(s.segPath(m.Path))
 		if err != nil {
-			return sqlitestore.SegmentMeta{}, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
+			return nil, fmt.Errorf("enginestore: read segment %s: %w", m.Path, err)
 		}
 		rows = append(rows, rs...)
 		if m.MinLogID < minLogID {
@@ -222,8 +259,31 @@ func (s *Store) buildMergedSegment(projectID int64, key string, members []sqlite
 			maxMemberID = m.ID
 		}
 	}
+	sort.Slice(rows, func(i, j int) bool { return rowLess(rows[i], rows[j]) })
 
-	rel := filepath.Join("segments", fmt.Sprintf("%d", projectID), fmt.Sprintf("c-%s-%d-%d.seg", key, minLogID, maxMemberID))
+	nShards := (len(rows) + s.opts.CompactShardRows - 1) / s.opts.CompactShardRows
+	perShard := (len(rows) + nShards - 1) / nShards
+	metas := make([]sqlitestore.SegmentMeta, 0, nShards)
+	for shard := 0; shard < nShards; shard++ {
+		lo := shard * perShard
+		hi := min(lo+perShard, len(rows))
+		rel := filepath.Join("segments", fmt.Sprintf("%d", projectID),
+			fmt.Sprintf("c-%s-%d-%d-%d.seg", key, minLogID, maxMemberID, shard))
+		meta, err := s.writeShard(projectID, rel, rows[lo:hi])
+		if err != nil {
+			for _, m := range metas {
+				_ = os.Remove(s.segPath(m.Path))
+			}
+			return nil, err
+		}
+		metas = append(metas, meta)
+	}
+	return metas, nil
+}
+
+// writeShard writes one shard's rows to rel and returns its manifest row
+// with ground-truth RawRows/SizeBytes (see buildMergedSegments).
+func (s *Store) writeShard(projectID int64, rel string, rows []segment.Row) (sqlitestore.SegmentMeta, error) {
 	abs := s.segPath(rel)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return sqlitestore.SegmentMeta{}, fmt.Errorf("enginestore: mkdir segment dir: %w", err)
