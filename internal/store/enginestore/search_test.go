@@ -2,6 +2,7 @@ package enginestore
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -138,5 +139,18 @@ func TestSearchTimeWindow(t *testing.T) {
 	}
 	if len(logs) != 21 { // offsets 30..49 templated + offset 61 web row
 		t.Fatalf("got %d, want 21", len(logs))
+	}
+}
+
+func TestSearchCanceledContextReturnsPromptly(t *testing.T) {
+	s, pid := searchFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: pid, Query: "record not found", Limit: 100})
+	if err == nil {
+		t.Fatal("expected error from SearchLogs with an already-canceled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }

@@ -32,6 +32,15 @@ const deleteSeverityRuleStmt = `DELETE FROM severity_rules WHERE id = ?`
 
 const addSeverityLiftStmt = `UPDATE severity_rules SET lifted_count = lifted_count + ? WHERE id = ?`
 
+const countSeverityRulesByProject = `SELECT COUNT(*) FROM severity_rules WHERE project_id = ?`
+
+// maxSeverityRulesPerProject caps how many severity rules a project may
+// hold. Ingest runs every enabled rule's regex against every log at or
+// below SeverityInfo (Lift), so an unbounded rule count is an unbounded
+// per-log cost; 100 keeps that bounded while comfortably covering
+// realistic per-project rule sets.
+const maxSeverityRulesPerProject = 100
+
 // SeverityRules returns rules for projectID (0 = all projects), ordered by
 // ascending ID.
 func (db *DB) SeverityRules(ctx context.Context, projectID int64) ([]store.SeverityRuleRow, error) {
@@ -84,6 +93,13 @@ func (db *DB) UpsertSeverityRule(ctx context.Context, r core.SeverityRule) (stor
 	}
 
 	if r.ID == 0 {
+		var count int
+		if err := db.sql.QueryRowContext(ctx, countSeverityRulesByProject, r.ProjectID).Scan(&count); err != nil {
+			return store.SeverityRuleRow{}, fmt.Errorf("sqlite: count severity rules: %w", err)
+		}
+		if count >= maxSeverityRulesPerProject {
+			return store.SeverityRuleRow{}, fmt.Errorf("sqlite: project has %d severity rules — delete unused rules first", maxSeverityRulesPerProject)
+		}
 		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 		res, err := db.sql.ExecContext(ctx, insertSeverityRule,
 			r.ProjectID, r.Service, r.Pattern, severity, enabled, createdAt)
