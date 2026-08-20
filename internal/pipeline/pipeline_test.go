@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,12 +67,13 @@ func (f *fakeWriter) totalEntries() int {
 }
 
 // fakeDropper is a scriptable Dropper for tests: decide is consulted per
-// log (nil means "never drop"), and parseBodies is a per-project map
-// (missing entries default to true, matching rules.Engine's fail-open
-// default).
+// log (nil means "never drop"), parseBodies is a per-project map (missing
+// entries default to true, matching rules.Engine's fail-open default),
+// and lift is consulted per log (nil means "never lift").
 type fakeDropper struct {
 	decide      func(l core.Log) (bool, int64)
 	parseBodies map[int64]bool
+	lift        func(l core.Log) (core.Log, int64)
 }
 
 func (f fakeDropper) Decide(l core.Log) (bool, int64) {
@@ -90,6 +92,13 @@ func (f fakeDropper) ParseBodies(projectID int64) bool {
 		return true
 	}
 	return on
+}
+
+func (f fakeDropper) Lift(l core.Log) (core.Log, int64) {
+	if f.lift == nil {
+		return l, 0
+	}
+	return f.lift(l)
 }
 
 // eventually polls cond until it returns true or the deadline passes,
@@ -779,6 +788,66 @@ func TestPerProjectParseBodiesFalse(t *testing.T) {
 	}
 	if e.IsEvent {
 		t.Error("parse-bodies off for this project but body was still lifted into an event")
+	}
+}
+
+// TestLift_MatchingBodyBecomesEvent proves severity rules run before
+// Decide and actually change stored/event outcomes: a fakeDropper.lift
+// that raises any body containing "OOM" from its ingest severity to
+// SeverityError (mirroring a seeded severity_floor-style rule) must land
+// a stored entry carrying the lifted severity, and that entry must be
+// flagged IsEvent — core.IsEvent's threshold is SeverityError, so a lift
+// that stopped short of it would prove nothing about the feature's whole
+// point: lifted logs must alert. A second, non-matching log is asserted
+// to stay at its original INFO severity and non-event, so the fake isn't
+// lifting unconditionally.
+func TestLift_MatchingBodyBecomesEvent(t *testing.T) {
+	fw := &fakeWriter{}
+	d := fakeDropper{lift: func(l core.Log) (core.Log, int64) {
+		if l.Severity <= core.SeverityInfo && strings.Contains(l.Body, "OOM") {
+			l.Severity = core.SeverityError
+			return l, 7
+		}
+		return l, 0
+	}}
+	p := New(fw, core.DefaultGrouper{}, NopNotifier{}, d, Options{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.Run(ctx)
+
+	if err := p.Enqueue([]core.Log{
+		{ProjectID: 1, Time: time.Now(), Severity: core.SeverityInfo, Body: "worker killed: OOM"},
+		{ProjectID: 1, Time: time.Now(), Severity: core.SeverityInfo, Body: "worker started normally"},
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	drainCtx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer dcancel()
+	if err := p.Drain(drainCtx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	cancel()
+
+	batches := fw.snapshot()
+	if len(batches) != 1 || len(batches[0]) != 2 {
+		t.Fatalf("got %v batches, want 1 batch of 2 entries", batches)
+	}
+
+	lifted := batches[0][0]
+	if lifted.Log.Severity != core.SeverityError {
+		t.Errorf("lifted entry severity = %v, want SeverityError", lifted.Log.Severity)
+	}
+	if !lifted.IsEvent {
+		t.Error("lifted entry not flagged IsEvent — lifted logs must alert")
+	}
+
+	unmatched := batches[0][1]
+	if unmatched.Log.Severity != core.SeverityInfo {
+		t.Errorf("non-matching entry severity = %v, want SeverityInfo (unchanged)", unmatched.Log.Severity)
+	}
+	if unmatched.IsEvent {
+		t.Error("non-matching entry unexpectedly flagged IsEvent")
 	}
 }
 

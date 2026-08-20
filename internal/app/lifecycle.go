@@ -160,6 +160,9 @@ func register(lc fx.Lifecycle, sd fx.Shutdowner, cfg config.Config, db *enginest
 			if err := engine.FlushDrops(ctx); err != nil {
 				slog.Error("app: final noise-drop flush", "err", err)
 			}
+			if err := engine.FlushLifts(ctx); err != nil {
+				slog.Error("app: final severity-lift flush", "err", err)
+			}
 
 			if err := db.Close(); err != nil {
 				return fmt.Errorf("app: store close: %w", err)
@@ -239,11 +242,11 @@ func setupURL(listenAddr string) string {
 	return "http://" + listenAddr
 }
 
-// flushDropsLoop persists the noise-rule engine's in-memory drop counters
-// on a cadence of interval (cfg.NoiseFlushMS, config.go's default 30s)
-// until ctx is canceled. The final flush after shutdown (see register's
-// OnStop) covers whatever accumulates between the last tick and the
-// process stopping.
+// flushDropsLoop persists the noise-rule engine's in-memory drop and
+// severity-lift counters on a cadence of interval (cfg.NoiseFlushMS,
+// config.go's default 30s) until ctx is canceled. The final flush after
+// shutdown (see register's OnStop) covers whatever accumulates between
+// the last tick and the process stopping.
 func flushDropsLoop(ctx context.Context, engine *rules.Engine, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -255,6 +258,9 @@ func flushDropsLoop(ctx context.Context, engine *rules.Engine, interval time.Dur
 		case <-ticker.C:
 			if err := engine.FlushDrops(ctx); err != nil {
 				slog.Error("app: periodic noise-drop flush", "err", err)
+			}
+			if err := engine.FlushLifts(ctx); err != nil {
+				slog.Error("app: periodic severity-lift flush", "err", err)
 			}
 		}
 	}

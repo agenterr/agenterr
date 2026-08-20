@@ -227,7 +227,9 @@ func (p *Pipeline) Pending() int {
 // key on lifted fields (e.g. severity_floor against a body's lifted
 // level) — dropping on the raw record would miss that. The global
 // DisableBodyParse flag still wins outright; the per-project ParseBodies
-// toggle only refines it when parsing is globally enabled. ok is false
+// toggle only refines it when parsing is globally enabled. Severity rules
+// lift before Decide so severity_floor noise rules key on the lifted
+// value, not the log's raw (often default-INFO) severity. ok is false
 // when the log was dropped, in which case it must not be appended to a
 // batch — the caller's only remaining job is to have accounted for it,
 // which this already did (unflushed decrement, on par with what flush
@@ -252,6 +254,7 @@ func (p *Pipeline) process(l core.Log) (store.Entry, bool) {
 		l = core.ParseStructuredBody(l)
 	}
 	l = core.DetectPanicSeverity(l)
+	l, _ = p.d.Lift(l)
 	if drop, _ := p.d.Decide(l); drop {
 		atomic.AddInt64(&p.unflushed, -1)
 		return store.Entry{}, false
