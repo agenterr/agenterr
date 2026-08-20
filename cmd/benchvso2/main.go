@@ -280,7 +280,10 @@ func o2search(base, sql string) int {
 		"from": 0, "size": 50,
 	}}
 	payload, _ := json.Marshal(q)
-	out := o2req("POST", base+"/api/default/_search", o2User, o2Pass, payload)
+	// use_cache=false: o2's result cache otherwise flatters repeated
+	// identical queries ~4-10x — the fairness note in the report depends
+	// on this being enforced here, not remembered manually.
+	out := o2req("POST", base+"/api/default/_search?use_cache=false", o2User, o2Pass, payload)
 	var resp struct {
 		Hits []any `json:"hits"`
 	}
