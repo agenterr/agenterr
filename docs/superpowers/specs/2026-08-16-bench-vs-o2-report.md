@@ -87,3 +87,13 @@ across cores too.
   queries into ~9 ms responses. Real investigative queries (new query
   each time) pay the uncached cost. The harness now pins
   `use_cache=false` so this can't silently skew future runs.
+
+## Running the §7 gates
+
+`make bench-gates` runs the spec §7 targets above as an automated,
+repeatable test (`internal/store/enginestore/gates_test.go`, tag
+`benchgates`) against a synthetic corpus that mirrors the real corpus's
+shape — so the fast-reader win can't silently regress without a local
+docker+corpus setup. It's local/manual only, not wired into CI. The
+real-corpus, real-OpenObserve head-to-head above is `cmd/benchvso2`,
+run by hand against the confidential local corpus.
