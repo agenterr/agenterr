@@ -90,6 +90,9 @@ const (
 // value admits every row: a SinceM/UntilM pair of (0, 0) is normalized
 // to (MinTsBound, MaxTsBound), empty Service/Environment match any, and
 // MinSeverity 0 admits all severities.
+//
+// (0, 0) means unbounded; a genuine [0, 0] instant window is not
+// expressible — pass (MinTsBound, 0) if you ever need it.
 type ScanFilter struct {
 	SinceM, UntilM int64
 	Service        string
