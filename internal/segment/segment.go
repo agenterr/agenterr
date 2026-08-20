@@ -276,142 +276,19 @@ func Open(path string) (Footer, error) {
 	return foot, nil
 }
 
-// decodeDictionaryColumn decodes a column that was dictionary-encoded.
-func decodeDictionaryColumn(raw map[string][]byte, n int, dictCol, refCol string) ([]string, error) {
-	refs, err := DecodeUvarints(raw[refCol], n)
-	if err != nil {
-		return nil, err
-	}
-	maxRef := uint64(0)
-	for _, r := range refs {
-		if r > maxRef {
-			maxRef = r
-		}
-	}
-	dict, err := DecodeStrings(raw[dictCol], int(maxRef)+1)
-	if err != nil {
-		return nil, err
-	}
-	return ApplyDict(dict, refs)
-}
-
-// decodeColumns decodes all column data from raw bytes. It returns the
-// decoded column values in the order needed to reconstruct rows.
-func decodeColumns(raw map[string][]byte, n int) (
-	logIDs []int64, ts []int64, sevs, isEvent []byte, tmplIDs, nvars []uint64,
-	vars, raws []string, services, envs, rels, attrs, traces []string, err error,
-) {
-	logIDs, err = DecodeDeltaInt64(raw["log_id"], n)
-	if err != nil {
-		return
-	}
-	ts, err = DecodeDeltaInt64(raw["ts"], n)
-	if err != nil {
-		return
-	}
-	sevs = raw["severity"]
-	isEvent = raw["is_event"]
-	if len(sevs) != n || len(isEvent) != n {
-		err = fmt.Errorf("segment: severity/is_event length mismatch")
-		return
-	}
-	tmplIDs, err = DecodeUvarints(raw["template_id"], n)
-	if err != nil {
-		return
-	}
-	nvars, err = DecodeUvarints(raw["nvars"], n)
-	if err != nil {
-		return
-	}
-	totalVars := 0
-	nraw := 0
-	for i := 0; i < n; i++ {
-		totalVars += int(nvars[i])
-		if tmplIDs[i] == 0 {
-			nraw++
-		}
-	}
-	vars, err = DecodeStrings(raw["vars"], totalVars)
-	if err != nil {
-		return
-	}
-	raws, err = DecodeStrings(raw["raw"], nraw)
-	if err != nil {
-		return
-	}
-	services, err = decodeDictionaryColumn(raw, n, "service_dict", "service_refs")
-	if err != nil {
-		return
-	}
-	envs, err = decodeDictionaryColumn(raw, n, "env_dict", "env_refs")
-	if err != nil {
-		return
-	}
-	rels, err = decodeDictionaryColumn(raw, n, "release_dict", "release_refs")
-	if err != nil {
-		return
-	}
-	attrs, err = decodeDictionaryColumn(raw, n, "attrs_dict", "attrs_refs")
-	if err != nil {
-		return
-	}
-	traces, err = DecodeStrings(raw["trace_id"], n)
-	return
-}
-
 // Read fully decodes a segment. Every column block is CRC-verified;
 // any mismatch or decode inconsistency is an error — a segment never
-// yields wrong data silently.
+// yields wrong data silently. Implemented over Scan: full
+// materialization touches every column, preserving the verify-everything
+// guarantee.
 func Read(path string) (Footer, []Row, error) {
-	foot, err := Open(path)
+	sc, err := OpenScan(path, ScanFilter{})
 	if err != nil {
 		return Footer{}, nil, err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return Footer{}, nil, fmt.Errorf("segment: open: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	raw := map[string][]byte{}
-	for _, c := range foot.Columns {
-		comp := make([]byte, c.CompLen)
-		if _, err := f.ReadAt(comp, c.Offset); err != nil {
-			return Footer{}, nil, fmt.Errorf("segment: read column %s: %w", c.Name, err)
-		}
-		if crc32.ChecksumIEEE(comp) != c.CRC {
-			return Footer{}, nil, fmt.Errorf("segment: column %s: CRC mismatch", c.Name)
-		}
-		raw[c.Name], err = Decompress(comp, int(c.RawLen))
-		if err != nil {
-			return Footer{}, nil, fmt.Errorf("segment: column %s: %w", c.Name, err)
-		}
-	}
-
-	n := foot.Count
-	logIDs, ts, sevs, isEvent, tmplIDs, nvars, vars, raws, services, envs, rels, attrs, traces, err := decodeColumns(raw, n)
+	rows, err := sc.Rows(sc.Match)
 	if err != nil {
 		return Footer{}, nil, err
 	}
-
-	rows := make([]Row, n)
-	vi, ri := 0, 0
-	for i := 0; i < n; i++ {
-		r := Row{
-			LogID: logIDs[i], TsMicros: ts[i], Severity: int(sevs[i]),
-			TemplateID: int64(tmplIDs[i]),
-			Service:    services[i], Environment: envs[i], Release: rels[i],
-			TraceID: traces[i], Attrs: attrs[i], IsEvent: isEvent[i] == 1,
-		}
-		if nv := int(nvars[i]); nv > 0 {
-			r.Vars = append([]string(nil), vars[vi:vi+nv]...)
-			vi += nv
-		}
-		if r.TemplateID == 0 {
-			r.Raw = raws[ri]
-			ri++
-		}
-		rows[i] = r
-	}
-	return foot, rows, nil
+	return sc.Foot, rows, nil
 }
