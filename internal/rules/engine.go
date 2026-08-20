@@ -174,10 +174,20 @@ func (e *Engine) recordDrop(id int64) {
 // severity from its own record. The first matching enabled rule by
 // ascending ID wins, mirroring Decide's first-match-wins evaluation.
 //
+// A lift is counted when the rule fires, even if a later noise rule
+// drops the log — lifted_count means "rule matched", not "log stored".
+//
 // Same locking discipline as Decide: rules for l.ProjectID are read once
 // under RLock (the cached slice is never mutated in place), and only a
 // winning rule's lift count takes the write lock.
 func (e *Engine) Lift(l core.Log) (core.Log, int64) {
+	if l.Severity > core.SeverityInfo {
+		// Already meaningful; lifting is only for the ingest default and
+		// below. Checked before the RLock so every already-severe log
+		// (every panic, every structured error) skips the lock entirely.
+		return l, 0
+	}
+
 	e.mu.RLock()
 	loaded := e.loaded
 	var rules []compiledSevRule
@@ -188,9 +198,6 @@ func (e *Engine) Lift(l core.Log) (core.Log, int64) {
 
 	if !loaded || len(rules) == 0 {
 		return l, 0 // fail-open: unloaded engine or no rules for this project
-	}
-	if l.Severity > core.SeverityInfo {
-		return l, 0 // already meaningful; lifting is only for the ingest default and below
 	}
 
 	for _, r := range rules {
