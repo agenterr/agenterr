@@ -441,39 +441,60 @@ type RollupAgg struct {
 
 // ReplaceSegments atomically deletes every manifest row in oldIDs and
 // inserts m, in one transaction — the crash-atomic primitive behind
-// prune rewrites and compaction. Missing oldIDs are tolerated
-// (idempotent retry after a pre-commit crash). Returns the new row id.
+// prune rewrites. Missing oldIDs are tolerated (idempotent retry after a
+// pre-commit crash). Returns the new row id. Compaction, whose merge
+// output can be several shard segments, uses ReplaceSegmentsMulti.
 func (db *DB) ReplaceSegments(ctx context.Context, oldIDs []int64, m SegmentMeta) (int64, error) {
-	svc, err := json.Marshal(m.Services)
+	ids, err := db.ReplaceSegmentsMulti(ctx, oldIDs, []SegmentMeta{m})
 	if err != nil {
-		return 0, fmt.Errorf("sqlite: marshal services: %w", err)
+		return 0, err
+	}
+	return ids[0], nil
+}
+
+// ReplaceSegmentsMulti atomically deletes every manifest row in oldIDs
+// and inserts every row in metas, in ONE transaction — after a crash the
+// manifest holds either the old rows (untouched) or all the new ones,
+// never a mix. Missing oldIDs are tolerated (idempotent retry after a
+// pre-commit crash). Returns the new row ids in metas order.
+func (db *DB) ReplaceSegmentsMulti(ctx context.Context, oldIDs []int64, metas []SegmentMeta) ([]int64, error) {
+	if len(metas) == 0 {
+		return nil, fmt.Errorf("sqlite: replace segments: no replacement rows")
 	}
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("sqlite: replace segments begin: %w", err)
+		return nil, fmt.Errorf("sqlite: replace segments begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, id := range oldIDs {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM segment_manifest WHERE id = ?`, id); err != nil {
-			return 0, fmt.Errorf("sqlite: replace segments delete %d: %w", id, err)
+			return nil, fmt.Errorf("sqlite: replace segments delete %d: %w", id, err)
 		}
 	}
-	res, err := tx.ExecContext(ctx, `
+	ids := make([]int64, 0, len(metas))
+	for _, m := range metas {
+		svc, err := json.Marshal(m.Services)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: marshal services: %w", err)
+		}
+		res, err := tx.ExecContext(ctx, `
 INSERT INTO segment_manifest (project_id, path, min_ts, max_ts, min_log_id, max_log_id, count, events, services, raw_rows, size_bytes, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.ProjectID, m.Path, m.MinTs, m.MaxTs, m.MinLogID, m.MaxLogID, m.Count, m.Events,
-		string(svc), m.RawRows, m.SizeBytes, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: replace segments insert: %w", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("sqlite: replace segments id: %w", err)
+			m.ProjectID, m.Path, m.MinTs, m.MaxTs, m.MinLogID, m.MaxLogID, m.Count, m.Events,
+			string(svc), m.RawRows, m.SizeBytes, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: replace segments insert: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: replace segments id: %w", err)
+		}
+		ids = append(ids, id)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("sqlite: replace segments commit: %w", err)
+		return nil, fmt.Errorf("sqlite: replace segments commit: %w", err)
 	}
-	return id, nil
+	return ids, nil
 }
 
 // RollupAggregate groups flushed rollups for a project by service,

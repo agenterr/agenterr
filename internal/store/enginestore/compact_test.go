@@ -226,3 +226,77 @@ func TestCompactConcurrentWithReadsNoDuplicates(t *testing.T) {
 	}
 	close(stopc)
 }
+
+// TestCompactShardsLargeBuckets: a bucket whose rows exceed
+// CompactShardRows merges into ceil(rows/cap) ts-ordered,
+// non-overlapping shards — and a second pass leaves them alone (the
+// anti-rechurn guard: the bucket is already at its shard floor).
+func TestCompactShardsLargeBuckets(t *testing.T) {
+	s := openStore(t, t.TempDir(), Options{CompactEvery: -1, CompactShardRows: 4})
+	p, _ := s.CreateProject(ctx, "p", 30)
+	base := time.Now().UTC().AddDate(0, 0, -2).Truncate(24 * time.Hour).Add(6 * time.Hour)
+	// Five flushed segments of 2 rows each: 10 rows, cap 4 → 3 shards
+	// (5 members > ceil(10/4)=3, so the bucket is eligible; merging
+	// reduces the segment count while keeping every shard under cap).
+	for b := 0; b < 5; b++ {
+		var entries []store.Entry
+		for i := 0; i < 2; i++ {
+			entries = append(entries, logEntry(p.ID, "past row", "api",
+				base.Add(time.Duration(b*2+i)*time.Minute)))
+		}
+		if _, err := s.WriteBatch(context.Background(), entries); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.FlushAll(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CompactAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := s.Segments(ctx, p.ID)
+	if len(segs) != 3 {
+		t.Fatalf("want 3 shards, got %d: %+v", len(segs), segs)
+	}
+	var total int64
+	for _, m := range segs {
+		total += m.Count
+		if m.Count > 4 {
+			t.Errorf("shard %s exceeds cap: %d rows", m.Path, m.Count)
+		}
+	}
+	if total != 10 {
+		t.Fatalf("rows lost/duplicated across shards: %d", total)
+	}
+	// Shards must not overlap in time (global sort before cutting).
+	for i := 1; i < len(segs); i++ {
+		for j := 0; j < i; j++ {
+			a, b := segs[i], segs[j]
+			if a.MinTs <= b.MaxTs && b.MinTs <= a.MaxTs {
+				t.Errorf("shards %s and %s overlap in time", a.Path, b.Path)
+			}
+		}
+	}
+	// All rows still readable through search.
+	logs, err := s.SearchLogs(ctx, store.LogFilter{ProjectID: p.ID, Limit: 100})
+	if err != nil || len(logs) != 10 {
+		t.Fatalf("post-shard read: %d err %v", len(logs), err)
+	}
+	// Anti-rechurn: a second pass must not rewrite the shards.
+	idsBefore := map[int64]bool{}
+	for _, m := range segs {
+		idsBefore[m.ID] = true
+	}
+	if err := s.CompactAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	segs2, _ := s.Segments(ctx, p.ID)
+	if len(segs2) != 3 {
+		t.Fatalf("second pass changed shard count: %d", len(segs2))
+	}
+	for _, m := range segs2 {
+		if !idsBefore[m.ID] {
+			t.Errorf("second pass rewrote shard %s (new manifest id %d)", m.Path, m.ID)
+		}
+	}
+}

@@ -12,7 +12,7 @@ import (
 
 var ctx = context.Background()
 
-func openStore(t *testing.T, dir string, opts Options) *Store {
+func openStore(t testing.TB, dir string, opts Options) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(dir, "agenterr.db"), opts)
 	if err != nil {

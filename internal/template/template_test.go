@@ -186,3 +186,97 @@ func longLine(tokens int) string {
 	}
 	return s
 }
+
+func TestSnapshotAndAppendSubstitute(t *testing.T) {
+	e := NewExtractor(newFakeStore(), 0)
+	ctx := context.Background()
+	id, vars, ok, err := e.Extract(ctx, 1, "user 42 logged in from 1.2.3.4")
+	if err != nil || !ok {
+		t.Fatalf("extract: ok=%v err=%v", ok, err)
+	}
+	snap, err := e.Snapshot(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toks, found := snap[id]
+	if !found {
+		t.Fatalf("snapshot missing template %d", id)
+	}
+	bvars := make([][]byte, len(vars))
+	for i, v := range vars {
+		bvars[i] = []byte(v)
+	}
+	body, ok := AppendSubstitute(nil, toks, bvars)
+	if !ok {
+		t.Fatal("AppendSubstitute var count mismatch")
+	}
+	if string(body) != "user 42 logged in from 1.2.3.4" {
+		t.Errorf("got %q", body)
+	}
+	// Appends to existing dst without clobbering it.
+	pre := []byte("x")
+	body2, ok := AppendSubstitute(pre, toks, bvars)
+	if !ok || string(body2[:1]) != "x" || string(body2[1:]) != "user 42 logged in from 1.2.3.4" {
+		t.Errorf("append-to-dst got %q", body2)
+	}
+	// Wrong var count → ok=false, dst unchanged.
+	if _, ok := AppendSubstitute(nil, toks, bvars[:0]); ok && len(bvars) > 0 {
+		t.Error("want ok=false on var count mismatch")
+	}
+}
+
+func TestAlwaysContaining(t *testing.T) {
+	// Template: "record not found for user <?> (took <?>" style —
+	// tokens with Wild slots.
+	tmpls := map[int64][]string{
+		5: {"record", "not", "found", "for", "user", Wild},
+		6: {Wild, "level=info", "msg=ok"},
+	}
+	cases := []struct {
+		q    string
+		want map[int64]bool
+	}{
+		{"record not found", map[int64]bool{5: true}},
+		{"not found for user", map[int64]bool{5: true}},
+		{"level=info msg=ok", map[int64]bool{6: true}},
+		// Straddles the wild slot of 5 — cannot be guaranteed.
+		{"user 42", map[int64]bool{}},
+		// Empty query classifies nothing.
+		{"", map[int64]bool{}},
+		// Matches neither statically.
+		{"zzz", map[int64]bool{}},
+	}
+	for _, tc := range cases {
+		got := AlwaysContaining(tmpls, tc.q)
+		if len(got) != len(tc.want) {
+			t.Errorf("q=%q: got %v, want %v", tc.q, got, tc.want)
+			continue
+		}
+		for id := range tc.want {
+			if !got[id] {
+				t.Errorf("q=%q: missing id %d", tc.q, id)
+			}
+		}
+	}
+}
+
+func TestSnapshotIsolatedFromLaterMints(t *testing.T) {
+	e := NewExtractor(newFakeStore(), 0)
+	ctx := context.Background()
+	if _, _, _, err := e.Extract(ctx, 1, "alpha beta 1"); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := e.Snapshot(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(snap)
+	// A structurally different body mints a new template; the old
+	// snapshot map must not grow (no shared mutable map).
+	if _, _, _, err := e.Extract(ctx, 1, "totally different shape with many tokens here"); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap) != before {
+		t.Errorf("snapshot grew from %d to %d after later mint", before, len(snap))
+	}
+}

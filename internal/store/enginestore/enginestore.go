@@ -33,6 +33,15 @@ type Options struct {
 	// (CompactAll). Zero selects the default (1h); negative disables the
 	// compaction loop entirely (tests call CompactAll directly instead).
 	CompactEvery time.Duration
+
+	// CompactShardRows caps how many rows one compacted segment may hold;
+	// a bucket with more rows is merged into several ts-ordered shard
+	// segments instead of one. Shards are what let the parallel search
+	// path divide a day's column-decompression across cores — a single
+	// day-sized segment serializes it. Zero selects the default
+	// (100_000, ~1 MB compressed per shard on the reference corpus —
+	// still far above the block size where zstd's ratio would suffer).
+	CompactShardRows int
 }
 
 // Store is the engine-backed store.Store. The embedded *sqlite.DB serves
@@ -86,6 +95,9 @@ func Open(dbPath string, opts Options) (*Store, error) {
 	}
 	if opts.CompactEvery == 0 {
 		opts.CompactEvery = time.Hour
+	}
+	if opts.CompactShardRows <= 0 {
+		opts.CompactShardRows = 100_000
 	}
 	db, err := sqlite.Open(dbPath)
 	if err != nil {
