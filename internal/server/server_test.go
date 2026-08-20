@@ -56,8 +56,8 @@ func newTestDeps(t *testing.T) (Deps, *enginestore.Store) {
 		Pipe:      pipe,
 		Ingesters: []ingest.Ingester{jsonapi.New(pipe, 0), otlp.New(pipe, 0)},
 		Auth:      a,
-		API:       api.New(db, db, db, engine, db, alertsEngine),
-		MCP:       mcp.New(db, db, db, engine, db, alertsEngine),
+		API:       api.New(db, db, db, db, engine, db, alertsEngine),
+		MCP:       mcp.New(db, db, db, db, engine, db, alertsEngine),
 		Web:       web.New(db, db, a, db, alertsEngine),
 	}
 	return deps, db

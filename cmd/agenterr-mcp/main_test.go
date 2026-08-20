@@ -169,7 +169,7 @@ func newTestServer(t *testing.T) (url string, apiKey string) {
 	a := auth.New(fs, []byte{})
 	engine := rules.New(fs, fs, fs)
 	alertsEngine := alerts.New(fs, nil)
-	srv := agmcp.New(fs, fs, fs, engine, fs, alertsEngine)
+	srv := agmcp.New(fs, fs, fs, fs, engine, fs, alertsEngine)
 	mux := http.NewServeMux()
 	srv.Mount(mux, a)
 	httpSrv := httptest.NewServer(mux)
@@ -203,12 +203,12 @@ func TestProxy_ListToolsAndCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 18 {
+	if len(tools.Tools) != 21 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 18: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 21: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -330,8 +330,8 @@ func TestProxy_RemoteErrorPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools after a remote error: %v", err)
 	}
-	if len(tools.Tools) != 18 {
-		t.Fatalf("got %d tools after a remote error, want 18", len(tools.Tools))
+	if len(tools.Tools) != 21 {
+		t.Fatalf("got %d tools after a remote error, want 21", len(tools.Tools))
 	}
 
 	_ = cs.Close()

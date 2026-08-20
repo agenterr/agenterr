@@ -716,7 +716,7 @@ func newTestMCPServer() (*Server, *fakeStore) {
 	fs := newFakeStore()
 	engine := rules.New(fs, fs, fs)
 	alertsEngine := alerts.New(fs, nil)
-	s := New(fs, fs, fs, engine, fs, alertsEngine)
+	s := New(fs, fs, fs, fs, engine, fs, alertsEngine)
 	s.clock = fixedClock
 	return s, fs
 }
@@ -972,7 +972,7 @@ func TestGetStats_EngineMetrics_AppendsEngineBlock(t *testing.T) {
 	}
 	engine := rules.New(es, es, es)
 	alertsEngine := alerts.New(es, nil)
-	s := New(es, es, es, engine, es, alertsEngine)
+	s := New(es, es, es, es, engine, es, alertsEngine)
 	s.clock = fixedClock
 
 	res, _, err := s.getStats(apiCtx(1), nil, getStatsInput{})
@@ -1367,6 +1367,129 @@ func TestDeleteNoiseRule_ProjectKey_CrossProjectRule_NotFoundError(t *testing.T)
 		t.Errorf("got IsError=%v text=%q, want not found error", res.IsError, textOf(t, res))
 	}
 	if _, ok := fs.noiseRules[1]; !ok {
+		t.Errorf("rule was deleted despite belonging to another project")
+	}
+}
+
+// ---- list_severity_rules / upsert_severity_rule / delete_severity_rule ----
+
+func TestListSeverityRules_ProjectKey_SeesOnlyOwnProject(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.projects[1] = core.Project{ID: 1, Slug: "acme"}
+	fs.sevRules[1] = store.SeverityRuleRow{SeverityRule: core.SeverityRule{ID: 1, ProjectID: 1, Service: "api", Pattern: "record not found", Severity: core.SeverityWarn, Enabled: true}}
+	fs.sevRules[2] = store.SeverityRuleRow{SeverityRule: core.SeverityRule{ID: 2, ProjectID: 2, Pattern: "boom", Severity: core.SeverityError, Enabled: true}}
+
+	// Admin-only input, requesting another project's rules — must be
+	// ignored for a project-scoped key.
+	res, _, err := s.listSeverityRules(apiCtx(1), nil, listSeverityRulesInput{ProjectID: 2})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	text := textOf(t, res)
+	want := "1 severity rules in acme:\n" +
+		`#1 service=api pattern="record not found" severity=warn enabled=true lifted=0`
+	if text != want {
+		t.Errorf("got:\n%s\nwant:\n%s", text, want)
+	}
+}
+
+func TestUpsertSeverityRule_ProjectKey_CreatesUnderOwnProject(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.projects[1] = core.Project{ID: 1, Slug: "acme"}
+
+	res, _, err := s.upsertSeverityRule(apiCtx(1), nil, upsertSeverityRuleInput{
+		ProjectID: 999, // must be overridden by the caller's own project
+		Service:   "api",
+		Pattern:   "record not found",
+		Severity:  "warn",
+		Enabled:   boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	stored, ok := fs.sevRules[1]
+	if !ok {
+		t.Fatalf("no rule stored")
+	}
+	if stored.ProjectID != 1 {
+		t.Errorf("stored ProjectID = %d, want 1 (caller's own project, not the input's 999)", stored.ProjectID)
+	}
+	if stored.Severity != core.SeverityWarn {
+		t.Errorf("stored Severity = %v, want SeverityWarn", stored.Severity)
+	}
+}
+
+func TestUpsertSeverityRule_SeverityAtOrBelowInfo_ErrorsWithoutStoring(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	res, _, err := s.upsertSeverityRule(apiCtx(1), nil, upsertSeverityRuleInput{
+		Pattern:  "record not found",
+		Severity: "info",
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	want := "severity: must be above info — severity rules only lift"
+	if !res.IsError || textOf(t, res) != want {
+		t.Errorf("got IsError=%v text=%q, want %q", res.IsError, textOf(t, res), want)
+	}
+	if len(fs.sevRules) != 0 {
+		t.Errorf("rule stored despite invalid severity")
+	}
+}
+
+func TestUpsertSeverityRule_InvalidPattern_ErrorsWithoutStoring(t *testing.T) {
+	s, fs := newTestMCPServer()
+
+	res, _, err := s.upsertSeverityRule(apiCtx(1), nil, upsertSeverityRuleInput{
+		Pattern:  "[",
+		Severity: "warn",
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("IsError = false, want a regexp-compile error: %s", textOf(t, res))
+	}
+	if len(fs.sevRules) != 0 {
+		t.Errorf("rule stored despite invalid pattern")
+	}
+}
+
+func TestDeleteSeverityRule_ProjectKey_OwnRule_Succeeds(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.sevRules[1] = store.SeverityRuleRow{SeverityRule: core.SeverityRule{ID: 1, ProjectID: 1, Pattern: "boom", Severity: core.SeverityError, Enabled: true}}
+
+	res, _, err := s.deleteSeverityRule(apiCtx(1), nil, deleteSeverityRuleInput{ID: 1})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", textOf(t, res))
+	}
+	if textOf(t, res) != "severity rule #1 deleted" {
+		t.Errorf("text = %q", textOf(t, res))
+	}
+	if _, ok := fs.sevRules[1]; ok {
+		t.Errorf("rule still present after delete")
+	}
+}
+
+func TestDeleteSeverityRule_ProjectKey_CrossProjectRule_NotFoundError(t *testing.T) {
+	s, fs := newTestMCPServer()
+	fs.sevRules[1] = store.SeverityRuleRow{SeverityRule: core.SeverityRule{ID: 1, ProjectID: 2, Pattern: "boom", Severity: core.SeverityError, Enabled: true}}
+
+	res, _, err := s.deleteSeverityRule(apiCtx(1), nil, deleteSeverityRuleInput{ID: 1})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !res.IsError || textOf(t, res) != "not found" {
+		t.Errorf("got IsError=%v text=%q, want not found error", res.IsError, textOf(t, res))
+	}
+	if _, ok := fs.sevRules[1]; !ok {
 		t.Errorf("rule was deleted despite belonging to another project")
 	}
 }
@@ -1910,7 +2033,7 @@ func TestMCP_OverTheWire(t *testing.T) {
 	a := auth.New(fs, []byte{})
 	engine := rules.New(fs, fs, fs)
 	alertsEngine := alerts.New(fs, nil)
-	srv := New(fs, fs, fs, engine, fs, alertsEngine)
+	srv := New(fs, fs, fs, fs, engine, fs, alertsEngine)
 	srv.clock = fixedClock
 	mux := http.NewServeMux()
 	srv.Mount(mux, a)
@@ -1934,12 +2057,12 @@ func TestMCP_OverTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 18 {
+	if len(tools.Tools) != 21 {
 		names := make([]string, len(tools.Tools))
 		for i, tl := range tools.Tools {
 			names[i] = tl.Name
 		}
-		t.Fatalf("got %d tools, want 18: %v", len(tools.Tools), names)
+		t.Fatalf("got %d tools, want 21: %v", len(tools.Tools), names)
 	}
 
 	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
