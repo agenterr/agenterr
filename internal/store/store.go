@@ -191,6 +191,29 @@ type NoiseRuleRow struct {
 	CreatedAt    time.Time
 }
 
+// SeverityRules manages per-project severity-lift rules and their lift accounting.
+type SeverityRules interface {
+	// SeverityRules returns rules for a project (projectID 0 = all
+	// projects), ordered by ascending ID. LiftedCount reflects
+	// persisted lifts only.
+	SeverityRules(ctx context.Context, projectID int64) ([]SeverityRuleRow, error)
+	// UpsertSeverityRule inserts (ID 0) or updates (ID set) and returns
+	// the stored row. Updating a missing ID returns ErrNotFound.
+	// Invalid patterns or severity values are rejected with an error.
+	UpsertSeverityRule(ctx context.Context, r core.SeverityRule) (SeverityRuleRow, error)
+	DeleteSeverityRule(ctx context.Context, id int64) error // missing → ErrNotFound
+	// AddSeverityLifts atomically adds the given per-rule lift counts.
+	// Unknown rule IDs are skipped (rule deleted since counting began).
+	AddSeverityLifts(ctx context.Context, counts map[int64]int64) error
+}
+
+// SeverityRuleRow is a stored rule plus persistence-side fields.
+type SeverityRuleRow struct {
+	core.SeverityRule
+	LiftedCount int64
+	CreatedAt   time.Time
+}
+
 // AlertRules manages per-project alert rules and their delivery outcomes.
 type AlertRules interface {
 	// AlertRules returns rules for a project (projectID 0 = all
@@ -221,6 +244,7 @@ type Store interface {
 	Writer
 	Admin
 	NoiseRules
+	SeverityRules
 	AlertRules
 	Close() error
 }
