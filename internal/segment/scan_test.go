@@ -110,6 +110,10 @@ func TestScanMatchFilters(t *testing.T) {
 		want []int64 // expected LogIDs in Match order
 	}{
 		{"zero filter admits all", ScanFilter{}, []int64{10, 11, 12, 13}},
+		// Documented ScanFilter contract: (0, 0) means unbounded, not a
+		// genuine [0, 0] instant window (no fixture row has ts=0, so this
+		// pins "admits all" rather than "admits nothing").
+		{"explicit (0,0) normalizes to unbounded", ScanFilter{SinceM: 0, UntilM: 0}, []int64{10, 11, 12, 13}},
 		{"time bounds", ScanFilter{SinceM: 2000, UntilM: 3000}, []int64{11, 12}},
 		{"service", ScanFilter{SinceM: MinTsBound, UntilM: MaxTsBound, Service: "api"}, []int64{10, 12, 13}},
 		{"service absent", ScanFilter{SinceM: MinTsBound, UntilM: MaxTsBound, Service: "nope"}, nil},
