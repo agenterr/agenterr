@@ -48,6 +48,10 @@ type fakeStore struct {
 	nextNoiseRuleID int64
 	lastAddedDrops  map[int64]int64
 
+	sevRules       map[int64]store.SeverityRuleRow // keyed by rule ID
+	nextSevRuleID  int64
+	lastAddedLifts map[int64]int64
+
 	alertRules       map[int64]store.AlertRuleRow // keyed by rule ID
 	nextAlertRuleID  int64
 	recordAlertCalls []recordAlertCall
@@ -79,6 +83,7 @@ func newFakeStore() *fakeStore {
 		serviceCounts: make(map[int64][]store.ServiceCount),
 		aggregateRows: make(map[int64][]store.AggregateRow),
 		noiseRules:    make(map[int64]store.NoiseRuleRow),
+		sevRules:      make(map[int64]store.SeverityRuleRow),
 		alertRules:    make(map[int64]store.AlertRuleRow),
 	}
 }
@@ -223,6 +228,53 @@ func (f *fakeStore) SetProjectParseBodies(_ context.Context, projectID int64, on
 	}
 	p.ParseBodies = on
 	f.projects[projectID] = p
+	return nil
+}
+
+// ---- store.SeverityRules ----
+
+func (f *fakeStore) SeverityRules(_ context.Context, projectID int64) ([]store.SeverityRuleRow, error) {
+	ids := make([]int64, 0, len(f.sevRules))
+	for id, row := range f.sevRules {
+		if projectID == 0 || row.ProjectID == projectID {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out := make([]store.SeverityRuleRow, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, f.sevRules[id])
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertSeverityRule(_ context.Context, r core.SeverityRule) (store.SeverityRuleRow, error) {
+	if r.ID == 0 {
+		f.nextSevRuleID++
+		r.ID = f.nextSevRuleID
+		row := store.SeverityRuleRow{SeverityRule: r}
+		f.sevRules[r.ID] = row
+		return row, nil
+	}
+	existing, ok := f.sevRules[r.ID]
+	if !ok {
+		return store.SeverityRuleRow{}, store.ErrNotFound
+	}
+	existing.SeverityRule = r
+	f.sevRules[r.ID] = existing
+	return existing, nil
+}
+
+func (f *fakeStore) DeleteSeverityRule(_ context.Context, id int64) error {
+	if _, ok := f.sevRules[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.sevRules, id)
+	return nil
+}
+
+func (f *fakeStore) AddSeverityLifts(_ context.Context, counts map[int64]int64) error {
+	f.lastAddedLifts = counts
 	return nil
 }
 
@@ -662,7 +714,7 @@ func splitLines(s string) []string {
 
 func newTestMCPServer() (*Server, *fakeStore) {
 	fs := newFakeStore()
-	engine := rules.New(fs, fs)
+	engine := rules.New(fs, fs, fs)
 	alertsEngine := alerts.New(fs, nil)
 	s := New(fs, fs, fs, engine, fs, alertsEngine)
 	s.clock = fixedClock
@@ -918,7 +970,7 @@ func TestGetStats_EngineMetrics_AppendsEngineBlock(t *testing.T) {
 			1: {Segments: 3, Rows: 1000, RawRows: 50, SizeBytes: 204800, MemRows: 25},
 		},
 	}
-	engine := rules.New(es, es)
+	engine := rules.New(es, es, es)
 	alertsEngine := alerts.New(es, nil)
 	s := New(es, es, es, engine, es, alertsEngine)
 	s.clock = fixedClock
@@ -1856,7 +1908,7 @@ func TestMCP_OverTheWire(t *testing.T) {
 	}}
 
 	a := auth.New(fs, []byte{})
-	engine := rules.New(fs, fs)
+	engine := rules.New(fs, fs, fs)
 	alertsEngine := alerts.New(fs, nil)
 	srv := New(fs, fs, fs, engine, fs, alertsEngine)
 	srv.clock = fixedClock

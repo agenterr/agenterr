@@ -47,7 +47,7 @@ func newTestDeps(t *testing.T) (Deps, *enginestore.Store) {
 	a := auth.New(db, hash)
 
 	pipe := pipeline.New(db, core.DefaultGrouper{}, pipeline.NopNotifier{}, pipeline.NopDropper{}, pipeline.Options{})
-	engine := rules.New(db, db)
+	engine := rules.New(db, db, db)
 	alertsEngine := alerts.New(db, nil)
 
 	deps := Deps{
