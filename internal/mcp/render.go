@@ -273,6 +273,29 @@ func renderNoiseRule(row store.NoiseRuleRow) string {
 	return "rule " + noiseRuleLine(row)
 }
 
+// severityRuleLine renders one severity rule as a single compact line.
+func severityRuleLine(row store.SeverityRuleRow) string {
+	return fmt.Sprintf("#%d service=%s pattern=%q severity=%s enabled=%v lifted=%d",
+		row.ID, svcOrAny(row.Service), row.Pattern, strings.ToLower(row.Severity.String()), row.Enabled, row.LiftedCount)
+}
+
+func renderSeverityRules(rows []store.SeverityRuleRow, projectSlug string) string {
+	scope := ""
+	if projectSlug != "" {
+		scope = " in " + projectSlug
+	}
+	lines := make([]string, 0, len(rows)+1)
+	lines = append(lines, fmt.Sprintf("%d severity rules%s:", len(rows), scope))
+	for _, r := range rows {
+		lines = append(lines, severityRuleLine(r))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderSeverityRule(row store.SeverityRuleRow) string {
+	return "rule " + severityRuleLine(row)
+}
+
 func renderNoiseReport(topServices []store.ServiceCount, rules []store.NoiseRuleRow, totalDropped int64, hoursLabel string) string {
 	lines := make([]string, 0, len(topServices)+len(rules)+3)
 	lines = append(lines, fmt.Sprintf("noise report (%s): %d services, %d rules, %d total dropped",
