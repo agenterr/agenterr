@@ -48,7 +48,7 @@ today, and exists so that type can be swapped without touching callers.
 |---|---|---|---|
 | Ingest | `ingest.Ingester` | `internal/ingest/ingest.go` | `ingest/jsonapi.Handler`, `ingest/otlp.Handler` |
 | Grouping | `pipeline.Grouper` | `internal/pipeline/ports.go` | `core.DefaultGrouper` (delegates to `core.Fingerprint`) |
-| Storage | `store.Store` (`Reader` + `Writer` + `Admin`) | `internal/store/store.go` | `store/sqlite.DB` |
+| Storage | `store.Store` (`Reader` + `Writer` + `Admin`) | `internal/store/store.go` | `store/enginestore.Store` (SQLite metadata via `store/sqlite.DB` + columnar zstd segments via `internal/engine`/`internal/segment`) |
 | Auth | `auth.KeyAuth` / `auth.SessionAuth` | `internal/auth/auth.go` | `auth.Auth` |
 | Notification | `pipeline.Notifier` | `internal/pipeline/ports.go` | `pipeline.NopNotifier` |
 
@@ -98,7 +98,7 @@ To add a new backend (Postgres, for example):
 2. Wire it into `internal/app` in place of `store/sqlite.DB` wherever the
    `store.Store` is constructed.
 3. Prove it's behaviorally identical to the existing backend with one line,
-   the same way `store/sqlite/sqlite_test.go` does:
+   the same way `internal/store/enginestore/storetest_test.go` does:
 
    ```go
    func TestPostgresStore(t *testing.T) {
@@ -128,8 +128,11 @@ is literally the unit the control plane provisions, starts, stops, and
 upgrades. It reads its listen address and SQLite path the same way a
 self-hosted operator would (`AGENTERR_LISTEN`, `AGENTERR_DB`, or their flag
 equivalents — see `internal/config/config.go`), exposes `/healthz` for the
-provisioner's readiness checks, and persists everything to the single
-SQLite file at `AGENTERR_DB`, which is what the control plane snapshots or
-Litestream-replicates for backup. Nothing about the image assumes it's
+provisioner's readiness checks, and persists everything under `AGENTERR_DB`:
+the SQLite file itself (metadata) plus the sibling `engine/` directory
+(columnar zstd segments holding log bodies) that `enginestore.Open`
+creates next to it. Both are what the control plane snapshots or
+replicates for backup — Litestream covers the SQLite file, the segment
+directory needs its own sync. Nothing about the image assumes it's
 running standalone versus provisioned — self-hosting and the hosted product
 run the exact same artifact.
