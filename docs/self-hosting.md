@@ -1,7 +1,8 @@
 # Self-hosting agenterr
 
-One binary, one SQLite file. Everything below is optional hardening on
-top of the README Quickstart.
+One binary, one data directory: a SQLite file for metadata plus a sibling
+`engine/` directory of immutable columnar segments for log bodies.
+Everything below is optional hardening on top of the README Quickstart.
 
 ## Docker Compose
 
@@ -99,14 +100,23 @@ WantedBy=multi-user.target
 
 ## Backup
 
-State is one SQLite file (WAL mode). Options, best first:
+State is the SQLite file at `AGENTERR_DB` (metadata: projects, issues,
+triage, rules, templates, segment manifest) plus the sibling `engine/`
+directory next to it (log bodies, in immutable columnar zstd segments).
+Both need to be backed up together for a restorable copy. Options, best
+first:
 
-1. **[Litestream](https://litestream.io/)** — continuous WAL replication
-   to S3-compatible storage; restores to the second.
+1. **[Litestream](https://litestream.io/)** for the SQLite file —
+   continuous WAL replication to S3-compatible storage, restores to the
+   second — paired with a periodic `rclone`/`rsync` of `engine/` to the
+   same off-site target. Segments are immutable once written, so syncing
+   `engine/` is safe to run live and only needs to pick up new files.
 2. `sqlite3 /data/agenterr.db ".backup /backups/agenterr-$(date +%F).db"`
-   on a timer — consistent even while the server runs.
-3. Raw file copy — only safe if you also copy the `-wal`/`-shm`
-   sidecars, or the process is stopped.
+   on a timer for the SQLite half — consistent even while the server
+   runs — plus a filesystem copy of `engine/` in the same pass.
+3. Raw file copy of the whole data directory — safe for `engine/` even
+   live; the SQLite file itself is only safe to copy raw if you also
+   copy its `-wal`/`-shm` sidecars, or the process is stopped.
 
 ## Upgrades and rollback
 

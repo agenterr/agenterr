@@ -14,7 +14,7 @@ is the store, grouper, and alerter. This guide maps each piece.
 | Vector transforms (multiline join, severity parsing) | server-side: structured-body parsing (JSON/logfmt) + panic-prefix detection, ship-side multiline joining |
 | OpenObserve streams + retention | projects with per-project `retention_days` |
 | OpenObserve scheduled alerts | alert rules (threshold over sliding window → webhook) |
-| SQL/log search UI | web UI + full-text search, or MCP tools from your agent |
+| SQL/log search UI | web UI + substring search, or MCP tools from your agent |
 
 ## Run both in parallel first
 
@@ -78,8 +78,9 @@ Honest list — agenterr is an error tracker, not a general log platform:
 
 - No long-term log analytics/dashboards or SQL over logs.
 - No metrics or traces (OTLP *logs* only, at `POST /v1/logs`).
-- Single-node SQLite storage — right-sized for team-scale error
-  tracking, not fleet-wide log archival.
+- Single-node storage (SQLite metadata + local columnar segments) —
+  right-sized for team-scale error tracking, not fleet-wide log
+  archival.
 
 If you need those, keep the log platform for analytics and let agenterr
 own errors — ship dual-writes happily.
