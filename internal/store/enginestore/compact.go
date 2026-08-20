@@ -16,7 +16,8 @@ import (
 // per project, segments are bucketed by MinTs — hourly buckets for the
 // current UTC day, daily buckets for prior days — and any bucket with
 // two or more segments (excluding the still-filling current hour) is
-// merged into one. The manifest swap is crash-atomic (ReplaceSegments);
+// merged into shard segments. The manifest swap is crash-atomic
+// (ReplaceSegmentsMulti);
 // old files are removed only after commit. The manifest swap and old-file
 // removal run under the project's ps.mu, mirroring flush and prune — that
 // guarantees no reader observes a manifest row with no backing file (the
