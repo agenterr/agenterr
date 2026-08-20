@@ -5,11 +5,13 @@
 # Agenterr
 
 Agenterr is a self-hosted error and log tracker in one Go binary: OTLP and
-JSON log ingest, error grouping, full-text search, a REST API, an MCP
-server, and a minimal web UI, backed by SQLite — no queues, no Postgres, no
-separate services to run. It's built for agents first: seventeen MCP tools and
-a shipped Claude Code skill are the primary interface, and the web UI
-exists for verification and light management.
+JSON log ingest, error grouping, substring search, a REST API, an MCP
+server, and a minimal web UI — no queues, no Postgres, no separate services
+to run. Log bodies are stored via lossless template extraction in immutable
+columnar zstd segments; SQLite holds only metadata (projects, issues,
+triage, rules, templates). It's built for agents first: twenty-one MCP
+tools and a shipped Claude Code skill are the primary interface, and the
+web UI exists for verification and light management.
 
 ![An agent diagnosing a production incident through Agenterr's MCP tools](docs/media/demo.gif)
 
@@ -113,6 +115,54 @@ Lifting is conservative (a body must carry a message or level key to
 qualify), never overwrites an explicitly-set severity or existing
 attributes, and can be disabled with `--parse-bodies=false` or
 `AGENTERR_PARSE_BODIES=false`.
+
+### Storage & search
+
+Log bodies are stored via lossless template extraction — CLP-style: each
+log splits into a template (its static structure) and variables, with
+byte-for-byte reconstruction verified at ingest — packed into immutable
+columnar zstd segments on disk. SQLite holds only metadata: projects,
+issues, triage state, rules, templates, and the segment manifest. Measured
+on a real 317k-log production day, that's **9.4 bytes/record all-in**.
+
+Search is substring matching over the reconstructed body — there's no
+tokenizer or full-text index, so it finds exact substrings, not stemmed or
+tokenized matches. On the same reference corpus: a scoped search (one
+service, 24h) runs in ~11ms; an unscoped full-day search runs in ~15ms.
+
+Measured head-to-head against OpenObserve on identical data (see
+[`docs/superpowers/specs/2026-08-16-bench-vs-o2-report.md`](docs/superpowers/specs/2026-08-16-bench-vs-o2-report.md)
+for the full methodology and table), agenterr matches or beats OpenObserve
+on storage (9.4 vs 10.9 bytes/record all-in), and is 3.4x faster on scoped
+search, 2.3x faster on unscoped search, and 119x faster on aggregation —
+while writes are durable (fsync-before-ack), unlike OpenObserve's
+async-ack default.
+
+### Severity rules
+
+Per-project rules that lift the severity of plain-text logs which print
+errors without a level — closing the common blind spot where, say, a GORM
+`record not found` line prints at `info` and never triggers an
+issue or an alert. A rule is a service scope plus a Go regexp matched
+against the log body plus a target severity; it fires only on logs still
+at `info` or below, and it only raises severity — never downgrades (that's
+`severity_floor` noise rules' job). The first matching rule wins.
+
+Manage rules over REST:
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/v1/projects/{id}/severity-rules` | List a project's rules |
+| `POST /api/v1/projects/{id}/severity-rules` | Create or update a rule (include `id` to update) |
+| `DELETE /api/v1/severity-rules/{id}` | Remove a rule |
+
+The same surface is available as three MCP tools:
+
+| Tool | Purpose |
+|---|---|
+| `list_severity_rules` | List the rules configured for a project |
+| `upsert_severity_rule` | Create or update a rule |
+| `delete_severity_rule` | Remove a rule |
 
 ### Noise rules
 
@@ -230,6 +280,15 @@ The same surface is available as four MCP tools:
 | `delete_alert_rule` | Remove a rule |
 | `test_alert_rule` | Fire a rule immediately with a sample issue and report the outcome |
 
+### Aggregation
+
+`GET /api/v1/aggregate` and the `aggregate_logs` MCP tool group a
+project's logs by `service`, `severity`, `hour`, or `day` over an optional
+`since`/`until` window, returning log and event counts per group. Both are
+served from pre-computed rollups rather than scanning segments, which is
+what keeps aggregation fast (0.17ms on the reference corpus — see
+[Storage & search](#storage--search) above).
+
 ### Shipping logs
 
 `agenterr ship` is a sidecar that tails Docker container logs and/or local
@@ -319,13 +378,14 @@ Migrating from a Vector + OpenObserve (or similar) stack? See
 
 ## Agent setup
 
-Give an agent access to the seventeen MCP tools (`list_projects`,
+Give an agent access to the twenty-one MCP tools (`list_projects`,
 `list_issues`, `get_issue`, `search_logs`, `get_log_context`,
-`resolve_issue`, `ignore_issue`, `get_stats`, `list_noise_rules`,
-`upsert_noise_rule`, `delete_noise_rule`, `get_noise_report`,
-`set_project_parse`, `list_alert_rules`, `upsert_alert_rule`,
-`delete_alert_rule`, `test_alert_rule`) either directly over Streamable
-HTTP:
+`resolve_issue`, `ignore_issue`, `get_stats`, `aggregate_logs`,
+`list_noise_rules`, `upsert_noise_rule`, `delete_noise_rule`,
+`get_noise_report`, `set_project_parse`, `list_alert_rules`,
+`upsert_alert_rule`, `delete_alert_rule`, `test_alert_rule`,
+`list_severity_rules`, `upsert_severity_rule`, `delete_severity_rule`)
+either directly over Streamable HTTP:
 
 ```
 claude mcp add --transport http agenterr https://logs.example.com/mcp \
@@ -360,7 +420,7 @@ single admin login.
 | `AGENTERR_BUFFER_SIZE` | `--buffer-size` | `10000` | Pipeline in-memory buffer capacity, in logs |
 | `AGENTERR_FLUSH_EVERY_MS` | `--flush-every` | `200` | Pipeline batch-write interval |
 | `AGENTERR_MAX_BODY_BYTES` | `--max-body-bytes` | `5242880` (5MB) | Max request body any ingest edge accepts |
-| `AGENTERR_MAX_DB_BYTES` | `--max-db-bytes` | `0` (unlimited) | Guardrail: if the DB file exceeds this, prune the oldest day across every project |
+| `AGENTERR_MAX_DB_BYTES` | `--max-db-bytes` | `0` (unlimited) | Guardrail: if the SQLite file plus the engine's segment directory together exceed this, prune the oldest day across every project |
 | `AGENTERR_NOISE_FLUSH_MS` | `--noise-flush-ms` | `30000` | How often noise-rule drop counters are persisted |
 
 Flags override env vars, which override the defaults above.
@@ -368,11 +428,17 @@ Flags override env vars, which override the defaults above.
 ## Self-hosting notes
 
 - **Full deployment guide** — compose file, reverse-proxy TLS examples, systemd, backup, upgrades: [docs/self-hosting.md](docs/self-hosting.md).
-- **Backup is one file.** Everything lives in the SQLite database at
+- **Backup is one directory.** Metadata lives in the SQLite database at
   `AGENTERR_DB` (WAL mode, so also copy the `-wal`/`-shm` files if you're
-  doing a raw filesystem copy while the process is running). For continuous
-  off-site backup with minimal downtime risk, run it under
-  [Litestream](https://litestream.io/).
+  doing a raw filesystem copy while the process is running); log bodies
+  live in the immutable columnar segments under the sibling `engine/`
+  directory next to `AGENTERR_DB`. Back up both together. Segments are
+  immutable once written, so a plain filesystem copy of `engine/` is safe
+  even while the process is running; only the SQLite file needs WAL-aware
+  handling. [Litestream](https://litestream.io/) covers continuous
+  replication of the SQLite file itself — pair it with your own sync of
+  `engine/` (e.g. `rclone`/`rsync` to the same off-site target) for full
+  coverage.
 - **Retention** is set per project (`retention_days` at creation) and
   enforced by an hourly sweep; `AGENTERR_MAX_DB_BYTES` is a coarse
   last-resort guardrail on top of that, not a replacement for it.

@@ -5,15 +5,17 @@ description: Use when the user asks to check production errors, wants to know wh
 
 # Agenterr debugging
 
-Agenterr is an error and log tracker reachable through seventeen MCP tools:
-`list_projects`, `list_issues`, `get_issue`, `search_logs`, `get_log_context`,
-`resolve_issue`, `ignore_issue`, `get_stats`, `list_noise_rules`,
-`upsert_noise_rule`, `delete_noise_rule`, `get_noise_report`,
-`set_project_parse`, `list_alert_rules`, `upsert_alert_rule`,
-`delete_alert_rule`, `test_alert_rule`. This skill is the workflow for using
-them to go from "something's wrong in prod" to a verified fix, for tuning
-out the noise that gets in the way of that, and for setting up alerts so
-you hear about the next one without having to go looking.
+Agenterr is an error and log tracker reachable through twenty-one MCP
+tools: `list_projects`, `list_issues`, `get_issue`, `search_logs`,
+`get_log_context`, `resolve_issue`, `ignore_issue`, `get_stats`,
+`aggregate_logs`, `list_noise_rules`, `upsert_noise_rule`,
+`delete_noise_rule`, `get_noise_report`, `set_project_parse`,
+`list_alert_rules`, `upsert_alert_rule`, `delete_alert_rule`,
+`test_alert_rule`, `list_severity_rules`, `upsert_severity_rule`,
+`delete_severity_rule`. This skill is the workflow for using them to go
+from "something's wrong in prod" to a verified fix, for tuning out the
+noise that gets in the way of that, and for setting up alerts so you hear
+about the next one without having to go looking.
 
 ## Workflow
 
