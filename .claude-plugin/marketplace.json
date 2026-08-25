@@ -1,0 +1,28 @@
+{
+  "name": "agenterr",
+  "owner": {
+    "name": "Agenterr",
+    "url": "https://agenterr.dev"
+  },
+  "description": "Self-hosted error and log tracking built for coding agents.",
+  "plugins": [
+    {
+      "name": "agenterr",
+      "source": "./",
+      "displayName": "Agenterr",
+      "description": "Investigate production errors and logs from your editor. Connects Claude Code to a self-hosted Agenterr server over MCP — 21 tools plus a debugging workflow skill.",
+      "category": "observability",
+      "homepage": "https://agenterr.dev",
+      "repository": "https://github.com/agenterr/agenterr",
+      "license": "AGPL-3.0-only",
+      "keywords": [
+        "mcp",
+        "observability",
+        "error-tracking",
+        "logs",
+        "self-hosted",
+        "debugging"
+      ]
+    }
+  ]
+}

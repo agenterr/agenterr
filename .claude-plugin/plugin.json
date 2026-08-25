@@ -1,0 +1,46 @@
+{
+  "name": "agenterr",
+  "displayName": "Agenterr",
+  "description": "Investigate production errors and logs from your editor. Connects Claude Code to a self-hosted Agenterr server over MCP \u2014 21 tools plus a debugging workflow skill.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Agenterr",
+    "url": "https://agenterr.dev"
+  },
+  "homepage": "https://agenterr.dev",
+  "repository": "https://github.com/agenterr/agenterr",
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "mcp",
+    "observability",
+    "error-tracking",
+    "logs",
+    "self-hosted",
+    "debugging"
+  ],
+  "userConfig": {
+    "server_url": {
+      "type": "string",
+      "title": "Agenterr server URL",
+      "description": "Base URL of your Agenterr server, with no trailing slash. A local instance is http://localhost:3617.",
+      "required": true,
+      "default": "http://localhost:3617"
+    },
+    "api_key": {
+      "type": "string",
+      "title": "Agenterr API key",
+      "description": "An agt_api_... key for the project you want to read. Mint one with POST /api/v1/projects/{id}/keys. An admin key also works, but it grants instance-wide access.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "mcpServers": {
+    "agenterr": {
+      "type": "http",
+      "url": "${user_config.server_url}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.api_key}"
+      }
+    }
+  }
+}

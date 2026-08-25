@@ -378,6 +378,23 @@ Migrating from a Vector + OpenObserve (or similar) stack? See
 
 ## Agent setup
 
+### Claude Code: install the plugin
+
+The fastest path. Two commands, then Claude Code asks for your server URL
+and an API key — it stores the key in your OS keychain, wires up the MCP
+server, and installs the debugging skill alongside it:
+
+```
+/plugin marketplace add agenterr/agenterr
+/plugin install agenterr@agenterr
+```
+
+There's nothing to install locally: the plugin talks to your server over
+Streamable HTTP, so the only inputs are the URL (`http://localhost:3617`
+for a local instance) and an `agt_api_...` key.
+
+### Any other MCP client
+
 Give an agent access to the twenty-one MCP tools (`list_projects`,
 `list_issues`, `get_issue`, `search_logs`, `get_log_context`,
 `resolve_issue`, `ignore_issue`, `get_stats`, `aggregate_logs`,
@@ -401,7 +418,9 @@ claude mcp add agenterr -- agenterr-mcp --url https://logs.example.com --key agt
 Then install the shipped workflow skill from this repo's `skills/`
 directory — `skills/agenterr-debugging/SKILL.md` — which walks an agent
 through orientation, finding the top issue, pulling log context, fixing the
-code, and resolving the issue once the fix has shipped.
+code, and resolving the issue once the fix has shipped. (The Claude Code
+plugin above bundles this skill already; this step is only for clients
+installed by hand.)
 
 ## The web UI
 

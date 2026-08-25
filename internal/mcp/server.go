@@ -83,7 +83,7 @@ func New(r store.Reader, a store.Admin, nr store.NoiseRules, sr store.SeverityRu
 	}
 	s.mcp = mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "agenterr",
-		Version: "0.1.0",
+		Version: "0.2.0",
 	}, nil)
 	s.registerTools()
 	return s

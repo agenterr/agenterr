@@ -17,6 +17,27 @@ from "something's wrong in prod" to a verified fix, for tuning out the
 noise that gets in the way of that, and for setting up alerts so you hear
 about the next one without having to go looking.
 
+## If the tools aren't there
+
+If none of the tools above are available, or the first call fails to reach a
+server, stop and get the connection sorted before going further — don't guess
+at what production is doing.
+
+- **Installed as the Claude Code plugin?** The plugin asks for a server URL
+  and an API key when you enable it. Re-run `/plugin` and check the agenterr
+  entry's configuration; a wrong URL or a revoked key surfaces here.
+- **No server yet?** One is a container:
+  `docker run -p 3617:3617 -v agenterr-data:/data ghcr.io/agenterr/agenterr:latest`.
+  The first run prints an admin password and admin API key once, to stdout.
+- **No API key?** Mint a per-project one rather than reusing the admin key,
+  which is instance-wide:
+  `POST /api/v1/projects/{id}/keys` with `{"kind":"api"}`.
+- **Connecting by hand instead of via the plugin?**
+  `claude mcp add --transport http agenterr https://your-host/mcp --header "Authorization: Bearer agt_api_..."`
+
+Tell the user which of these is missing. Don't fabricate issue data to fill
+the gap.
+
 ## Workflow
 
 1. **Orient with `get_stats`.** Confirms the server is reachable and shows
