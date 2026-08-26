@@ -46,7 +46,7 @@ func TestStripANSI(t *testing.T) {
 		red   bool
 	}{
 		{"no escapes fast path", "plain log line", "plain log line", false},
-		// Real GORM line from the the-trial-customer trial (runbook, 2026-08-08).
+		// Real GORM line from the trial customer's corpus (runbook, 2026-08-08).
 		{"gorm red line",
 			"2026/08/08 22:18:20 \x1b[31;1mgithub.com/acme/orders-api/internal/repositories/billing/invoice/repo.go:22 \x1b[35;1mrecord not found",
 			"2026/08/08 22:18:20 github.com/acme/orders-api/internal/repositories/billing/invoice/repo.go:22 record not found",
@@ -292,7 +292,7 @@ package main
 
 import "testing"
 
-// Real line shapes from the the-trial-customer trial corpus (runbook).
+// Real line shapes from the trial customer's corpus (runbook).
 var sampleLines = []string{
 	`203.0.113.10 - - [08/Aug/2026:22:26:49 +0000] "POST /webhooks/daily HTTP/2.0" 401 29 "-" "-" 87794 "orders-api@swarm" "http://10.0.0.10:8080" 1ms`,
 	`203.0.113.11 - - [08/Aug/2026:21:59:01 +0000] "POST /api/webhooks/daily HTTP/2.0" 404 18 "-" "-" 87050 "orders-api@swarm" "http://10.0.0.11:8080" 1ms`,
@@ -736,7 +736,7 @@ git commit -m "feat(tmplproto): corpus replay CLI with column/zstd storage simul
 - Create: `docs/superpowers/specs/2026-08-12-step0-gate-report.md`
 
 **Interfaces:**
-- Consumes: the CLI from Task 4; the trial deployment's `agenterr.db` on the the-trial-customer box (tailnet).
+- Consumes: the CLI from Task 4; the trial deployment's `agenterr.db` on the trial customer's box (tailnet).
 - Produces: the gate verdict that unblocks (or stops) the engine plans.
 
 - [ ] **Step 1: Export one full day of logs from the box**
@@ -772,7 +772,7 @@ Create `docs/superpowers/specs/2026-08-12-step0-gate-report.md` containing: the 
 ```markdown
 # Step-0 Gate Report — Template Prototype
 
-**Run:** <date> against corpus <window>, <N> logs (the-trial-customer trial box).
+**Run:** <date> against corpus <window>, <N> logs (the trial customer's box).
 **Spec:** 2026-08-12-template-storage-engine-design.md §8.
 
 ## CLI output

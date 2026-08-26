@@ -6,7 +6,7 @@
 
 ## Problem
 
-The the-trial-customer production trial (see the trial runbook in the infra
+The trial customer's production trial (see the trial runbook in the infra
 repo) measured three defects against OpenObserve running on identical data:
 
 1. **Search blind spot.** FTS5's unicode61 tokenizer fuses ANSI escape

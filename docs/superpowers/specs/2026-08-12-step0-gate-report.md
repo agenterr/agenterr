@@ -1,7 +1,7 @@
 # Step-0 Gate Report — Template Prototype
 
 **Run:** 2026-08-13 against corpus 2026-08-12T00:00:00 → 2026-08-13T00:00:00 UTC,
-317,229 logs (the-trial-customer trial box, `wp` project, all services).
+317,229 logs (the trial customer's box, `wp` project, all services).
 **Spec:** 2026-08-12-template-storage-engine-design.md §8.
 **Window substitution:** the plan named 2026-08-11; the most recent *full* day
 at run time was 2026-08-12, so that window was used instead (same ingest mix).
