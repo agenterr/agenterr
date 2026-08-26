@@ -2,7 +2,8 @@ package main
 
 import "testing"
 
-// Real line shapes from the the-trial-customer trial corpus (runbook).
+// Line shapes representative of a real production corpus. The shapes are
+// what matters to templating; every identifier here is synthetic.
 var sampleLines = []string{
 	`203.0.113.10 - - [08/Aug/2026:22:26:49 +0000] "POST /webhooks/daily HTTP/2.0" 401 29 "-" "-" 87794 "orders-api@swarm" "http://10.0.0.10:8080" 1ms`,
 	`203.0.113.11 - - [08/Aug/2026:21:59:01 +0000] "POST /api/webhooks/daily HTTP/2.0" 404 18 "-" "-" 87050 "orders-api@swarm" "http://10.0.0.11:8080" 1ms`,

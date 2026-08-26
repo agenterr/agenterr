@@ -10,7 +10,8 @@ func TestStripANSI(t *testing.T) {
 		red  bool
 	}{
 		{"no escapes fast path", "plain log line", "plain log line", false},
-		// Real GORM line from the the-trial-customer trial (runbook, 2026-08-08).
+		// GORM's colorized not-found line. Shape is from a real production
+		// corpus; the import path is synthetic.
 		{"gorm red line",
 			"2026/08/08 22:18:20 \x1b[31;1mgithub.com/acme/orders-api/internal/repositories/billing/invoice/repo.go:22 \x1b[35;1mrecord not found",
 			"2026/08/08 22:18:20 github.com/acme/orders-api/internal/repositories/billing/invoice/repo.go:22 record not found",
