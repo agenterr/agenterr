@@ -1,0 +1,40 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.agenterr/agenterr",
+  "title": "Agenterr",
+  "description": "Self-hosted error and log tracking: grouped issues, log search, and log context.",
+  "version": "0.2.1",
+  "websiteUrl": "https://agenterr.dev",
+  "repository": {
+    "url": "https://github.com/agenterr/agenterr",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/agenterr/agenterr:0.2.1",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:3617/mcp",
+        "headers": [
+          {
+            "name": "Authorization",
+            "description": "An agenterr API key for the project to read, as 'Bearer agt_api_...'. Mint one with POST /api/v1/projects/{id}/keys; the first run prints an admin key that also works.",
+            "isRequired": true,
+            "isSecret": true,
+            "format": "string"
+          }
+        ]
+      },
+      "environmentVariables": [
+        {
+          "name": "AGENTERR_LISTEN",
+          "description": "Address the server listens on. Change the port here and in the MCP URL together.",
+          "isRequired": false,
+          "format": "string",
+          "default": ":3617"
+        }
+      ]
+    }
+  ]
+}

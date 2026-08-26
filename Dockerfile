@@ -11,6 +11,11 @@ FROM scratch
 COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY agenterr /agenterr
 
+# Ownership proof for the MCP Registry: the value must equal server.json's
+# `name`, and the registry reads it off the published image (see
+# docs/mcp-registry.md).
+LABEL io.modelcontextprotocol.server.name="io.github.agenterr/agenterr"
+
 VOLUME /data
 ENV AGENTERR_DB=/data/agenterr.db
 EXPOSE 3617
