@@ -1,0 +1,16 @@
+# Lint config for docs/openapi.yaml (make openapi).
+#
+# Two of Redocly's default style rules are wrong for this API specifically,
+# so they are off here rather than worked around in the spec itself:
+#
+#   no-server-example.com  — agenterr is self-hosted software with no hosted
+#     deployment, so a documented server URL is necessarily a placeholder.
+#     agenterr.example.com is the honest one.
+#   operation-4xx-response — /healthz takes no input and no auth. It reports
+#     healthy or degraded; it has no 4xx to document, and inventing one to
+#     satisfy a linter would be a lie in the spec.
+extends:
+  - recommended
+rules:
+  no-server-example.com: off
+  operation-4xx-response: off

@@ -1,10 +1,16 @@
-.PHONY: test lint bench-gates bench-vs-o2
+.PHONY: test lint openapi bench-gates bench-vs-o2
 
 test:
 	go test ./... -race
 
 lint:
 	$$(go env GOPATH)/bin/golangci-lint run
+
+# openapi validates docs/openapi.yaml, the REST v1 spec. Run it after
+# touching internal/api — a spec that has drifted from the router is worse
+# than no spec, because callers trust it.
+openapi:
+	npx --yes @redocly/cli@latest lint docs/openapi.yaml
 
 # bench-gates runs the spec §7 performance gates against a synthetic
 # corpus (see internal/store/enginestore/gates_test.go). It's a local/

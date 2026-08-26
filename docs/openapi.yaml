@@ -1,0 +1,1035 @@
+openapi: 3.1.0
+info:
+  title: Agenterr REST API
+  version: 0.2.0
+  summary: Error and log tracking for a self-hosted Agenterr instance.
+  description: |
+    The `/api/v1` surface of a self-hosted Agenterr instance — the same API the
+    built-in web UI drives.
+
+    **This spec describes an API you run yourself.** There is no hosted
+    Agenterr. Point `servers` at your own instance.
+
+    ### Authentication
+
+    Every route takes `Authorization: Bearer <key>`. Keys come in three kinds,
+    in a hierarchy — an `admin` key satisfies any check:
+
+    | Kind | Prefix | Grants |
+    |---|---|---|
+    | `admin` | `agt_admin_` | Everything, instance-wide. Printed once on first run. |
+    | `api` | `agt_api_` | Read and manage one project's data. |
+    | `ingest` | `agt_ingest_` | Write logs to one project. Nothing else. |
+
+    An `api` or `ingest` key is bound to the project it was minted for. For
+    those keys the bound project is authoritative: a `project` query parameter
+    is ignored rather than trusted, and a record belonging to another project
+    returns `404` rather than `403`, so a scoped key cannot learn that an id
+    exists elsewhere.
+
+    ### Errors
+
+    Every error response is `{"error": "<message>"}` with an appropriate
+    status. Messages are `field: problem` where a specific field is at fault
+    (`"retention_days: must be positive"`).
+
+    ### Timestamps
+
+    Responses render timestamps as RFC 3339 with nanoseconds, in UTC. Query
+    parameters accept RFC 3339.
+  license:
+    name: AGPL-3.0-only
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+  contact:
+    name: Agenterr
+    url: https://agenterr.dev
+
+servers:
+  - url: http://localhost:3617
+    description: A local instance started with the default listen address.
+  - url: https://{host}
+    description: Your own deployment.
+    variables:
+      host:
+        default: agenterr.example.com
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: projects
+    description: Projects and API keys. Admin-only, except the parse toggle.
+  - name: issues
+    description: Grouped errors, with triage state.
+  - name: logs
+    description: Substring search over log bodies, and surrounding context.
+  - name: stats
+    description: Counts, per-day series, and grouped aggregates.
+  - name: noise rules
+    description: Drop chatty logs at ingest, before anything is stored.
+  - name: severity rules
+    description: Lift the severity of plain-text logs that print errors without a level.
+  - name: alert rules
+    description: Fire a webhook when something worth paging on happens.
+  - name: ingest
+    description: Write paths. Require an ingest key.
+  - name: health
+    description: Unauthenticated liveness.
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness and store health
+      description: |
+        Unauthenticated, and pings the store on every call. Point an uptime
+        checker or an orchestrator readiness probe here. Returns `503` with
+        `status: degraded` when the store is unreachable.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+                  db: { type: string, const: ok }
+                  pipeline_depth:
+                    type: integer
+                    description: Logs currently buffered in the ingest pipeline.
+                required: [status, db, pipeline_depth]
+        '503':
+          description: The store could not be reached.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: degraded }
+                  db: { type: string, const: error }
+                required: [status, db]
+
+  /api/v1/ingest:
+    post:
+      tags: [ingest]
+      summary: Write a batch of logs
+      description: |
+        Accepts a JSON array of log objects, or a single object treated as a
+        batch of one. Requires an `ingest` key; the project is taken from the
+        key, never from the body.
+
+        Bodies that are themselves JSON or logfmt have their fields lifted at
+        ingest (`level` becomes severity, `msg`/`message` becomes the body,
+        `time` the timestamp within a ±48h window, the rest become queryable
+        attributes) unless the project has `parse_bodies` disabled.
+
+        Accepts `Content-Encoding: gzip`. Requests larger than the configured
+        `--max-body-bytes` (default 5 MiB) are rejected.
+      operationId: ingestLogs
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/IngestLog'
+                - type: array
+                  items: { $ref: '#/components/schemas/IngestLog' }
+            examples:
+              batch:
+                summary: A batch of one error
+                value:
+                  - severity: error
+                    service: checkout-api
+                    environment: production
+                    body: 'panic: nil pointer'
+      responses:
+        '202':
+          description: Accepted into the pipeline. Not a durability guarantee.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+                    description: Number of records enqueued.
+                required: [accepted]
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413':
+          description: Body exceeded the configured maximum.
+        '429':
+          description: |
+            The pipeline buffer is full. A `Retry-After` header is set.
+          headers:
+            Retry-After:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/logs:
+    post:
+      tags: [ingest]
+      summary: OTLP/HTTP log ingest
+      description: |
+        Standard OTLP/HTTP logs endpoint, for an OpenTelemetry SDK exporter or
+        a Collector `otlphttp` exporter. Accepts protobuf or JSON per the OTLP
+        spec, and gzip-encoded bodies. Requires an `ingest` key.
+      operationId: ingestOtlp
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        description: An OTLP `ExportLogsServiceRequest`.
+        content:
+          application/x-protobuf:
+            schema: { type: string, format: binary }
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Accepted.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: The pipeline buffer is full.
+
+  /api/v1/projects:
+    get:
+      tags: [projects]
+      summary: List every project
+      operationId: listProjects
+      responses:
+        '200':
+          description: Every project on the instance.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Project' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [projects]
+      summary: Create a project
+      description: Requires an admin key.
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Display name. A slug is derived from it.
+                retention_days:
+                  type: integer
+                  minimum: 1
+                  description: Days of logs to keep. Swept hourly.
+              required: [name, retention_days]
+            examples:
+              default:
+                value: { name: checkout-api, retention_days: 30 }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/projects/{id}:
+    patch:
+      tags: [projects]
+      summary: Toggle structured-body parsing
+      description: |
+        `parse_bodies` is the only mutable field; unknown fields are rejected
+        rather than ignored. A project-bound `api` key may flip its own
+        project's toggle, in which case the path id is ignored in favour of the
+        key's project.
+      operationId: updateProject
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                parse_bodies: { type: boolean }
+              required: [parse_bodies]
+              additionalProperties: false
+      responses:
+        '204': { description: Updated. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/keys:
+    post:
+      tags: [projects]
+      summary: Mint an API key for a project
+      description: |
+        Requires an admin key. The key is returned once and is not recoverable.
+      operationId: mintKey
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind:
+                  type: string
+                  enum: [ingest, api]
+                  description: |
+                    `ingest` writes logs and nothing else. `api` reads and
+                    manages that project's data.
+              required: [kind]
+      responses:
+        '201':
+          description: The new key. Shown once.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string, examples: ['agt_api_9c1e...'] }
+                required: [key]
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/issues:
+    get:
+      tags: [issues]
+      summary: List issues
+      description: |
+        Sorted by most recent activity, so the top rows are what is happening
+        now. A project-bound key ignores `project` in favour of its own.
+      operationId: listIssues
+      parameters:
+        - $ref: '#/components/parameters/ProjectQuery'
+        - name: env
+          in: query
+          description: Environment to filter by.
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/IssueStatus' }
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Matching issues.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Issue' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/issues/{id}:
+    get:
+      tags: [issues]
+      summary: Get one issue with its recent events
+      operationId: getIssue
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: The issue and its recent events.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  issue: { $ref: '#/components/schemas/Issue' }
+                  events:
+                    type: array
+                    items: { $ref: '#/components/schemas/Event' }
+                required: [issue, events]
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [issues]
+      summary: Set an issue's triage status
+      description: |
+        Resolve an issue only once a fix has shipped. A resolved issue reopens
+        automatically when a new matching event lands.
+      operationId: setIssueStatus
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { $ref: '#/components/schemas/IssueStatus' }
+              required: [status]
+              additionalProperties: false
+      responses:
+        '204': { description: Updated. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/logs:
+    get:
+      tags: [logs]
+      summary: Search log bodies
+      description: |
+        `q` is matched as an exact substring of the reconstructed body. There
+        is no tokenizer and no full-text index, so this finds exact substrings
+        rather than stemmed or tokenized matches.
+      operationId: searchLogs
+      parameters:
+        - $ref: '#/components/parameters/ProjectQuery'
+        - name: q
+          in: query
+          description: Substring to find in the log body.
+          schema: { type: string }
+        - name: min_severity
+          in: query
+          schema: { $ref: '#/components/schemas/Severity' }
+        - name: service
+          in: query
+          schema: { type: string }
+        - name: env
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Matching logs, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Log' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/logs/{id}/context:
+    get:
+      tags: [logs]
+      summary: Get the logs surrounding one log
+      description: |
+        Returns the window of logs immediately before and after `id`, from the
+        same project — what was happening around a failure.
+      operationId: getLogContext
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+        - name: n
+          in: query
+          description: How many logs to return either side.
+          schema: { type: integer, minimum: 0, default: 20 }
+      responses:
+        '200':
+          description: The context window.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Log' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/stats:
+    get:
+      tags: [stats]
+      summary: Instance or project counts
+      operationId: getStats
+      parameters:
+        - $ref: '#/components/parameters/ProjectQuery'
+        - $ref: '#/components/parameters/Since'
+      responses:
+        '200':
+          description: Counts, a per-day series, and engine metrics.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Stats' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/aggregate:
+    get:
+      tags: [stats]
+      summary: Group logs by service, severity, hour, or day
+      description: |
+        Served from precomputed rollups rather than a segment scan, which is
+        what keeps this fast. An admin key must supply `project` explicitly;
+        there is no all-projects mode.
+      operationId: aggregateLogs
+      parameters:
+        - name: group_by
+          in: query
+          required: true
+          schema: { type: string, enum: [service, severity, hour, day] }
+        - $ref: '#/components/parameters/ProjectQuery'
+        - $ref: '#/components/parameters/Since'
+        - $ref: '#/components/parameters/Until'
+      responses:
+        '200':
+          description: One row per group.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AggregateRow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/projects/{id}/noise-rules:
+    get:
+      tags: [noise rules]
+      summary: List a project's noise rules
+      operationId: listNoiseRules
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      responses:
+        '200':
+          description: The project's rules, with drop counts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/NoiseRule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [noise rules]
+      summary: Create or update a noise rule
+      description: Include `id` to update an existing rule.
+      operationId: upsertNoiseRule
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NoiseRuleInput' }
+      responses:
+        '200':
+          description: The saved rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NoiseRule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/noise-rules/{id}:
+    delete:
+      tags: [noise rules]
+      summary: Delete a noise rule
+      operationId: deleteNoiseRule
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/noise-report:
+    get:
+      tags: [noise rules]
+      summary: Top services by volume, and what each rule dropped
+      description: |
+        The report for deciding what to silence. An admin key must supply
+        `project` explicitly.
+      operationId: getNoiseReport
+      parameters:
+        - $ref: '#/components/parameters/ProjectQuery'
+        - name: hours
+          in: query
+          description: Window to report over.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Volume by service plus per-rule drop counts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NoiseReport' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/projects/{id}/severity-rules:
+    get:
+      tags: [severity rules]
+      summary: List a project's severity rules
+      operationId: listSeverityRules
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      responses:
+        '200':
+          description: The project's rules, with lift counts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SeverityRule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [severity rules]
+      summary: Create or update a severity rule
+      description: |
+        A rule is a service scope, a Go regexp matched against the body, and a
+        target severity. It fires only on logs still at `INFO` or below, and it
+        only raises severity. The first matching rule wins. A project is capped
+        at 100 rules.
+      operationId: upsertSeverityRule
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SeverityRuleInput' }
+      responses:
+        '200':
+          description: The saved rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SeverityRule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/severity-rules/{id}:
+    delete:
+      tags: [severity rules]
+      summary: Delete a severity rule
+      operationId: deleteSeverityRule
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/projects/{id}/alert-rules:
+    get:
+      tags: [alert rules]
+      summary: List a project's alert rules
+      operationId: listAlertRules
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      responses:
+        '200':
+          description: The project's rules, with last-fired state.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AlertRule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [alert rules]
+      summary: Create or update an alert rule
+      description: Include `id` to update an existing rule.
+      operationId: upsertAlertRule
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertRuleInput' }
+      responses:
+        '200':
+          description: The saved rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertRule' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/alert-rules/{id}:
+    delete:
+      tags: [alert rules]
+      summary: Delete an alert rule
+      operationId: deleteAlertRule
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      responses:
+        '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/alert-rules/{id}/test:
+    post:
+      tags: [alert rules]
+      summary: Fire a rule now with a sample issue
+      description: |
+        Delivers synchronously and reports the outcome, so there is no need to
+        poll `last_error`. The payload carries `"test": true`.
+      operationId: testAlertRule
+      parameters: [{ $ref: '#/components/parameters/PathId' }]
+      responses:
+        '200':
+          description: The webhook accepted the delivery.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivered: { type: boolean, const: true }
+                required: [delivered]
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502':
+          description: Delivery failed. The message carries the reason.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <key>`. See the Authentication section for the
+        key hierarchy.
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    ProjectQuery:
+      name: project
+      in: query
+      description: |
+        Project to scope to. Honoured for an admin key; ignored for a
+        project-bound key, whose own project always wins.
+      schema: { type: integer, format: int64 }
+    Since:
+      name: since
+      in: query
+      description: Only include records at or after this time (RFC 3339).
+      schema: { type: string, format: date-time }
+    Until:
+      name: until
+      in: query
+      description: Only include records before this time (RFC 3339).
+      schema: { type: string, format: date-time }
+    Limit:
+      name: limit
+      in: query
+      description: Maximum rows to return.
+      schema: { type: integer, minimum: 0 }
+
+  responses:
+    BadRequest:
+      description: |
+        Malformed request. The message names the offending field, as in
+        `"retention_days: must be positive"`.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing key, unknown key, or a key of insufficient kind.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: |
+        No such record — or one that exists in a project this key is not bound
+        to, which is deliberately indistinguishable.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      description: The shape of every error response.
+      properties:
+        error: { type: string }
+      required: [error]
+
+    Severity:
+      type: string
+      enum: [TRACE, DEBUG, INFO, WARN, ERROR, FATAL, UNKNOWN]
+      description: |
+        Rendered uppercase in responses. Ingest accepts any case, plus common
+        aliases from structured loggers.
+
+    IssueStatus:
+      type: string
+      enum: [open, resolved, ignored]
+
+    Project:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        slug: { type: string, description: Derived from the name; unique. }
+        retention_days: { type: integer }
+        parse_bodies:
+          type: boolean
+          description: Whether structured bodies are parsed at ingest.
+      required: [id, name, slug, retention_days, parse_bodies]
+
+    Log:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        project_id: { type: integer, format: int64 }
+        time: { type: string, format: date-time }
+        severity: { $ref: '#/components/schemas/Severity' }
+        body: { type: string }
+        service: { type: string }
+        environment: { type: string }
+        release: { type: string }
+        trace_id: { type: string }
+        attrs:
+          type: object
+          additionalProperties: { type: string }
+      required: [id, project_id, time, severity, body, service, environment, release, trace_id]
+
+    Issue:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        project_id: { type: integer, format: int64 }
+        fingerprint:
+          type: string
+          description: Stable grouping key. Equal fingerprints are the same issue.
+        title: { type: string }
+        severity: { $ref: '#/components/schemas/Severity' }
+        status: { $ref: '#/components/schemas/IssueStatus' }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        count: { type: integer, format: int64 }
+      required: [id, project_id, fingerprint, title, severity, status, first_seen, last_seen, count]
+
+    Event:
+      type: object
+      description: One occurrence of an issue, with the log that produced it.
+      properties:
+        log_id: { type: integer, format: int64 }
+        issue_id: { type: integer, format: int64 }
+        time: { type: string, format: date-time }
+        log: { $ref: '#/components/schemas/Log' }
+      required: [log_id, issue_id, time, log]
+
+    Stats:
+      type: object
+      properties:
+        logs: { type: integer, format: int64 }
+        events: { type: integer, format: int64 }
+        open_issues: { type: integer, format: int64 }
+        dropped:
+          type: integer
+          format: int64
+          description: Records dropped by noise rules, summed.
+        per_day:
+          type: array
+          items:
+            type: object
+            properties:
+              day: { type: string, examples: ['2026-08-25'] }
+              logs: { type: integer, format: int64 }
+              events: { type: integer, format: int64 }
+            required: [day, logs, events]
+        engine:
+          type: object
+          description: |
+            Storage-engine metrics. Present only on the template storage
+            engine backend.
+          properties:
+            segments: { type: integer, format: int64 }
+            rows: { type: integer, format: int64 }
+            raw_rows:
+              type: integer
+              format: int64
+              description: Rows stored raw because templating did not apply.
+            size_bytes: { type: integer, format: int64 }
+            mem_rows:
+              type: integer
+              format: int64
+              description: Rows in the memtable, not yet flushed to a segment.
+      required: [logs, events, open_issues, dropped, per_day]
+
+    AggregateRow:
+      type: object
+      properties:
+        key:
+          type: string
+          description: The group's value — a service name, severity, hour, or day.
+        logs: { type: integer, format: int64 }
+        events: { type: integer, format: int64 }
+      required: [key, logs, events]
+
+    NoiseRuleInput:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Include to update an existing rule; omit to create.
+        kind:
+          type: string
+          enum: [severity_floor, drop_match, sample]
+          description: |
+            `severity_floor` drops records below `severity` for a service.
+            `drop_match` drops records whose body contains `pattern`.
+            `sample` keeps 1 in every `n` records at or below `severity`.
+        service: { type: string, description: Empty means any service. }
+        severity: { $ref: '#/components/schemas/Severity' }
+        pattern: { type: string }
+        n: { type: integer, description: 'Sampling divisor, for `sample`.' }
+        enabled: { type: boolean, default: true }
+      required: [kind]
+
+    NoiseRule:
+      allOf:
+        - $ref: '#/components/schemas/NoiseRuleInput'
+        - type: object
+          properties:
+            dropped_count:
+              type: integer
+              format: int64
+              description: |
+                Records this rule has dropped. Persisted periodically and once
+                more at shutdown, so a crash can lose the most recent counts.
+          required: [id, enabled, dropped_count]
+
+    NoiseReport:
+      type: object
+      properties:
+        top_services:
+          type: array
+          items:
+            type: object
+            properties:
+              service: { type: string }
+              logs: { type: integer, format: int64 }
+            required: [service, logs]
+        rules:
+          type: array
+          items: { $ref: '#/components/schemas/NoiseRule' }
+        total_dropped: { type: integer, format: int64 }
+      required: [top_services, rules, total_dropped]
+
+    SeverityRuleInput:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Include to update an existing rule; omit to create.
+        service: { type: string, description: Empty means any service. }
+        pattern: { type: string, description: A Go regexp matched against the body. }
+        severity:
+          $ref: '#/components/schemas/Severity'
+          description: The severity to raise a matching log to.
+        enabled: { type: boolean, default: true }
+      required: [pattern, severity]
+
+    SeverityRule:
+      allOf:
+        - $ref: '#/components/schemas/SeverityRuleInput'
+        - type: object
+          properties:
+            lifted_count:
+              type: integer
+              format: int64
+              description: Logs whose severity this rule has raised.
+          required: [id, enabled, lifted_count]
+
+    AlertRuleInput:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Include to update an existing rule; omit to create.
+        name: { type: string }
+        kind:
+          type: string
+          enum: [new_issue, regression, threshold]
+          description: |
+            `new_issue` fires the first time a fingerprint is seen.
+            `regression` fires when a resolved issue reopens.
+            `threshold` fires at `n` matching events within `window_minutes`.
+        service: { type: string, description: Empty means any service. }
+        environment: { type: string, description: Empty means any environment. }
+        min_severity: { $ref: '#/components/schemas/Severity' }
+        n: { type: integer, description: 'Event count, for `threshold`.' }
+        window_minutes: { type: integer, description: 'Window, for `threshold`.' }
+        cooldown_seconds:
+          type: integer
+          default: 900
+          description: |
+            A rule fires at most once per cooldown. Suppressed fires are never
+            queued. Cooldowns survive a restart; a partial threshold window
+            does not.
+        url: { type: string, format: uri, description: Webhook target. }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        enabled: { type: boolean, default: true }
+      required: [name, kind, url]
+
+    AlertRule:
+      allOf:
+        - $ref: '#/components/schemas/AlertRuleInput'
+        - type: object
+          properties:
+            project_id: { type: integer, format: int64 }
+            last_fired:
+              type: [string, 'null']
+              format: date-time
+            last_error:
+              type: string
+              description: Outcome of the most recent delivery attempt.
+          required: [id, project_id, enabled, last_fired, last_error]
+
+    IngestLog:
+      type: object
+      description: |
+        One record. Every field is optional; a body-less record is accepted
+        rather than rejected. Timestamps outside a ±48h window are replaced
+        with receipt time.
+      properties:
+        body:
+          type: string
+          description: |
+            The log line. `message` and `msg` are accepted as aliases. If the
+            value is itself JSON or logfmt, its fields are lifted at ingest.
+        severity:
+          type: string
+          description: |
+            Any case. Omit and let the server derive it — from a structured
+            body's level, from a severity rule, or from a `panic:` prefix.
+        service: { type: string }
+        environment: { type: string }
+        release: { type: string }
+        trace_id: { type: string }
+        timestamp:
+          description: |
+            RFC 3339, or Unix seconds or milliseconds as a number. `time` and
+            `ts` are accepted as aliases.
+          oneOf:
+            - { type: string, format: date-time }
+            - { type: number }
+        attributes:
+          type: object
+          description: Queryable key/value metadata.
+          additionalProperties: true

@@ -376,6 +376,19 @@ always logged and counted, visible in ship's own periodic self-log line
 Migrating from a Vector + OpenObserve (or similar) stack? See
 [docs/replacing-vector-openobserve.md](docs/replacing-vector-openobserve.md).
 
+### The REST API
+
+Every route the web UI drives is documented in
+[`docs/openapi.yaml`](docs/openapi.yaml) — an OpenAPI 3.1 spec covering
+projects and keys, issues, log search and context, stats and aggregates,
+all three rule kinds, both ingest edges, and `/healthz`. Point any OpenAPI
+tooling at it to generate a client, or read it directly for the auth model
+(the `admin`/`api`/`ingest` key hierarchy and how project scoping works).
+
+It is also published at
+[agenterr.dev/openapi.yaml](https://agenterr.dev/openapi.yaml). `make openapi`
+validates it; run that after changing `internal/api`.
+
 ## Agent setup
 
 ### Claude Code: install the plugin
